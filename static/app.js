@@ -591,6 +591,7 @@ function rtForget(id) {
 function delBtn(label, aria, fn) { const b = abtn(label, fn, "ghost danger sm del", "trash"); b.setAttribute("aria-label", aria); return b; }
 function rtBuild(focusId) {
   const f = RT.f; const el = RT.el = {};
+  $("rtDlg").classList.remove("rooming");
   const fld = (id, label, control, help) => h("div", { class: "field" }, h("label", { for: id }, label), control, help ? h("p", { class: "faint", id: id + "-help" }, help) : null);
   // participants
   const search = h("input", { id: "rtSearch", type: "search", placeholder: "Search lanes…", value: RT.q, oninput: (e) => { RT.q = e.target.value; rtLanesRender(); } });
@@ -831,82 +832,164 @@ async function rtStart() {
 const fmtS = (v) => { if (typeof v !== "number" || !isFinite(v)) return "—"; const t = Math.max(0, Math.round(v)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; };
 const SP_LABEL = { idle: "idle", working: "working…", stalled: "stalled", disconnected: "disconnected", budget_exhausted: "budget exhausted" };
 const SP_TONE = { idle: "", working: "info", stalled: "warn", disconnected: "bad", budget_exhausted: "bad" };
-// @mentions and [E#] references become highlighted spans; everything stays textContent.
-function rtText(t) {
-  const out = []; const re = /(@[\w.-]+|\[E\d+\])/g; let last = 0; let m;
+// Inline formatting: **bold**, `code`, @mentions and [E#] references (clickable). Everything stays textContent.
+function rtText(t, room) {
+  const out = []; const re = /(\*\*[^*\n]+\*\*|`[^`\n]+`|@[\w.-]+|\[E\d+(?:\s*[–-]\s*E?\d+)?(?:,\s*E\d+(?:\s*[–-]\s*E?\d+)?)*\]|(?<![\w*])\*(?!\s)[^*\n]+?\*(?![\w*])|(?<![\w_])_(?!\s)[^_\n]+?_(?![\w_]))/g; let last = 0; let m;
   while ((m = re.exec(t))) {
     if (m.index > last) out.push(t.slice(last, m.index));
-    out.push(h("span", { class: m[1][0] === "@" ? "mention" : "eref" }, m[1]));
-    last = m.index + m[1].length;
+    const tok = m[1];
+    if (tok.startsWith("**")) out.push(h("strong", {}, tok.slice(2, -2)));
+    else if (tok[0] === "`") out.push(h("code", {}, tok.slice(1, -1)));
+    else if (tok[0] === "@") out.push(h("span", { class: "mention" }, tok));
+    else if (tok[0] === "*" || tok[0] === "_") out.push(h("em", {}, tok.slice(1, -1)));
+    else if (room) { // [E4] / [E2–E7] / [E4, E5]: every label becomes its own jump link
+      out.push("[");
+      tok.slice(1, -1).split(/(E\d+)/).forEach((part) => {
+        if (/^E\d+$/.test(part)) out.push(h("button", { type: "button", class: "eref linkish", title: `Jump to ${part}`, onclick: () => rtJump(room, part) }, part));
+        else if (part) out.push(h("span", { class: "eref" }, part));
+      });
+      out.push("]");
+    }
+    else out.push(h("span", { class: "eref" }, tok));
+    last = m.index + tok.length;
   }
   if (last < t.length) out.push(t.slice(last));
   return out;
 }
+// Light, safe block formatting for provider text: headings, bullet/numbered lists, quotes, code fences, paragraphs.
+function rtMd(src, room) {
+  const lines = String(src || "").replace(/\r\n?/g, "\n").split("\n"); const out = []; let para = [], list = null, code = null;
+  const flushP = () => { if (para.length) { out.push(h("p", {}, ...rtText(para.join(" "), room))); para = []; } };
+  const flushL = () => { if (list) { out.push(list); list = null; } };
+  for (const raw of lines) {
+    if (code) { if (/^\s*```/.test(raw)) { out.push(h("pre", { class: "evcode" }, code.join("\n"))); code = null; } else code.push(raw); continue; }
+    if (/^\s*```/.test(raw)) { flushP(); flushL(); code = []; continue; }
+    const line = raw.trimEnd();
+    if (!line.trim()) { flushP(); flushL(); continue; }
+    let m;
+    if ((m = /^\s*(#{1,6})\s+(.*)$/.exec(line))) { flushP(); flushL(); out.push(h(m[1].length <= 2 ? "h4" : "h5", {}, ...rtText(m[2].replace(/\s*#+$/, ""), room))); continue; }
+    if ((m = /^\s*([-*+]|\d+[.)])\s+(.*)$/.exec(line))) {
+      flushP(); const tag = /\d/.test(m[1]) ? "ol" : "ul";
+      if (!list || list.tagName.toLowerCase() !== tag) { flushL(); list = h(tag, {}); }
+      list.append(h("li", {}, ...rtText(m[2], room))); continue;
+    }
+    if ((m = /^\s*>\s?(.*)$/.exec(line))) { flushP(); flushL(); out.push(h("blockquote", {}, ...rtText(m[1], room))); continue; }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { flushP(); flushL(); out.push(h("hr", {})); continue; }
+    if (list && /^\s{2,}\S/.test(raw)) { list.lastChild.append(" ", ...rtText(line.trim(), room)); continue; }
+    flushL(); para.push(line.trim());
+  }
+  if (code) out.push(h("pre", { class: "evcode" }, code.join("\n")));
+  flushP(); flushL();
+  return out;
+}
+function rtJump(room, label) {
+  const t = room.byLabel[label]; if (!t) return;
+  if (t.li.classList.contains("filtered")) rtFilter(room, null);
+  t.li.scrollIntoView({ block: "center", behavior: "smooth" }); t.li.focus({ preventScroll: true });
+  t.li.classList.add("flash"); setTimeout(() => t.li.classList.remove("flash"), 1600);
+}
+const RT_KIND = { opening: "Opening", closing: "Closing", system: "Studio", memo: "Memo", gap: "Gap" };
+const RT_CLAMP_CHARS = 1100, RT_CLAMP_LINES = 16;
+const rtTint = (room, k) => { if (!k) return null; if (!(k in room.tints)) room.tints[k] = Object.keys(room.tints).length % 6; return room.tints[k]; };
 // Feed items are threaded: replies link to the event they answer; passes are compact and can be hidden.
 function rtEvent(ev, sps, room) {
   const sp = sps[ev.speaker]; const name = sp ? sp.name : ev.speaker || (ev.kind === "system" ? "Studio" : ev.kind);
   const label = ev.label || `E${ev.seq}`;
-  const li = h("li", { class: "ev ev-" + ev.kind, id: `rtev-${room.id}-${label}`, tabindex: "-1" });
+  const tint = rtTint(room, ev.speaker);
+  const li = h("li", { class: "ev ev-" + ev.kind + (tint !== null ? " sp" + tint : ""), id: `rtev-${room.id}-${label}`, tabindex: "-1", "data-sp": ev.speaker || "" });
   room.byLabel[label] = { li, name };
   if (ev.kind === "pass") {
     li.append(h("span", { class: "evp" }, h("code", {}, label), ` ${name} passed`, ev.content ? ` · ${ev.content}` : ""));
-    return li;
+    return rtApplyFilter(room, li);
   }
   const refs = Array.isArray(ev.reply_to) ? ev.reply_to : ev.reply_to ? [ev.reply_to] : [];
-  const replies = refs.map((r) => {
-    const tgt = room.byLabel[r];
-    return h("button", { type: "button", class: "linkish evr", onclick: () => {
-      const t = room.byLabel[r]; if (!t) return;
-      t.li.scrollIntoView({ block: "center" }); t.li.focus({ preventScroll: true });
-      t.li.classList.add("flash"); setTimeout(() => t.li.classList.remove("flash"), 1600);
-    } }, `↳ replying to ${r}${tgt ? " · " + tgt.name : ""}`);
-  });
+  const replies = refs.map((r) => { const tgt = room.byLabel[r];
+    return h("button", { type: "button", class: "linkish evr", onclick: () => rtJump(room, r) }, `↳ replying to ${r}${tgt ? " · " + tgt.name : ""}`); });
   if (refs.length) li.classList.add("reply");
   const mentions = (ev.mentions || []).map((m) => { const ms = sps[m]; return h("span", { class: "tag mention" }, `@${ms ? ms.name : m}`); });
+  const text = String(ev.content || "");
+  const body = h("div", { class: "evb" }, ...rtMd(text, room));
+  const long = text.length > RT_CLAMP_CHARS || text.split("\n").length > RT_CLAMP_LINES;
+  let more = null;
+  if (long) {
+    more = h("button", { type: "button", class: "linkish evmore", "aria-expanded": "false" }, "Show full message");
+    const set = (open) => { body.classList.toggle("clamped", !open); more.setAttribute("aria-expanded", open ? "true" : "false"); more.textContent = open ? "Show less" : "Show full message"; };
+    more.addEventListener("click", () => { const open = body.classList.contains("clamped"); set(open); if (!open) li.scrollIntoView({ block: "nearest" }); });
+    li._clamp = set; set(!room.collapse);
+  }
+  const kind = RT_KIND[ev.kind];
   li.append(...replies,
-    h("div", { class: "evh" }, h("code", {}, label), h("strong", {}, name), ev.kind === "gap" ? h("span", { class: "pill warn" }, "gap") : null,
-      ...mentions, ev.latency_s != null ? h("span", {}, `${ev.latency_s}s`) : null, ev.seen_label ? h("span", {}, `saw up to ${ev.seen_label}`) : null),
-    h("div", { class: "evb" }, ...rtText(String(ev.content || ""))));
-  return li;
+    h("div", { class: "evh" },
+      h("span", { class: "evav", "aria-hidden": "true" }, ev.kind === "system" ? "AS" : initials(name)),
+      h("strong", { class: "evname" }, name), kind ? h("span", { class: "evkind" + (ev.kind === "gap" ? " warn" : "") }, kind) : null, ...mentions,
+      h("span", { class: "evmeta" }, h("code", {}, label), ev.latency_s != null ? ` · ${ev.latency_s}s` : "", ev.seen_label ? ` · saw up to ${ev.seen_label}` : "")),
+    body);
+  if (more) li.append(more);
+  return rtApplyFilter(room, li);
+}
+function rtApplyFilter(room, li) { li.classList.toggle("filtered", !!room.only && li.dataset.sp !== room.only); return li; }
+function rtFilter(room, key) {
+  room.only = key && room.only !== key ? key : null;
+  room.feed.querySelectorAll("li.ev").forEach((li) => rtApplyFilter(room, li));
+  room.feed.classList.toggle("filtering", !!room.only);
+  room.chips.querySelectorAll("button[data-sp]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.sp === room.only ? "true" : "false"));
+  room.showAll.hidden = !room.only;
 }
 function rtDivider(text) { return h("li", { class: "evdiv", role: "presentation" }, h("span", {}, text)); }
 function rtCoverage(c) {
   if (!c) return h("p", { class: "muted" }, "No coverage summary was returned.");
   if (typeof c === "string") return h("div", { class: "note" }, icon("info"), h("span", {}, c));
   const valid = c.valid; const text = c.summary || "";
-  return h("div", { class: "note " + (valid === true ? "ok" : "bad"), role: "status" }, icon(valid === true ? "check" : "alert"), h("div", { class: "section" },
-    h("strong", {}, valid === true ? "Coverage: valid roundtable" : valid === false ? "Coverage: NOT a valid four-provider roundtable" : "Coverage summary"),
-    text ? h("p", {}, text) : null));
+  const head = valid === true ? "Coverage: valid roundtable" : valid === false ? "Coverage: NOT a valid four-provider roundtable" : "Coverage summary";
+  return h("div", { class: "note rt-cov " + (valid === true ? "ok" : "bad"), role: "status" }, icon(valid === true ? "check" : "alert"),
+    text ? h("details", {}, h("summary", {}, h("strong", {}, head)), h("p", {}, text)) : h("strong", {}, head));
 }
-// The room replaces the modal's centre and right columns; the feed is append-only and polled every second.
+const rtPref = (k, d) => { try { const v = localStorage.getItem("aesop.rt." + k); return v === null ? d : v === "1"; } catch { return d; } };
+const rtSetPref = (k, v) => { try { localStorage.setItem("aesop.rt." + k, v ? "1" : "0"); } catch { /* storage unavailable */ } };
+// The room takes over the whole window: a wide reading column for the conversation and a memo column beside it.
 function rtRoom(id, readOnly) {
   const s = RT; if (!s) return;
   clearTimeout(s.timer); const gen = ++s.gen; s.roomId = id;
-  const room = { after: 0, id, byLabel: {}, phase: null, opened: false, closed: false, passes: 0 };
+  const room = { after: 0, id, byLabel: {}, phase: null, opened: false, closed: false, passes: 0, tints: {}, only: null, collapse: rtPref("collapse", true) };
   const clock = h("span", { class: "rt-clock" }, "—"); const stPill = h("span");
-  const chips = h("div", { class: "rt-chips", "aria-label": "Speakers" });
-  const feed = h("ol", { class: "rt-feed", "aria-label": "Roundtable feed", tabindex: "0" });
+  const chips = room.chips = h("div", { class: "rt-chips", role: "group", "aria-label": "Speakers (select one to show only their messages)" });
+  const feed = room.feed = h("ol", { class: "rt-feed" + (rtPref("big", false) ? " big" : ""), "aria-label": "Roundtable feed", tabindex: "0" });
   const announce = h("div", { class: "sr-only", "aria-live": "polite" });
-  const memo = h("div", { class: "section" }); const cov = h("div");
+  const memo = h("div", { class: "rt-memo" }); const cov = h("div");
   const ctl = (label, op, ico) => abtn(label, async () => {
     try { const r = await api("POST", `/api/roundtables/${id}/${op}`); if (RT === s) rtSay(`${label}: ${(r.status && r.status.live_status) || r.live_status || r.status || "requested"}.`); }
     catch (e) { if (RT === s) rtSay(e.message, "bad"); }
   }, "sm", ico);
   const pauseBtn = ctl("Pause", "pause", "clock"), resumeBtn = ctl("Resume", "resume", "send"), stopBtn = ctl("Stop", "stop", "stop");
   stopBtn.classList.add("danger");
-  const exportBtn = abtn("Export record", async () => { try { await download(`/api/roundtables/${id}/record`, `roundtable-record-${id}.json`); } catch (e) { rtSay(e.message, "bad"); } }, "sm", "download");
-  const passBtn = h("button", { type: "button", class: "btn ghost sm", "aria-pressed": "false", hidden: true, onclick: () => {
-    const show = feed.classList.toggle("show-pass"); passBtn.setAttribute("aria-pressed", show ? "true" : "false");
-    passBtn.textContent = `${show ? "hide" : "show"} passes (${room.passes})`; } }, "show passes (0)");
+  const exportBtn = abtn("Export record", async () => { try { await download(`/api/roundtables/${id}/record`, `roundtable-record-${id}.json`); } catch (e) { rtSay(e.message, "bad"); } }, "ghost sm", "download");
+  const toggle = (label, on, fn) => { const b = h("button", { type: "button", class: "btn ghost sm", "aria-pressed": on ? "true" : "false" }, label);
+    b.addEventListener("click", () => { const v = b.getAttribute("aria-pressed") !== "true"; b.setAttribute("aria-pressed", v ? "true" : "false"); fn(v); }); return b; };
+  const passBtn = toggle("Show passes (0)", false, (v) => { feed.classList.toggle("show-pass", v); });
+  passBtn.hidden = true;
+  const clampBtn = toggle("Expand all", !room.collapse, (v) => {
+    room.collapse = !v; rtSetPref("collapse", room.collapse);
+    feed.querySelectorAll("li.ev").forEach((li) => li._clamp && li._clamp(v)); });
+  const bigBtn = toggle("Larger text", feed.classList.contains("big"), (v) => { feed.classList.toggle("big", v); rtSetPref("big", v); });
+  const memoBtn = toggle("Memo panel", rtPref("memo", true), (v) => { s.el.body.classList.toggle("memo-off", !v); rtSetPref("memo", v); });
+  room.showAll = h("button", { type: "button", class: "btn ghost sm", hidden: true, onclick: () => rtFilter(room, null) }, "Show everyone");
   const back = btn("Back to setup", () => { clearTimeout(s.timer); s.gen++; rtBuild(); }, "ghost sm");
+  const latest = h("button", { type: "button", class: "btn sm rt-latest", hidden: true, onclick: () => { feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" }); } }, "Jump to latest ↓");
+  feed.addEventListener("scroll", () => { latest.hidden = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80; });
   pauseBtn.hidden = resumeBtn.hidden = stopBtn.hidden = true;
   const main = h("section", { class: "rt-col rt-main rt-room", "aria-label": "Live room" },
-    h("div", { class: "card-head" }, h("div", { class: "ttl" }, h("h3", {}, readOnly ? "Roundtable record" : "Live room"), stPill), clock),
-    chips, h("div", { class: "row" }, pauseBtn, resumeBtn, stopBtn, exportBtn, passBtn, back), cov, feed, announce);
+    h("div", { class: "rt-roomhead" },
+      h("div", { class: "ttl" }, h("h3", {}, readOnly ? "Roundtable record" : "Live room"), stPill, clock),
+      h("div", { class: "row rt-roomctl" }, pauseBtn, resumeBtn, stopBtn, exportBtn, back)),
+    h("div", { class: "rt-bar" }, chips,
+      h("div", { class: "row rt-viewctl", role: "toolbar", "aria-label": "Reading options" }, room.showAll, clampBtn, bigBtn, passBtn, memoBtn)),
+    cov, h("div", { class: "rt-feedwrap" }, feed, latest), announce);
   const side = h("section", { class: "rt-col rt-side", "aria-label": "Memo" }, memo);
-  s.el.body.replaceChildren(s.el.part, main, side); s.el.foot.hidden = true;
+  $("rtDlg").classList.add("rooming");
+  s.el.body.classList.toggle("memo-off", !rtPref("memo", true));
+  s.el.body.replaceChildren(main, side); s.el.foot.hidden = true;
   memo.replaceChildren(h("h3", {}, "Memo"), h("p", { class: "muted" }, "The memo appears here when the session writes one."));
-  let pending = 0, lastSay = 0, memoSig = "";
+  let pending = 0, lastSay = 0, memoSig = "", chipSig = "";
   const tick = async () => {
     if (RT !== s || s.gen !== gen) return;
     let d;
@@ -914,7 +997,8 @@ function rtRoom(id, readOnly) {
     catch (e) { if (RT === s && s.gen === gen) { rtSay(e.message, "bad"); s.timer = setTimeout(tick, 3000); } return; }
     if (RT !== s || s.gen !== gen) return;
     const st = d.status || {}; const sps = st.speakers || {};
-    const stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+    Object.keys(sps).forEach((k) => rtTint(room, k));
+    const stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
     for (const ev of d.events || []) {
       if (ev.seq <= room.after) continue; room.after = ev.seq;
       if (ev.kind === "opening" && !room.opened) { room.opened = true; feed.append(rtDivider("Openings (independent)")); }
@@ -922,17 +1006,25 @@ function rtRoom(id, readOnly) {
       else if (ev.phase && ev.phase !== room.phase && room.phase !== null && !["opening", "closing", "pass"].includes(ev.kind)) feed.append(rtDivider(`Phase: ${ev.phase}`));
       if (ev.phase && ev.kind !== "pass") room.phase = ev.phase;
       feed.append(rtEvent(ev, sps, room));
-      if (ev.kind === "pass") { room.passes++; passBtn.hidden = false; passBtn.textContent = `${feed.classList.contains("show-pass") ? "hide" : "show"} passes (${room.passes})`; } else pending++;
+      if (ev.kind === "pass") { room.passes++; passBtn.hidden = false; passBtn.textContent = `Show passes (${room.passes})`; } else pending++;
     }
-    if (stick) feed.scrollTop = feed.scrollHeight;
+    if (stick && !readOnly) feed.scrollTop = feed.scrollHeight;
+    latest.hidden = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
     if (pending && Date.now() - lastSay > 4000) { announce.textContent = `${pending} new item${pending > 1 ? "s" : ""} in the roundtable feed.`; pending = 0; lastSay = Date.now(); }
     clock.textContent = `${fmtS(st.elapsed_s)} elapsed · ${fmtS(st.remaining_s)} left of ${fmtS(st.limit_s)}`;
     stPill.replaceChildren(statePill(st.live_status || "—"));
-    chips.replaceChildren(...Object.entries(sps).map(([k, v]) => h("span", { class: "rt-chip" }, h("span", { class: "dot " + (SP_TONE[v.state] || ""), "aria-hidden": "true" }), h("strong", {}, v.name || k),
-      h("span", {}, SP_LABEL[v.state] || v.state || "unknown"),
-      h("span", { class: "faint" }, `${v.turns || 0} turns${v.last_latency_s != null ? ` · ${v.last_latency_s}s` : ""}${typeof v.cost_usd === "number" ? ` · ${fmtCost(v.cost_usd)}` : ""}`))));
+    const sig = JSON.stringify(sps);
+    if (sig !== chipSig) {
+      chipSig = sig;
+      chips.replaceChildren(...Object.entries(sps).map(([k, v]) => h("button", { type: "button", class: "rt-chip sp" + rtTint(room, k), "data-sp": k, "aria-pressed": room.only === k ? "true" : "false",
+        title: `Show only ${v.name || k}`, onclick: () => rtFilter(room, k) },
+        h("span", { class: "evav", "aria-hidden": "true" }, initials(v.name || k)),
+        h("span", { class: "rt-chipt" }, h("strong", {}, v.name || k),
+          h("span", { class: "faint" }, `${SP_LABEL[v.state] || v.state || "unknown"} · ${v.turns || 0} turns${v.last_latency_s != null ? ` · ${v.last_latency_s}s` : ""}${typeof v.cost_usd === "number" ? ` · ${fmtCost(v.cost_usd)}` : ""}`)),
+        h("span", { class: "dot " + (SP_TONE[v.state] || ""), "aria-hidden": "true" }))));
+    }
     const ms = st.memo ? (typeof st.memo === "string" ? st.memo : JSON.stringify(st.memo, null, 1)) : "";
-    if (ms && ms !== memoSig) { memoSig = ms; memo.replaceChildren(h("h3", {}, "Memo"), h("pre", { class: "out" }, ms)); }
+    if (ms && ms !== memoSig) { memoSig = ms; memo.replaceChildren(h("h3", {}, "Memo"), typeof st.memo === "string" ? h("div", { class: "evb rt-memob" }, ...rtMd(ms, room)) : h("pre", { class: "out" }, ms)); }
     const ended = LIVE_END.includes(st.live_status);
     const focused = document.activeElement;
     pauseBtn.hidden = readOnly || ended || st.live_status === "PAUSED";
