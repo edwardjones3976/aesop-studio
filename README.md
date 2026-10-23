@@ -49,9 +49,16 @@ Offline tests use a `SIMULATED` adapter (enabled only with `AESOP_SIMULATED_ROUT
 
 Use **Evidence → Create backup**, or call `aesop_studio.backup.create_backup`. This takes a consistent SQLite snapshot plus the stored files, with a SHA-256 manifest. **Test restore** unpacks the latest backup into `restore-tests/<timestamp>` and verifies hashes, `PRAGMA integrity_check`, and row counts. It never restores over live data. Credentials are not included: run `codex login` / `claude auth login` again on a new machine.
 
+## Known limits
+
+- Codex chat runs `-s read-only` in an empty temp folder, but Codex's sandbox can still *read* outside it. Use Claude for chat on sensitive machines.
+- Agent tasks join a kill-on-close Windows Job Object just after launch. Anything spawned in that first instant falls back to `taskkill /T`, and the task is marked `EFFECT_UNKNOWN` if output never closes.
+- Other servers on 127.0.0.1 receive the session cookie. Processes running as you are inside the trust boundary.
+- Usability benefit is unmeasured until you record an owner trial (Evidence → Workflow measurements).
+
 ## Repair procedure
 
-Tasks that were running when Studio stopped become `INTERRUPTED` or `EFFECT_UNKNOWN`, and a `repairs` row (`OPEN_FOREMAN`) is opened with a reproducer hash. Review the task's changed files, then resubmit manually if needed. Nothing is replayed automatically.
+Tasks that were running when Studio stopped become `INTERRUPTED` or `EFFECT_UNKNOWN`, and a `repairs` row (`OPEN_FOREMAN`) is opened with a reproducer hash. Review the task's changed files, then resubmit manually if needed. Nothing is replayed automatically. **Evidence → Export packet** writes a formal repair packet (signature, reproducer, contract, allowed paths, tests, scope, budget, rollback, owner) to `foreman-outbox/` for the Director-Orchestrator Foreman.
 
 ## Docs
 

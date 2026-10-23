@@ -109,6 +109,20 @@ class TestAgent(Base):
         from aesop_studio.tasks import pid_alive
         self.assertFalse(pid_alive(pid))
 
+    def test_detached_descendant_terminated_via_job(self):
+        import re
+        from aesop_studio.tasks import pid_alive
+        start = time.time()
+        tid = self.sup.create(self.p, "simulated", "ORPHAN", mode="agent")
+        t = wait_state(self.sup, tid, timeout=40)
+        self.assertLess(time.time() - start, 30)  # did not wait for the 120s grandchild
+        out, _ = self.sup.output(tid)
+        gpid = int(re.search(r"grandchild (\d+)", out).group(1))
+        self.assertFalse(pid_alive(gpid))
+        if os.name == "nt":
+            self.assertEqual(t["state"], "COMPLETED")
+            self.assertIn("job object", t["error"])
+
     def test_failure_recorded(self):
         t = wait_state(self.sup, self.sup.create(self.p, "simulated", "FAIL", mode="agent"))
         self.assertEqual(t["state"], "FAILED")
@@ -125,7 +139,14 @@ class TestAgent(Base):
                          (tid, self.p["id"], "simulated", "x", st, pid, now, "{}"))
         out = {o["task_id"]: o["to"] for o in Supervisor(self.store).reconcile()}
         self.assertEqual(out, {"task_a": "INTERRUPTED", "task_b": "INTERRUPTED"})
-        self.assertEqual(len(self.store.q("SELECT * FROM repairs WHERE task_id='task_a'")), 1)
+        rep = self.store.q("SELECT * FROM repairs WHERE task_id='task_a'")
+        self.assertEqual(len(rep), 1)
+        pkt = json.loads(Supervisor(self.store).export_repair(rep[0]["id"]).read_text(encoding="utf-8"))
+        for k in ("failure_signature", "reproducer", "affected_contract", "allowed_paths", "required_tests",
+                  "scope", "budget_usd", "rollback", "owner"):
+            self.assertIn(k, pkt)
+        self.assertEqual(self.store.one("SELECT status FROM repairs WHERE id=?", (rep[0]["id"],))["status"],
+                         "EXPORTED_FOR_FOREMAN")
         self.assertEqual(self.store.one("SELECT count(*) n FROM tasks WHERE state='RUNNING'")["n"], 0)
 
 
@@ -292,6 +313,15 @@ class TestHttp(unittest.TestCase):
         self.assertNotIn("Access-Control-Allow-Origin", hd)
         self.assertIn("default-src 'self'", hd["Content-Security-Policy"])
         self.assertEqual(self.req("GET", f"/login?code=reused")[0], 403)
+
+    def test_frontend_parses(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        import subprocess
+        r = subprocess.run([node, "--check", str(Path(__file__).resolve().parent.parent / "static" / "app.js")],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_static_and_no_secrets_in_bundle(self):
         st, _, body = self.req("GET", "/app.js")

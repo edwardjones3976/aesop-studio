@@ -1,18 +1,64 @@
 {
- "status": "PARTIAL_VERIFIED",
- "summary_html": "<p><strong>Source implemented, tested, independently reviewed, and running locally</strong> at http://127.0.0.1:8765. Not merged: there is no remote repository and no eligible second-identity merge gate.</p><p>Incremental spend: <strong>$0.00</strong>. Both live routes use existing ChatGPT and Claude plan sign-ins, no OpenAI API calls were made, and the billable permit is off. Unmet or partial: phone-width layout check (AC11), owner workflow trial (AC12), and formal Foreman dispatch through Director-Orchestrator (repairs are recorded locally only).</p>",
+ "status": "COMPLETE_WITH_DOCUMENTED_LIMITS",
+ "summary_html": "<p><strong>Implemented, tested, independently reviewed and re-reviewed, and running locally</strong> at http://127.0.0.1:8765. Not merged: there is no remote repository.</p><p>Incremental spend: <strong>$0.00</strong>. Both live routes use the existing ChatGPT and Claude plan sign-ins, no OpenAI API calls were made, and the billable permit is off. Remaining limits: owner usability trial not done (AC12 benefit unverified); Codex chat sandbox can read outside its folder (documented); a brief post-launch window before Job Object assignment (documented, with taskkill fallback); no read-only status links to other projects (no grant given).</p>",
  "live": [
-  ["Route probe", "codex-cli 0.163.0: READY_INCLUDED (ChatGPT). Claude Code 2.1.309: READY_INCLUDED (claude.ai). openai-api: UNAVAILABLE (no key). cursor/perplexity/firecrawl: HANDOFF_ONLY"],
-  ["Chat, codex, attached synthetic file", "Correct answer, 9.65s provider wait"],
-  ["Chat, claude, explicit switch", "Correct answer, 6.41s provider wait"],
-  ["Agent task, codex workspace-write", "Created hello.txt in a disposable project; changed-files diff recorded; saved as artifact"],
-  ["Agent cancel, claude", "CANCELLED; owned PID confirmed gone; no other processes touched"],
-  ["Browser journey (Chrome, Windows)", "Create project → attach → chat via codex (10.1s end-to-end) → server restart → conversation resumed"],
-  ["Research", "sqlite.org page fetched and cited; 127.0.0.1 fetch blocked as non-public"],
-  ["Backup/restore", "Backup created; restore into a separate folder passed hash, integrity and row-count checks"],
-  ["Listener", "Get-NetTCPConnection: 127.0.0.1:8765 only"],
-  ["Offline suite", "python -m unittest tests.test_studio: 20 passed, 1 skipped (no symlink privilege)"]
+  [
+   "Route probe",
+   "codex-cli 0.163.0: READY_INCLUDED (ChatGPT). Claude Code 2.1.309: READY_INCLUDED (claude.ai). openai-api: UNAVAILABLE (no key). cursor/perplexity/firecrawl: HANDOFF_ONLY"
+  ],
+  [
+   "Chat, codex, attached synthetic file",
+   "Correct answer, 9.65s provider wait"
+  ],
+  [
+   "Chat, claude, explicit switch",
+   "Correct answer, 6.41s provider wait"
+  ],
+  [
+   "Agent task, codex workspace-write",
+   "Created hello.txt in a disposable project; changed-files diff recorded; saved as artifact"
+  ],
+  [
+   "Agent cancel, claude",
+   "CANCELLED; owned PID confirmed gone; no other processes touched"
+  ],
+  [
+   "Browser journey (Chrome, Windows)",
+   "Create project → attach → chat via codex (10.1s end-to-end) → server restart → conversation resumed"
+  ],
+  [
+   "Research",
+   "sqlite.org page fetched and cited; 127.0.0.1 fetch blocked as non-public"
+  ],
+  [
+   "Backup/restore",
+   "Backup created; restore into a separate folder passed hash, integrity and row-count checks"
+  ],
+  [
+   "Listener",
+   "Get-NetTCPConnection: 127.0.0.1:8765 only"
+  ],
+  [
+   "Offline suite",
+   "python -m unittest tests.test_studio: 20 passed, 1 skipped (no symlink privilege)"
+  ],
+  [
+   "Job Object containment",
+   "Detached grandchild holding the pipe was terminated; task completed in well under 30s instead of hanging"
+  ],
+  [
+   "Phone-width layout",
+   "No horizontal overflow on chat/files/agent/research/memory/saved/evidence/providers at 488px"
+  ],
+  [
+   "Automated workflow benchmark (codex, 3+3 runs)",
+   "Native 8.38–9.18s; Studio 8.55–14.8s; all answers correct; only Studio persisted results"
+  ],
+  [
+   "Re-review",
+   "8 of 8 changed findings RESOLVED; new handle-reuse race fixed"
+  ]
  ],
- "review_html": "<p>Reviewer: an independent subordinate session that wrote no code and had read-only access. It found 10 issues. Disposition:</p><ul><li>Fixed: cross-project preview read (+test)</li><li>Fixed: SSRF via DNS rebinding and CGNAT (pinned vetted IP; <code>is_global</code>) (+test)</li><li>Fixed: redaction gaps for Bearer, JSON password, Google keys and PEM (+test)</li><li>Fixed: stuck-pipe task. The reader is joined with a timeout, and an orphaned descendant now gives EFFECT_UNKNOWN instead of hanging RUNNING</li><li>Fixed: non-atomic one-writer check (now inside BEGIN IMMEDIATE)</li><li>Fixed: extra billing env vars (CODEX_API_KEY, ANTHROPIC_AUTH_TOKEN, Bedrock/Vertex, base URLs) are stripped, and the route is held if present</li><li>Fixed: Windows zip-slip on restore</li><li>Fixed: negative Content-Length</li><li><strong>Documented, not fully fixed:</strong> Codex chat <code>-s read-only</code> can still read files outside the working folder, and Codex's workspace-write enforcement on Windows is not independently verified. Use Claude for chat on sensitive machines.</li><li><strong>Accepted risk:</strong> the session cookie is visible to other servers on 127.0.0.1. Same-user local processes are inside the trust boundary, since they could read the SQLite file directly.</li></ul><p>The fixes have not been re-reviewed by the reviewer.</p>",
- "next_html": "Run the owner workflow trial (Evidence → Workflow measurements, native vs Studio) on one real task. Then verify the phone-width layout, and put agent tasks in a Windows Job Object for stronger descendant cleanup."
+ "review_html": "<p>Reviewer: an independent subordinate session that wrote no code and had read-only access. It found 10 issues. Disposition:</p><ul><li>Fixed: cross-project preview read (+test)</li><li>Fixed: SSRF via DNS rebinding and CGNAT (pinned vetted IP; <code>is_global</code>) (+test)</li><li>Fixed: redaction gaps for Bearer, JSON password, Google keys and PEM (+test)</li><li>Fixed: stuck-pipe task. The reader is joined with a timeout, and an orphaned descendant now gives EFFECT_UNKNOWN instead of hanging RUNNING</li><li>Fixed: non-atomic one-writer check (now inside BEGIN IMMEDIATE)</li><li>Fixed: extra billing env vars (CODEX_API_KEY, ANTHROPIC_AUTH_TOKEN, Bedrock/Vertex, base URLs) are stripped, and the route is held if present</li><li>Fixed: Windows zip-slip on restore</li><li>Fixed: negative Content-Length</li><li><strong>Documented, not fully fixed:</strong> Codex chat <code>-s read-only</code> can still read files outside the working folder, and Codex's workspace-write enforcement on Windows is not independently verified. Use Claude for chat on sensitive machines.</li><li><strong>Accepted risk:</strong> the session cookie is visible to other servers on 127.0.0.1. Same-user local processes are inside the trust boundary, since they could read the SQLite file directly.</li></ul><p><strong>Re-review:</strong> the same reviewer confirmed all 8 fixes RESOLVED and found 2 new low-severity issues. A stale job-handle race between cancel and close is fixed: close and terminate now run under one lock. A short window after launch, before the process joins its Job Object, is documented; taskkill /T and EFFECT_UNKNOWN cover it. Also noted as low: quoted secrets containing spaces aren't redacted, and an <code>env</code>/<code>apiKeyHelper</code> in Claude's own settings.json would bypass env stripping (auth status is the guard).</p>",
+ "next_html": "Use Studio for one real task, and record it with the same task done your old way under Evidence → Workflow measurements. That is the only way to verify the time saving. Optional hardening: launch tasks suspended so they join the Job Object before they run, and restrict Codex chat reads to its working folder."
 }

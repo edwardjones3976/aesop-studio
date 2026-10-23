@@ -21,7 +21,7 @@
   "implementation": "tasks.py Supervisor; taskkill /PID /T /F on owned PID only",
   "test": "test_ac03_* (simulated) + live codex write task + live claude cancel",
   "status": "PASS_LIVE",
-  "evidence": "codex created hello.txt (changed-files diff recorded); claude task cancelled, owned PID confirmed gone; result saved as artifact."
+  "evidence": "Live codex write task and claude cancel. Each task is now contained in a Windows Job Object (kill-on-close); a test proves a detached grandchild holding the output pipe is terminated and the task finishes."
  },
  {
   "id": "AC04",
@@ -29,7 +29,7 @@
   "implementation": "Supervisor.reconcile → INTERRUPTED / EFFECT_UNKNOWN + repairs table (OPEN_FOREMAN)",
   "test": "test_ac04_restart_reconciliation_no_replay",
   "status": "PASS_OFFLINE",
-  "evidence": "Running/reserved tasks never replayed; repair packet recorded. Formal Foreman dispatch through Director-Orchestrator not exercised."
+  "evidence": "Running/reserved tasks are never replayed after restart. Repair packets (signature, reproducer, contract, allowed paths, tests, scope, budget, rollback, owner) export to foreman-outbox/ for the existing Foreman workflow. Studio does not dispatch into Director-Orchestrator (out of mission write scope)."
  },
  {
   "id": "AC05",
@@ -84,23 +84,23 @@
   "requirement": "Responsive browser journey and reporting",
   "implementation": "static/ vanilla JS, keyboard tabs, focus rings, responsive grid",
   "test": "Real Chrome journey on Windows",
-  "status": "PARTIAL",
-  "evidence": "Real Chrome on Windows: create project, attach, chat (codex, 10.1s end-to-end), restart server, conversation resumed; Evidence page renders with no horizontal overflow at 1295px. Phone-width layout NOT verified (window resize did not apply). Found and fixed a JS syntax error that blanked the UI."
+  "status": "PASS_LIVE",
+  "evidence": "Real Chrome on Windows: create project, attach, chat (codex 10.1s end-to-end), server restart, resume. No horizontal overflow on all 8 views at 1295px and at 488px (Chrome's minimum popup width, phone layout active). CSP blocked eval during testing, as designed."
  },
  {
   "id": "AC12",
   "requirement": "Measured representative workflow",
   "implementation": "Evidence → Workflow measurements (native vs studio)",
   "test": "Owner trial",
-  "status": "UNVERIFIED",
-  "evidence": "Only provider wait latency measured. No owner trial yet; no time-saving claim made."
+  "status": "PARTIAL",
+  "evidence": "Automated benchmark, 3 runs each, same input/provider(codex)/criterion: native CLI 8.38/9.01/9.18s, Studio 8.55/9.79/14.8s, all correct; only Studio persisted the result. Step counts (6 vs 4) and app switches (2 vs 0) are a scripted model, not observed. Owner usability benefit is UNVERIFIED: no owner trial."
  },
  {
   "id": "AC13",
   "requirement": "Independent review and regressions",
   "implementation": "Subordinate session 2: non-contributing reviewer",
   "test": "Review findings dispositioned",
-  "status": "PARTIAL",
-  "evidence": "Independent non-contributing reviewer (subordinate session 2) found 10 issues; 9 fixed with regression tests where feasible, 1 accepted (see report). No PR/merge: local repo, no remote."
+  "status": "PASS",
+  "evidence": "Independent non-contributing reviewer: 10 findings, 8 fixed and re-verified RESOLVED by the same reviewer, 2 documented/accepted. Re-review raised 2 new low issues: handle-reuse race fixed; post-launch Job Object window documented. No PR/merge: local repo, no remote."
  }
 ]

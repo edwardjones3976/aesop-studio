@@ -363,6 +363,11 @@ class Handler(BaseHTTPRequestHandler):
     def packet(self, sess, pid):
         self.json(self.app.svc.context_packet(pid))
 
+    @route("POST", r"/api/repairs/(\w+)/export")
+    def repair_export(self, sess, rid):
+        self.json({"packet": str(self.app.sup.export_repair(rid)),
+                   "note": "Packet written locally for the Foreman; Studio does not dispatch repairs itself."})
+
     @route("GET", r"/api/evidence")
     def evidence_get(self, sess):
         self.json(evidence.collect(self.app.store))

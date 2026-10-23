@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import ledger, providers
+from . import ledger, providers, winjob
 from .security import redact
 from .store import Store, new_id
 
@@ -78,6 +78,7 @@ class Supervisor:
     def __init__(self, store: Store):
         self.store = store
         self.procs: dict[str, subprocess.Popen] = {}
+        self.jobs: dict[str, object] = {}
         self.cancel_flags: set[str] = set()
         self.lock = threading.Lock()
 
@@ -149,15 +150,18 @@ class Supervisor:
             self._set(tid, "FAILED", error=f"launch failed: {e}", ended=time.time())
             ledger.settle(self.store, lid, 0)
             return
+        job = winjob.contain(proc.pid)  # whole-tree containment, including detached descendants
         with self.lock:
             self.procs[tid] = proc
+            self.jobs[tid] = job
         self._set(tid, "RUNNING", pid=proc.pid)
         try:
             proc.stdin.write(prompt.encode("utf-8"))
             proc.stdin.close()
         except OSError:
             pass
-        timer = threading.Timer(timeout, lambda: (self.cancel_flags.add(tid + ":timeout"), kill_tree(proc.pid)))
+        timer = threading.Timer(timeout, lambda: (self.cancel_flags.add(tid + ":timeout"), winjob.terminate(job),
+                                                  kill_tree(proc.pid)))
         timer.start()
         orphaned = threading.Event()
 
@@ -177,10 +181,16 @@ class Supervisor:
         code = proc.wait()
         timer.cancel()
         rt.join(10)
-        if rt.is_alive():  # a detached descendant still holds the output pipe
-            orphaned.set()
-        with self.lock:
+        descendants_killed = False
+        if rt.is_alive():  # a detached descendant still holds the output pipe: end the whole job
+            descendants_killed = winjob.terminate(job)
+            rt.join(5)
+            if rt.is_alive():
+                orphaned.set()
+        with self.lock:  # unregister and close atomically so cancel() never uses a recycled handle
             self.procs.pop(tid, None)
+            self.jobs.pop(tid, None)
+            winjob.close(job)
         changed = None
         if mode == "agent":
             try:
@@ -198,7 +208,8 @@ class Supervisor:
         elif orphaned.is_set():
             state, err = "EFFECT_UNKNOWN", "main process exited but a descendant kept running; review before reuse"
         elif code == 0:
-            state, err = "COMPLETED", None
+            state, err = "COMPLETED", ("left-over descendant processes were terminated via the task's job object"
+                                       if descendants_killed else None)
         else:
             state, err = "FAILED", f"exit code {code}"
         cp = json.loads(self.get(tid)["checkpoint"] or "{}")
@@ -206,6 +217,44 @@ class Supervisor:
         self._set(tid, state, exit_code=code, ended=time.time(), changed_files=changed, error=err,
                   checkpoint=json.dumps(cp))
         ledger.settle(self.store, lid, 0)
+        if state == "EFFECT_UNKNOWN":
+            self.open_repair(tid, f"RUNNING->{state}", "task supervision / descendant cleanup")
+
+    def open_repair(self, tid: str, signature: str, contract: str) -> str:
+        t = self.get(tid)
+        rid = new_id("rep")
+        self.store.x("INSERT INTO repairs(id,task_id,signature,reproducer,contract,status,created) VALUES(?,?,?,?,?,?,?)",
+                     (rid, tid, signature,
+                      f"task {tid} provider {t['provider']} prompt sha256 "
+                      f"{hashlib.sha256(t['prompt'].encode()).hexdigest()[:16]}",
+                      contract, "OPEN_FOREMAN", time.time()))
+        return rid
+
+    def export_repair(self, rid: str) -> Path:
+        """Write a formal, sanitized repair packet for the Foreman. Studio never dispatches it itself."""
+        r = self.store.one("SELECT * FROM repairs WHERE id=?", (rid,))
+        if not r:
+            raise KeyError("repair not found")
+        t = self.get(r["task_id"]) or {}
+        packet = {
+            "format": "aesop-repair-packet/1", "repair_id": rid, "status": "READY_FOR_FOREMAN",
+            "failure_signature": r["signature"], "reproducer": r["reproducer"],
+            "affected_contract": r["contract"], "task": {k: t.get(k) for k in (
+                "id", "provider", "state", "exit_code", "error", "cwd", "created", "started", "ended")},
+            "changed_files": json.loads(t.get("changed_files") or "null"),
+            "allowed_paths": ["aesop_studio/tasks.py", "aesop_studio/winjob.py", "tests/test_studio.py"],
+            "required_tests": ["python -W ignore -m unittest tests.test_studio"],
+            "scope": "Fix the supervision fault only; no provider, billing or permission changes.",
+            "budget_usd": 0, "rollback": "git revert of the repair commit; task records are append-only",
+            "owner": "Foreman (Director-Orchestrator), via the owner's existing authorized workflow",
+            "replay_policy": "Never replay the original task automatically; the owner resubmits after review.",
+            "exported_at": time.time()}
+        out_dir = self.store.data_dir / "foreman-outbox"
+        out_dir.mkdir(exist_ok=True)
+        out = out_dir / f"{rid}.json"
+        out.write_text(redact(json.dumps(packet, indent=2, default=str)), encoding="utf-8")
+        self.store.x("UPDATE repairs SET status='EXPORTED_FOR_FOREMAN' WHERE id=?", (rid,))
+        return out
 
     def cancel(self, tid: str) -> bool:
         with self.lock:
@@ -213,7 +262,9 @@ class Supervisor:
         if not proc:
             return False
         self.cancel_flags.add(tid)
-        return kill_tree(proc.pid)
+        with self.lock:
+            by_job = winjob.terminate(self.jobs.get(tid))
+        return kill_tree(proc.pid) or by_job
 
     def output(self, tid: str, offset: int = 0) -> tuple[str, int]:
         t = self.get(tid)
@@ -240,11 +291,6 @@ class Supervisor:
             if cp.get("ledger_id"):
                 ledger.settle(self.store, cp["ledger_id"], None if new_state == "EFFECT_UNKNOWN" else 0)
             if t["state"] in ("STARTING", "RUNNING"):
-                rid = new_id("rep")
-                self.store.x("INSERT INTO repairs(id,task_id,signature,reproducer,contract,status,created) "
-                             "VALUES(?,?,?,?,?,?,?)",
-                             (rid, t["id"], f"{t['state']}->{new_state}",
-                              f"task {t['id']} prompt sha256 {hashlib.sha256(t['prompt'].encode()).hexdigest()[:16]}",
-                              "task supervision / restart reconciliation", "OPEN_FOREMAN", time.time()))
+                self.open_repair(t["id"], f"{t['state']}->{new_state}", "task supervision / restart reconciliation")
             outcomes.append({"task_id": t["id"], "from": t["state"], "to": new_state, "note": note})
         return outcomes
