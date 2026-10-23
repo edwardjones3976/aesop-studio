@@ -38,17 +38,37 @@ def delete_conversation(store: Store, svc, pid: str, cid: str) -> dict:
     svc.project(pid)
     if not store.one("SELECT id FROM conversations WHERE id=? AND project_id=?", (cid, pid)):
         raise KeyError("conversation not in this project")
-    tids = set()
+    tids, used = set(), set()
     for m in store.q("SELECT meta FROM messages WHERE conversation_id=?", (cid,)):
-        tid = json.loads(m["meta"] or "{}").get("task_id")
-        if tid:
-            tids.add(tid)
+        meta = json.loads(m["meta"] or "{}")
+        if meta.get("task_id"):
+            tids.add(meta["task_id"])
+        used.update(meta.get("attachments") or [])
     scrubbed = _scrub_tasks(store, tids)
     with store.tx() as c:
         n = c.execute("DELETE FROM messages WHERE conversation_id=?", (cid,)).rowcount
         c.execute("DELETE FROM conversations WHERE id=?", (cid,))
-    store.event("conversation_deleted", pid, conversation_id=cid, messages=n, at=time.time())
-    return {"deleted": cid, "messages": n, "requests_scrubbed": scrubbed, "note": NOTE}
+    photos = _drop_unused_photos(store, pid, used)
+    store.event("conversation_deleted", pid, conversation_id=cid, messages=n, photos=photos, at=time.time())
+    return {"deleted": cid, "messages": n, "photos_deleted": photos, "requests_scrubbed": scrubbed, "note": NOTE}
+
+
+def _drop_unused_photos(store: Store, pid: str, ids: set) -> int:
+    """Photos sent in a deleted conversation go with it, unless another message still shows them."""
+    gone = 0
+    for aid in ids:
+        a = store.one("SELECT stored_path, sha256 FROM attachments WHERE id=? AND project_id=? AND extract_status='image'",
+                      (aid, pid))
+        if not a or store.one("SELECT id FROM messages WHERE meta LIKE ?", (f'%"{aid}"%',)):
+            continue
+        store.x("DELETE FROM attachments WHERE id=?", (aid,))
+        if a["stored_path"] and not store.one("SELECT id FROM attachments WHERE stored_path=?", (a["stored_path"],)):
+            try:
+                (store.data_dir / a["stored_path"]).unlink()
+            except OSError:
+                pass
+        gone += 1
+    return gone
 
 
 def delete_roundtable(store: Store, rid: str) -> dict:

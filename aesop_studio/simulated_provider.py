@@ -35,6 +35,8 @@ if "FAIL" in prompt:
 import json as _json
 import re as _re
 reply = f"[simulated {mode}] received {len(prompt)} chars. token sk-abcdefghijklmnopqrstuvwx"
+if Path("images").is_dir():
+    reply += f" photos={len(list(Path('images').iterdir()))}"
 if "Return ONLY a JSON array" in prompt:  # draft-findings fixture: cite the first source, plus one bad citation
     sid = (_re.findall(r'<source id="([^"]+)"', prompt) or ["none"])[0]
     reply = _json.dumps([{"claim": "Synthetic widgets improved 3%", "source_id": sid, "locator": "line 1",

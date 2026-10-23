@@ -54,6 +54,36 @@ def _err_tail(out_path: str, n: int = 300) -> str:
     return redact(" | ".join(lines[-3:]))[-n:]
 
 
+IMAGE_TOKEN_BOUND = 2_000
+READ_TOOL_IMAGE_ROUTES = {"claude"}  # Claude Code opens staged photos with its Read tool
+
+
+def _stage_images(cwd: str, images: list[str]) -> list[str]:
+    """Copy the message's photos into the task's own folder; returns paths relative to it."""
+    import shutil
+    from .security import image_kind
+    dest = Path(cwd) / "images"
+    dest.mkdir(exist_ok=True)
+    out = []
+    for i, src in enumerate(images, 1):
+        data = Path(src).read_bytes()
+        kind = image_kind(data) or "png"
+        name = f"photo{i}.{'jpg' if kind == 'jpeg' else kind}"
+        shutil.copyfile(src, dest / name)
+        out.append(f"images/{name}")
+    return out
+
+
+def _data_urls(images: list[str]) -> list[str]:
+    import base64
+    from .security import IMAGE_MIMES, image_kind
+    out = []
+    for src in images:
+        data = Path(src).read_bytes()
+        out.append(f"data:{IMAGE_MIMES[image_kind(data) or 'png']};base64," + base64.b64encode(data).decode("ascii"))
+    return out
+
+
 RETRY_ROUTES = {"zai", "grok", "cursor", "antigravity", "claude", "codex"}
 TRANSIENT_MARKERS = ("429", "rate limit", "rate_limit", "overloaded", "503", "502", "504", "econnreset",
                      "etimedout", "socket hang up", "fetch failed", "network error", "temporarily unavailable",
@@ -256,7 +286,8 @@ class Supervisor:
         if not proj:
             return None
         time.sleep(2)  # brief back-off before the single retry
-        new = self.create(dict(proj), route_id, t["prompt"], mode="chat", timeout=cp.get("timeout") or DEFAULT_TIMEOUT)
+        new = self.create(dict(proj), route_id, t["prompt"], mode="chat", timeout=cp.get("timeout") or DEFAULT_TIMEOUT,
+                          images=cp.get("images"))
         self.store.x("UPDATE tasks SET checkpoint=json_set(COALESCE(checkpoint,'{}'),'$.retry_of',?) WHERE id=?", (tid, new))
         self.store.event("task_retry", t["project_id"], task_id=tid, retry_task_id=new, route=route_id)
         return new
@@ -275,7 +306,7 @@ class Supervisor:
 
     # ---- lifecycle ----
     def create(self, project: dict, route_id: str, prompt: str, mode: str = "agent",
-               timeout: int = DEFAULT_TIMEOUT) -> str:
+               timeout: int = DEFAULT_TIMEOUT, images: list[str] | None = None) -> str:
         routes = providers.cached(self.store)
         route = routes.get(route_id)
         tid = new_id("task")
@@ -286,7 +317,8 @@ class Supervisor:
             c.execute("INSERT INTO tasks(id,project_id,provider,prompt,state,cwd,output_path,created,checkpoint) "
                       "VALUES(?,?,?,?,?,?,?,?,?)",
                       (tid, project["id"], route_id, prompt, "CREATED", project["root"] if mode == "agent" else None,
-                       out_path, now, json.dumps({"mode": mode, "timeout": timeout})))
+                       out_path, now, json.dumps({"mode": mode, "timeout": timeout,
+                                                  **({"images": images} if images else {})})))
         self.store.event("task_state", project["id"], task_id=tid, state="CREATED", mode=mode)
         if busy:
             self._end(tid, "BLOCKED_OWNER", None, None,
@@ -303,7 +335,7 @@ class Supervisor:
                           error="acknowledge how agent tasks run before starting one: " + AGENT_ACK_STATEMENT)
                 return tid
         if route["billing_basis"] == "metered":
-            return self._start_api(tid, project, route_id, route, prompt, out_path, timeout)
+            return self._start_api(tid, project, route_id, route, prompt, out_path, timeout, images)
         try:
             lid = ledger.reserve(self.store, route["provider"], route_id, route["billing_basis"], None, task_ref=tid)
         except ledger.BudgetError as e:
@@ -318,37 +350,38 @@ class Supervisor:
             else:  # created lazily: only requests that will really launch a CLI get a sandbox directory
                 cwd, before, truncated = tempfile.mkdtemp(prefix=CHAT_DIR_PREFIX), {}, False
             cp = {"mode": mode, "timeout": timeout, "ledger_id": lid, "before_count": len(before),
-                  "snapshot_truncated": truncated}
+                  "snapshot_truncated": truncated, **({"images": images} if images else {})}
             self._set(tid, "RESERVED", checkpoint=json.dumps(cp), cwd=cwd)
         except Exception as e:  # noqa: BLE001 - nothing was dispatched: release the reservation
             self._end(tid, "FAILED", lid, 0, error=f"could not prepare the task: {type(e).__name__}: {str(e)[:200]}")
             return tid
         threading.Thread(target=self._run, args=(tid, route_id, mode, cwd, prompt, out_path, timeout, lid,
-                                                 project.get("model")), daemon=True).start()
+                                                 project.get("model"), images), daemon=True).start()
         return tid
 
     # ---- metered API route (no subprocess; streamed, reserved, settled from real usage) ----
-    def _start_api(self, tid, project, route_id, route, prompt, out_path, timeout) -> str:
+    def _start_api(self, tid, project, route_id, route, prompt, out_path, timeout, images=None) -> str:
         model = project.get("model") if project.get("model") in openai_api.PRICES else openai_api.DEFAULT_MODEL
         max_out = openai_api.DEFAULT_MAX_OUTPUT
-        try:
-            cap = openai_api.max_cost(model, len(prompt.encode("utf-8")), max_out)
+        try:  # each high-detail image is bounded at IMAGE_TOKEN_BOUND input tokens in the reservation
+            cap = openai_api.max_cost(model, len(prompt.encode("utf-8")) + IMAGE_TOKEN_BOUND * len(images or []),
+                                      max_out)
             lid = ledger.reserve(self.store, route["provider"], route_id, "metered", cap, task_ref=tid,
                                  price_source=f"{model}: {openai_api.PRICE_SOURCE}")
         except (ledger.BudgetError, openai_api.ApiError) as e:
             self._end(tid, "BLOCKED_OWNER", None, None, error=str(e))
             return tid
         cp = {"mode": "chat", "timeout": timeout, "ledger_id": lid, "model": model, "max_output_tokens": max_out,
-              "reservation_usd": cap}
+              "reservation_usd": cap, **({"images": images} if images else {})}
         self._set(tid, "RESERVED", checkpoint=json.dumps(cp), reservation_usd=cap)
         ev = threading.Event()
         with self.lock:
             self.api_cancel[tid] = ev
-        threading.Thread(target=self._run_api, args=(tid, prompt, out_path, timeout, lid, model, max_out, ev),
+        threading.Thread(target=self._run_api, args=(tid, prompt, out_path, timeout, lid, model, max_out, ev, images),
                          daemon=True).start()
         return tid
 
-    def _run_api(self, tid, prompt, out_path, timeout, lid, model, max_out, ev):
+    def _run_api(self, tid, prompt, out_path, timeout, lid, model, max_out, ev, images=None):
         def release():
             with self.lock:
                 self.api_cancel.pop(tid, None)
@@ -359,6 +392,7 @@ class Supervisor:
                 return self._end(tid, "CANCELLED", lid, 0, error="cancelled before the request was sent")
             self._set(tid, "RUNNING", started=time.time(), argv_meta=json.dumps(
                 {"endpoint": "POST /v1/responses", "model": model, "max_output_tokens": max_out}))
+            urls = _data_urls(images) if images else None  # read before sending: a bad photo bills nothing
             key = openai_api.resolve_key()
             log = _RedactingLog(out_path)
         except Exception as e:  # noqa: BLE001
@@ -367,7 +401,7 @@ class Supervisor:
             return self._end(tid, "FAILED", lid, 0, error=redact(msg)[:500])
         try:
             try:
-                r = openai_api.stream(prompt, model, max_out, log.write, ev, timeout, key=key)
+                r = openai_api.stream(prompt, model, max_out, log.write, ev, timeout, key=key, images=urls)
             finally:
                 key = None
                 log.close()
@@ -399,12 +433,16 @@ class Supervisor:
             self._end(tid, "EFFECT_UNKNOWN", lid, None, error=f"bookkeeping failed: {type(e).__name__}")
 
     # ---- CLI routes ----
-    def _run(self, tid, route_id, mode, cwd, prompt, out_path, timeout, lid, model):
+    def _run(self, tid, route_id, mode, cwd, prompt, out_path, timeout, lid, model, images=None):
         last_file = out_path + ".last.txt"
         proc = job = timer = None
         try:
             try:
-                argv = providers.build_argv(route_id, mode, cwd, last_file, model, prompt=prompt)
+                rel = _stage_images(cwd, images) if images else []
+                if rel and route_id in READ_TOOL_IMAGE_ROUTES:
+                    prompt += ("\n\n[Attached photos are in your working folder: " + ", ".join(rel)
+                               + ". Open each one with the Read tool before you answer.]")
+                argv = providers.build_argv(route_id, mode, cwd, last_file, model, prompt=prompt, images=rel)
             except RuntimeError as e:
                 if mode != "agent":
                     _remove_chat_dir(cwd)

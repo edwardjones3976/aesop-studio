@@ -216,11 +216,58 @@ def html_to_text(raw: str) -> tuple[str, str]:
     return html.unescape(ex.title.strip()), text
 
 
+IMAGE_MIMES = {"png": "image/png", "jpeg": "image/jpeg", "gif": "image/gif", "webp": "image/webp"}
+
+
+def image_kind(data: bytes) -> str | None:
+    """png / jpeg / gif / webp, sniffed from the bytes (a renamed file never passes as an image)."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def image_size(data: bytes) -> tuple[int, int] | None:
+    import struct
+    k = image_kind(data)
+    try:
+        if k == "png":
+            return struct.unpack(">II", data[16:24])
+        if k == "gif":
+            return struct.unpack("<HH", data[6:10])
+        if k == "jpeg":
+            i = 2
+            while i < len(data) - 9:
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    hgt, wid = struct.unpack(">HH", data[i + 5:i + 9])
+                    return wid, hgt
+                i += 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+        if k == "webp" and data[12:16] == b"VP8X":
+            return 1 + int.from_bytes(data[24:27], "little"), 1 + int.from_bytes(data[27:30], "little")
+    except (struct.error, IndexError):
+        return None
+    return None
+
+
 def extract(name: str, data: bytes) -> tuple[str, str | None, str]:
     """Return (status, text, note). Never claims to have read what it could not."""
     ext = Path(name).suffix.lower()
     if len(data) > MAX_UPLOAD_BYTES:
         return "too_large", None, f"File exceeds {MAX_UPLOAD_BYTES // 1024 // 1024} MB limit; original not stored."
+    kind = image_kind(data)
+    if kind:
+        dims = image_size(data)
+        return "image", None, f"{kind.upper()} image" + (f", {dims[0]}×{dims[1]}" if dims else "") + \
+            f", {len(data) // 1024} KB. Sent as an image to providers that can see images."
     if ext == ".pdf":
         if b"/Encrypt" in data[:4096] or b"/Encrypt" in data[-4096:]:
             return "encrypted", None, "Encrypted PDF; decrypt it locally and re-attach."

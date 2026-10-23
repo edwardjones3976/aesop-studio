@@ -53,7 +53,7 @@ const GL = { providers: "Providers", evidence: "Evidence" };
 // ---------- icons (inline SVG via createElementNS; no markup strings) ----------
 const SVGNS = "http://www.w3.org/2000/svg";
 const ICONS = {
-  plus: "M12 5v14M5 12h14", chat: "M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12z",
+  plus: "M12 5v14M5 12h14", image: "M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15.5 8.5h.01", chat: "M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12z",
   file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5", terminal: "M4 17l6-5-6-5M12 19h8",
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4", layers: "M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5",
   bookmark: "M6 3h12v18l-6-4-6 4z", providers: "M9 2v6M15 2v6M6 8h12v3a6 6 0 0 1-12 0zM12 17v5",
@@ -1600,6 +1600,56 @@ function autosize(ta) {
 function ssGet(k) { try { return sessionStorage.getItem(k); } catch { return null; } }
 function ssSet(k, v) { try { if (v) sessionStorage.setItem(k, v); else sessionStorage.removeItem(k); } catch { /* optional */ } }
 const chatChips = {}; // cid -> Set of attachment ids chosen in the composer
+// ---------- photos in chat ----------
+// Paste (Ctrl+V), drop or pick photos. Each is resized in the browser before upload so it never hits the 5 MB
+// file limit: long edge at most 2048 px, screenshots stay PNG when small, photos become JPEG (quality 0.85).
+const PHOTO_ROUTES = ["codex", "claude", "openai-api", "simulated"]; // verified live to see an image
+const PHOTO_MAX = 6, PHOTO_EDGE = 2048, PHOTO_KEEP_PNG = 1.5 * 1024 * 1024, PHOTO_FILE_MAX = 5 * 1024 * 1024;
+const chatPhotos = {}; // cid -> [{ key, id, name, size, url, state: "uploading"|"ready"|"error", err }]
+const photoCache = {}; // attachment id -> blob URL (thumbnails in sent messages)
+const isPhotoFile = (f) => f && (/^image\//.test(f.type) || /\.(png|jpe?g|gif|webp|heic|heif)$/i.test(f.name || ""));
+const fmtKB = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+async function preparePhoto(file) {
+  const type = file.type || "";
+  if (/heic|heif/i.test(type) || /\.hei[cf]$/i.test(file.name || "")) throw new Error(`${file.name}: HEIC photos can't be read here. Save it as JPG or PNG first.`);
+  if (!/^image\/(png|jpeg|gif|webp)$/.test(type)) throw new Error(`${file.name || "That file"} isn't a PNG, JPG, GIF or WebP photo.`);
+  if (type === "image/gif" && file.size <= PHOTO_FILE_MAX) return file; // keep animation
+  let bmp;
+  try { bmp = await createImageBitmap(file); } catch { throw new Error(`${file.name || "That photo"} couldn't be opened.`); }
+  const scale = Math.min(1, PHOTO_EDGE / Math.max(bmp.width, bmp.height));
+  if (scale === 1 && file.size <= PHOTO_KEEP_PNG) { bmp.close && bmp.close(); return file; }
+  const w = Math.max(1, Math.round(bmp.width * scale)), hh = Math.max(1, Math.round(bmp.height * scale));
+  const cv = document.createElement("canvas"); cv.width = w; cv.height = hh;
+  const cx = cv.getContext("2d");
+  const blobOf = (t, q) => new Promise((res) => cv.toBlob(res, t, q));
+  cx.drawImage(bmp, 0, 0, w, hh);
+  const base = (file.name || "photo").replace(/\.[^.]+$/, "") || "photo";
+  if (type === "image/png") { const png = await blobOf("image/png"); if (png && png.size <= PHOTO_KEEP_PNG) return new File([png], base + ".png", { type: "image/png" }); }
+  cx.globalCompositeOperation = "destination-over"; cx.fillStyle = "#ffffff"; cx.fillRect(0, 0, w, hh); // no black where it was transparent
+  for (const q of [0.85, 0.72, 0.6]) {
+    const jpg = await blobOf("image/jpeg", q);
+    if (jpg && jpg.size <= PHOTO_FILE_MAX) return new File([jpg], base + ".jpg", { type: "image/jpeg" });
+  }
+  throw new Error(`${file.name || "That photo"} is still over 5 MB after resizing.`);
+}
+async function photoURL(id) {
+  if (photoCache[id] !== undefined) return photoCache[id];
+  try {
+    const r = await fetch(`/api/attachments/${id}/image`, { headers: { "X-Aesop-Key": apiKey() }, credentials: "same-origin" });
+    photoCache[id] = r.ok ? URL.createObjectURL(await r.blob()) : null;
+  } catch { photoCache[id] = null; }
+  return photoCache[id];
+}
+function photoViewer(url, name) {
+  const img = h("img", { src: url, alt: name || "Photo", class: "pv-img" });
+  const d = h("dialog", { class: "pv", "aria-label": name || "Photo" },
+    h("button", { type: "button", class: "iconbtn pv-x", "aria-label": "Close photo" }, icon("x")), img,
+    h("div", { class: "pv-cap" }, name || ""));
+  d.addEventListener("click", (e) => { if (e.target === d || e.target.closest(".pv-x")) d.close(); });
+  d.addEventListener("close", () => d.remove());
+  document.body.append(d); d.showModal();
+}
+window.addEventListener("paste", (e) => { if (S.chatPaste && !e.defaultPrevented) S.chatPaste(e); });
 async function renderChat() {
   if (!S.project || S.global || S.tab !== "chat") return;
   const pid = S.project.id;
@@ -1640,18 +1690,89 @@ async function renderChat() {
   ta.value = ssGet(draftKey) || "";
   ta.addEventListener("input", () => ssSet(draftKey, ta.value));
   const chosen = () => [...chips].filter((id) => atts.some((a) => a.id === id));
+  const photos = chatPhotos[cid] || (chatPhotos[cid] = []);
+  const tray = h("div", { class: "ptray", role: "group", "aria-label": "Photos for this message" });
+  const trayNote = h("div", { class: "pnote", role: "status", "aria-live": "polite" });
+  const readyPhotos = () => photos.filter((x) => x.state === "ready").map((x) => x.id);
+  const drawTray = () => {
+    tray.hidden = !photos.length;
+    tray.replaceChildren(...photos.map((x) => h("figure", { class: "pthumb " + x.state, title: x.err || `${x.name} · ${fmtKB(x.size)}` },
+      h("img", { src: x.url, alt: x.name }),
+      x.state === "uploading" ? h("span", { class: "pbusy", "aria-label": "Uploading" }) : null,
+      x.state === "error" ? h("span", { class: "perr" }, icon("alert", "sm")) : null,
+      h("button", { type: "button", class: "pdel", "aria-label": `Remove ${x.name}`, onclick: () => {
+        const i = photos.indexOf(x); if (i >= 0) photos.splice(i, 1); URL.revokeObjectURL(x.url); drawTray(); ta.focus(); } }, icon("x", "sm")))),
+      photos.length ? h("span", { class: "pcount faint" }, `${photos.length}/${PHOTO_MAX} photos · resized automatically`) : null);
+    checkPhotos();
+  };
+  const checkPhotos = () => {
+    const prov = messageProvider(); const n = readyPhotos().length; const errs = photos.filter((x) => x.state === "error");
+    const bits = [];
+    if (errs.length) bits.push(h("span", { class: "bad" }, errs[errs.length - 1].err));
+    if (n && prov && !PHOTO_ROUTES.includes(prov)) {
+      const alts = usable.filter(([id]) => PHOTO_ROUTES.includes(id));
+      bits.push(h("span", {}, `${routeName(prov)} can't see photos.`), ...alts.map(([id]) => h("button", { type: "button", class: "linkish", onclick: () => {
+        provSel.value = id; ssSet(provKey, id); refreshRouteLabels(); checkPhotos(); } }, `Use ${routeName(id)}`)));
+    } else if (n && prov && !(S.project.transfer_policy || {})[prov]) {
+      bits.push(h("span", {}, `Sending files to ${routeName(prov)} is off for this project.`), abtn(`Allow for ${routeName(prov)}`, async () => {
+        const pol = { ...(S.project.transfer_policy || {}), [prov]: true };
+        const up = await api("PATCH", `/api/projects/${pid}`, { transfer_policy: pol });
+        S.project = { ...S.project, ...up, transfer_policy: up.transfer_policy || pol }; banner(`Photos and files can now be sent to ${routeName(prov)} in this project.`, "ok"); checkPhotos();
+      }, "sm"));
+    }
+    trayNote.replaceChildren(...bits); trayNote.hidden = !bits.length;
+  };
+  const addPhotos = async (files) => {
+    const list = [...files].filter(isPhotoFile);
+    if (!list.length) return false;
+    const room = PHOTO_MAX - photos.length;
+    if (room <= 0) { banner(`Up to ${PHOTO_MAX} photos per message. Remove one to add another.`, "bad"); return true; }
+    if (list.length > room) banner(`Added ${room} of ${list.length}: up to ${PHOTO_MAX} photos per message.`);
+    await Promise.all(list.slice(0, room).map(async (f) => {
+      const x = { key: Math.random().toString(36).slice(2), name: f.name || "pasted photo", size: f.size, url: "", state: "uploading" };
+      photos.push(x);
+      try {
+        const ready = await preparePhoto(f);
+        x.url = URL.createObjectURL(ready); x.size = ready.size; x.name = f.name ? ready.name : `pasted-${new Date().toTimeString().slice(0, 8).replace(/:/g, "")}${ready.name.slice(ready.name.lastIndexOf("."))}`;
+        drawTray();
+        const a = await api("POST", `/api/projects/${pid}/attachments`, undefined, { name: x.name, data: ready });
+        if (a.extract_status !== "image") throw new Error(`${x.name}: ${a.extract_note || "not recognised as a photo"}`);
+        x.id = a.id; x.state = "ready"; photoCache[a.id] = x.url;
+      } catch (e) {
+        x.state = "error"; x.err = e.message;
+        if (!x.url) { const i = photos.indexOf(x); if (i >= 0) photos.splice(i, 1); banner(e.message, "bad"); }
+      }
+      drawTray();
+    }));
+    return true;
+  };
+  const picker = h("input", { type: "file", accept: "image/png,image/jpeg,image/gif,image/webp", multiple: true, class: "sr-only", tabindex: "-1", "aria-hidden": "true",
+    onchange: (e) => { addPhotos(e.target.files); e.target.value = ""; } });
+  const photoBtn = h("button", { type: "button", class: "btn ghost sm", title: "Add photos (or paste with Ctrl+V, or drop them here)", onclick: () => picker.click() }, icon("image", "sm"), "Photo");
+  S.chatPaste = (e) => {
+    if (S.tab !== "chat" || !document.body.contains(ta) || document.querySelector("dialog[open]")) return;
+    const files = [...(e.clipboardData ? e.clipboardData.items : [])].filter((i) => i.kind === "file" && /^image\//.test(i.type)).map((i) => i.getAsFile()).filter(Boolean);
+    if (!files.length) return; // plain text pastes normally
+    e.preventDefault(); addPhotos(files);
+  };
   let sending = false;
   const messageProvider = () => ($("chatProv") && $("chatProv").value) || provPick || S.project.provider_default;
   const send = async (confirm) => {
     if (sending) return;
-    const raw = ta.value; const text = raw.trim(); if (!text) { ta.focus(); return; }
+    const raw = ta.value; const pics = readyPhotos();
+    const text = raw.trim() || (pics.length ? `Please look at the attached photo${pics.length > 1 ? "s" : ""}.` : "");
+    if (!text) { ta.focus(); return; }
     const provider = messageProvider();
     if (!provider) { banner("Choose a provider for this message.", "bad"); return; }
+    if (photos.some((x) => x.state === "uploading")) { banner("Photos are still uploading — one moment.", "bad"); return; }
+    if (pics.length && !PHOTO_ROUTES.includes(provider)) { checkPhotos(); banner(`${routeName(provider)} can't see photos. Pick Codex or Claude Code, or remove the photos.`, "bad"); return; }
     sending = true; sendBtn.disabled = true; sendBtn.setAttribute("aria-busy", "true");
     try {
       await api("POST", `/api/projects/${pid}/conversations/${cid}/messages`,
-        { text, attachment_ids: chosen(), provider, confirm_switch: !!confirm });
+        { text, attachment_ids: [...chosen(), ...pics], provider, confirm_switch: !!confirm });
       if (ta.value === raw) { ta.value = ""; grow(); ssSet(draftKey, ""); } // keep anything typed while the request was pending
+      for (const x of photos.filter((y) => pics.includes(y.id))) photos.splice(photos.indexOf(x), 1);
+      drawTray();
       banner("Saved locally and submitted to provider.", "ok");
       if (gen === S.viewGen) { S.msgSig = ""; drawMsgs(); }
     } catch (e) {
@@ -1667,7 +1788,7 @@ async function renderChat() {
   const preview = async () => guard(async () => {
     const provider = messageProvider();
     const r = await api("POST", `/api/projects/${pid}/conversations/${cid}/preview`,
-      { text: ta.value, attachment_ids: chosen(), provider });
+      { text: ta.value, attachment_ids: [...chosen(), ...readyPhotos()], provider });
     await dialog(`Context that will be sent to ${routeName(r.provider)} (${r.chars} chars)`, [{ name: "ctx", label: "Exact payload", type: "textarea", value: r.context, tall: true, readonly: true }], "Close");
   });
   ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(false); } });
@@ -1679,15 +1800,30 @@ async function renderChat() {
       h("span", {}, a.name))))
     : h("div", { class: "attach" }, h("span", { class: "lbl" }, icon("clip", "sm"), "No readable files to attach yet."), h("button", { type: "button", class: "linkish", onclick: (e) => openInspector("files", e.currentTarget) }, "Add files"));
   const provSel = h("select", { id: "chatProv", class: "chat-prov", "aria-label": "Provider for this message",
-    onchange: (e) => { ssSet(provKey, e.target.value); refreshRouteLabels(); } },
+    onchange: (e) => { ssSet(provKey, e.target.value); refreshRouteLabels(); checkPhotos(); } },
     ...usable.map(([id, r]) => h("option", { value: id, selected: id === provPick },
       `${routeName(id)} · ${access(r.state)}`)));
-  const composer = h("div", { class: "composer" }, ta, attachRow,
+  attachRow.append(photoBtn, picker);
+  const composer = h("div", { class: "composer" }, ta, tray, trayNote, attachRow,
     h("div", { class: "cfoot" },
       h("div", { class: "row chat-prow" }, provSel, h("span", { class: "chip", id: "composerRoute" }), h("span", { class: "hint" }, h("kbd", {}, "Ctrl"), h("kbd", {}, "Enter"), " send")),
       h("div", { class: "row" }, btn("Preview context", preview, "ghost", "eye"), sendBtn)));
   root.append(msgsEl, h("div", { class: "composer-dock" }, composer));
+  // drop photos anywhere on the chat
+  let dragDepth = 0;
+  const hasFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes("Files");
+  root.addEventListener("dragenter", (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; composer.classList.add("dropping"); });
+  root.addEventListener("dragover", (e) => { if (hasFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } });
+  root.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; composer.classList.remove("dropping"); } });
+  root.addEventListener("drop", async (e) => {
+    if (!hasFiles(e)) return; e.preventDefault(); dragDepth = 0; composer.classList.remove("dropping");
+    const files = [...e.dataTransfer.files];
+    if (!(await addPhotos(files)) && files.length) banner("Only photos can be dropped into the chat. Add other files under Files.", "bad");
+    else if (files.some((f) => !isPhotoFile(f))) banner("Added the photos; other files were skipped (add them under Files).");
+  });
+  ta.placeholder = "Ask something about this project… (paste or drop photos here)";
   $("view").replaceChildren(root);
+  drawTray();
   refreshRouteLabels();
 
   const scroller = $("main");
@@ -1717,6 +1853,14 @@ async function renderChat() {
       upd(); S.streamUpd[m.id] = upd;
       body = h("div", { class: "pending" }, waited, lbl, stream, wait);
     } else body = h("div", { class: "mbody" + (tone(m.status) === "bad" ? " err" : "") }, m.content);
+    if (user && Array.isArray(meta.attachments) && meta.attachments.length) {
+      const strip = h("div", { class: "mphotos" });
+      body = h("div", {}, strip, body);
+      for (const aid of meta.attachments) photoURL(aid).then((u) => {
+        if (!u) return;
+        strip.append(h("button", { type: "button", class: "mphoto", "aria-label": "Open photo", onclick: () => photoViewer(u, "Photo") }, h("img", { src: u, alt: "Attached photo" })));
+      });
+    }
     let save = null;
     if (m.role === "assistant" && m.status === "generated") {
       save = h("button", { type: "button", class: "linkish msave", "aria-label": "Save this answer to the project" }, icon("bookmark", "sm"), "Save");

@@ -897,3 +897,28 @@ button.rt-chip { min-height: 40px; }
 .rt-roundlinks { display: inline-flex; gap: 10px; flex-wrap: wrap; }
 .rt-roundlink { min-height: 28px; padding: 0 4px; font-size: 13px; font-weight: 600; color: var(--coral); }
 .rt-fu-actions .faint { flex: 1 1 260px; font-size: 12.5px; }
+/* photos in chat */
+.composer.dropping { outline: 2px dashed var(--sky); outline-offset: 3px; background: var(--sky-bg); }
+.ptray { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.pthumb { position: relative; margin: 0; width: 72px; height: 72px; border-radius: var(--r-sm); overflow: hidden; border: 1px solid var(--border-2); background: var(--sunken); flex: none; }
+.pthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pthumb.uploading img { opacity: .5; }
+.pthumb.error { border-color: var(--red); }
+.pthumb.error img { opacity: .35; }
+.pbusy { position: absolute; inset: 0; margin: auto; width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--text-2); border-top-color: transparent; animation: pspin .8s linear infinite; }
+@keyframes pspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pbusy { animation: none; } }
+.perr { position: absolute; left: 4px; bottom: 4px; color: var(--red); }
+.pdel { position: absolute; top: 3px; right: 3px; width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%; border: 0; background: rgba(7, 12, 18, .78); color: var(--text); cursor: pointer; padding: 0; }
+.pdel:hover, .pdel:focus-visible { background: var(--red); color: var(--on-coral); }
+.pcount { font-size: 12px; }
+.pnote { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 13px; color: var(--amber); }
+.pnote .bad { color: var(--red); }
+.mphotos { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.mphoto { padding: 0; border: 1px solid var(--border-2); border-radius: var(--r-sm); overflow: hidden; width: 120px; height: 90px; background: var(--sunken); cursor: zoom-in; }
+.mphoto img { width: 100%; height: 100%; object-fit: cover; display: block; }
+dialog.pv { padding: 0; border: 0; background: transparent; max-width: 96vw; max-height: 94dvh; overflow: visible; }
+dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
+.pv-img { display: block; max-width: 94vw; max-height: 86dvh; object-fit: contain; border-radius: var(--r-sm); box-shadow: var(--shadow-3); }
+.pv-x { position: absolute; top: -44px; right: 0; color: var(--text); }
+.pv-cap { margin-top: 8px; text-align: center; font-size: 13px; color: var(--text-2); }

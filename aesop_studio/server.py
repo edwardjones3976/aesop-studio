@@ -25,7 +25,7 @@ from .tasks import Supervisor
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 HOST = "127.0.0.1"
-CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; "
        "frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 
 
@@ -363,6 +363,11 @@ class Handler(BaseHTTPRequestHandler):
     @route("GET", r"/api/projects/(\w+)/attachments")
     def attachments(self, sess, pid):
         self.json(self.app.svc.attachments(pid))
+
+    @route("GET", r"/api/attachments/(\w+)/image")
+    def attachment_image(self, sess, aid):
+        path, mime = self.app.svc.image_file(aid)
+        self._send(200, path.read_bytes(), mime, {"Cache-Control": "private, max-age=86400"})
 
     @route("POST", r"/api/projects/(\w+)/attachments")
     def attach(self, sess, pid):

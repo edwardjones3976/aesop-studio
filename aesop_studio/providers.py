@@ -387,15 +387,17 @@ def usable(route: dict, mode: str) -> bool:
 
 
 def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | None = None,
-               prompt: str | None = None) -> list[str]:
+               prompt: str | None = None, images: list[str] | None = None) -> list[str]:
     """argv list (no shell). The prompt is always passed on stdin, never concatenated into a command."""
     if route_id == "codex":
         cmd = _codex_cmd()
         if not cmd:
             raise RuntimeError("codex unavailable")
         sandbox = "read-only" if mode == "chat" else "workspace-write"
-        argv = cmd + ["exec", "--skip-git-repo-check", "--color", "never", "-s", sandbox, "-C", cwd,
-                      "-o", out_file]
+        argv = cmd + ["exec"]
+        for img in images or []:  # each -i before the other flags, so the variadic option never eats them
+            argv += ["-i", str(Path(cwd) / img)]
+        argv += ["--skip-git-repo-check", "--color", "never", "-s", sandbox, "-C", cwd, "-o", out_file]
         if mode == "chat":
             argv.append("--ephemeral")
         if model:
@@ -406,8 +408,8 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         if not cmd:
             raise RuntimeError("claude unavailable")
         argv = cmd + ["-p", "--output-format", "text", "--no-session-persistence"]
-        if mode == "chat":
-            argv += ["--tools", "", "--strict-mcp-config"]
+        if mode == "chat":  # with photos, only Read (confined to this task's own folder) is enabled
+            argv += ["--tools", "Read" if images else "", "--strict-mcp-config"]
         else:
             argv += ["--permission-mode", "acceptEdits",
                      "--disallowedTools", "Bash(rm:*)", "Bash(del:*)", "Bash(Remove-Item:*)", "WebFetch"]
