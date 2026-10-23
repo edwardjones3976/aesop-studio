@@ -356,7 +356,8 @@ function paletteItems() {
   if (S.project) for (const [k, v] of Object.entries(WS)) it.push({ g: "Workspace", ico: { chat: "chat", agent: "terminal", research: "search", memory: "layers", artifacts: "bookmark" }[k], label: `Go to ${v}`, key: { chat: "Ctrl 1", agent: "Ctrl 2", research: "Ctrl 3" }[k], run: () => setTab(k) });
   for (const p of S.projects) it.push({ g: "Project", ico: "folder", label: `Switch to ${p.name}`, hint: p.root, run: () => openProject(p.id) });
   it.push({ g: "Action", ico: "plus", label: "New project", run: newProject });
-  if (S.project) it.push({ g: "Action", ico: "users", label: "Configure roundtable", run: () => openRoundtable(PAL.opener) });
+  if (S.project) it.push({ g: "Action", ico: "users", label: "Start a roundtable", run: () => openRoundtable(PAL.opener, { mode: "general", roster: rtStoredSel(S.project.id) }) });
+  if (S.project) it.push({ g: "Action", ico: "shield", label: "Start a War Room", run: () => openRoundtable(PAL.opener, { mode: "war_room" }) });
   if (S.project) it.push({ g: "Action", ico: "chat", label: "New conversation", run: () => { const pid = S.project.id; guard(async () => { const c = await api("POST", `/api/projects/${pid}/conversations`, {}); if (S.project && S.project.id === pid) { S.conv = c.id; setTab("chat"); } }); } });
   it.push({ g: "Studio", ico: "providers", label: "Open Providers", run: () => openGlobal("providers") });
   it.push({ g: "Studio", ico: "evidence", label: "Open Evidence", run: () => openGlobal("evidence") });
@@ -443,12 +444,19 @@ function setupRoundtable() {
     if (o && o.isConnected && o.focus) o.focus();
   });
 }
-async function openRoundtable(opener) {
+const RT_ADMINS = [["openai", "Codex"], ["claude", "Claude Code"], ["cursor", "Cursor"]];
+function rtApplyMode(f, mode, roster) {
+  f.mode = mode;
+  if (mode === "war_room") { f.time_limit_min = 8; f.response_window_s = 30; f.roster = new Set(RT_ADMINS.map(([id]) => id)); }
+  else { f.time_limit_min = RT_TIME.general[1]; if (roster) f.roster = new Set(roster); }
+}
+async function openRoundtable(opener, opts = {}) {
   if (!S.project) { banner("Open a project first to configure a roundtable."); return; }
   if ($("dlg").open || $("rtDlg").open) return;
   closeOverlay(false);
   const s = RT = { opener: opener || document.activeElement, pid: S.project.id, lanes: [], gates: [], example: [], discovered: null, drafts: [], rec: null, pre: null, preStale: false,
     f: rtBlank(), filter: "all", q: "", timer: null, loading: true, err: "", el: {}, gen: 0 };
+  rtApplyMode(s.f, opts.mode === "war_room" ? "war_room" : "general", opts.roster);
   rtBuild(); $("rtDlg").showModal(); $("rtObjective").focus();
   try {
     // Owner rule: opening Roundtable / War Room turns the Live roundtables switch on; the server turns it
@@ -495,13 +503,13 @@ function rtBuild(focusId) {
   el.lanes = h("div", { class: "rt-lanes", role: "group", "aria-label": "Provider lanes" });
   el.counter = h("p", { class: "rt-counter", "aria-live": "polite" });
   el.example = h("p", { class: "faint" });
-  const part = h("section", { class: "rt-col rt-part", "aria-labelledby": "rtPartH" }, h("h3", { id: "rtPartH" }, "Participants"),
-    h("div", { class: "field" }, h("label", { for: "rtSearch", class: "sr-only" }, "Search lanes"), search), filters, el.counter, el.lanes, el.example);
+  const part = f.mode === "war_room"
+    ? h("section", { class: "rt-col rt-part", "aria-labelledby": "rtPartH" }, h("h3", { id: "rtPartH" }, "Administrators"),
+      h("p", { class: "faint" }, "The War Room roster is fixed to the three administrator lanes."), el.counter, el.lanes)
+    : h("section", { class: "rt-col rt-part", "aria-labelledby": "rtPartH" }, h("h3", { id: "rtPartH" }, "Participants"),
+      h("div", { class: "field" }, h("label", { for: "rtSearch", class: "sr-only" }, "Search lanes"), search), filters, el.counter, el.lanes, el.example);
   // centre
   el.gates = h("div");
-  const modeTabs = h("div", { class: "seg rt-mode", role: "tablist", "aria-label": "Roundtable mode" }, ...Object.entries(RT_MODES).map(([k, label]) => h("button", { type: "button", role: "tab", id: "rtMode-" + k,
-    "aria-selected": f.mode === k ? "true" : "false", tabindex: f.mode === k ? "0" : "-1", onclick: () => rtSetMode(k),
-    onkeydown: (e) => { if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); rtSetMode(k === "general" ? "war_room" : "general"); } } }, label)));
   const objective = h("textarea", { id: "rtObjective", required: true, "aria-required": "true", placeholder: "What should the roundtable decide or produce?",
     oninput: (e) => { f.objective = e.target.value; rtResetAck(); rtRefresh(); rtStale(); } }, f.objective);
   const outcome = h("select", { id: "rtOutcome", onchange: (e) => { f.outcome_type = e.target.value; rtStale(); } }, ...RT_OUTCOMES.map((o) => h("option", { value: o, selected: o === f.outcome_type }, o)));
@@ -514,7 +522,7 @@ function rtBuild(focusId) {
   el.ack = h("input", { id: "rtAck", type: "checkbox", required: true, "aria-required": "true", onchange: (e) => { f.ack = e.target.checked; rtRefresh(); rtStale(); } });
   el.ack.checked = f.ack;
   el.drafts = h("div", { class: "section" });
-  const main = h("section", { class: "rt-col rt-main", "aria-label": "Roundtable setup" }, el.gates, modeTabs,
+  const main = h("section", { class: "rt-col rt-main", "aria-label": "Roundtable setup" }, el.gates,
     fld("rtObjective", "Objective (required)", objective),
     h("div", { class: "rt-row2" }, fld("rtOutcome", "Outcome type", outcome), fld("rtDeliverable", "Desired deliverable", deliverable)),
     h("div", { class: "rt-row3" }, fld("rtTime", f.mode === "war_room" ? "Time limit (War Room)" : "Time limit", time), win ? fld("rtWindow", "Response window", win) : null),
@@ -538,7 +546,7 @@ function rtBuild(focusId) {
     h("div", { class: "row" }, (el.saveBtn = abtn("Save draft", () => rtSave(false), "primary", "check")), abtn("Check preflight", rtPreflight, "", "shield"), el.exportBtn),
     h("div", { class: "rt-startgrp" }, start, el.startWhy));
   $("rtIn").replaceChildren(
-    h("header", { class: "rt-head" }, h("div", { class: "ttl" }, icon("users"), h("div", {}, h("h2", { id: "rtTitle" }, "Configure Roundtable"),
+    h("header", { class: "rt-head" }, h("div", { class: "ttl" }, icon("users"), h("div", {}, h("h2", { id: "rtTitle" }, f.mode === "war_room" ? "War Room" : "Roundtable"),
       (el.liveNote = h("p", { class: "faint" })))),
       h("button", { type: "button", class: "iconbtn", "aria-label": "Close roundtable", onclick: () => $("rtDlg").close() }, icon("x"))),
     h("div", { id: "rtStatus", class: "rt-status", role: "status", "aria-live": "polite" }),
@@ -546,21 +554,21 @@ function rtBuild(focusId) {
   rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtStartRender(); rtDraftsRender();
   if (focusId && $(focusId)) $(focusId).focus();
 }
-function rtSetMode(m) {
-  const f = RT.f; if (f.mode === m) return;
-  f.mode = m;
-  const [opts, def] = RT_TIME[m]; if (!opts.includes(Number(f.time_limit_min))) f.time_limit_min = def;
-  if (m === "war_room") { const before = f.roster.size; for (const id of [...f.roster]) { const l = rtLane(id); if (!l || l.lane_class !== "admin") f.roster.delete(id); } if (f.roster.size !== before) f.ack = false; }
-  if (RT.pre) RT.preStale = true;
-  rtBuild("rtMode-" + m);
-  rtSay(`${RT_MODES[m]} selected. Default time ${def} min${m === "war_room" ? "; only admin lanes can take part" : ""}.`);
-}
 function rtResetAck() { if (RT.f.ack) { RT.f.ack = false; if (RT.el.ack) RT.el.ack.checked = false; } }
 function rtLanesRender() {
   const el = RT.el;
   el.example.textContent = RT.example.length ? `Documented example roster: ${RT.example.join(", ")}` : "";
   if (RT.loading) { el.lanes.replaceChildren(h("p", { class: "muted" }, "Checking lanes…")); return; }
   if (RT.err) { el.lanes.replaceChildren(h("div", { class: "note bad" }, icon("alert"), h("span", {}, `Lanes could not be loaded: ${RT.err}`))); return; }
+  if (RT.f.mode === "war_room") {
+    el.lanes.replaceChildren(h("ul", { class: "rt-admins" }, ...RT_ADMINS.map(([id, name]) => {
+      const l = rtLane(id);
+      return h("li", { class: "lane" }, h("div", { class: "lbody" }, h("div", { class: "lname" }, h("strong", {}, name), h("span", { class: "tag lc-admin" }, "admin")),
+        h("div", { class: "lmeta" }, statePill(l ? l.readiness : "NOT_DETECTED"), h("span", {}, (l && l.route_type) || "no route")),
+        l && (l.reasons || []).length ? h("p", { class: "faint" }, l.reasons[0]) : null));
+    })));
+    return;
+  }
   if (!RT.lanes.length) { el.lanes.replaceChildren(empty("users", "No lanes reported", "The lane discovery endpoint returned no lanes on this machine.")); return; }
   const q = RT.q.trim().toLowerCase();
   const shown = RT.lanes.filter((l) => {
@@ -822,10 +830,74 @@ async function rtOpenDraft(id) {
     const rec = await api("GET", `/api/roundtables/${id}`);
     if (RT !== s || s.gen !== gen) return;
     clearTimeout(s.timer);
-    s.rec = rec; s.f = rtFromRecord(rec); s.pre = rec.preflight || null; s.preStale = false;
+    s.rec = rec; s.f = rtFromRecord(rec); if (s.f.mode === "war_room") s.f.roster = new Set(RT_ADMINS.map(([x]) => x)); s.pre = rec.preflight || null; s.preStale = false;
     rtBuild("rtObjective");
     rtSay(`Opened draft ${rec.id}.`);
   } catch (e) { if (RT === s) rtSay(e.message, "bad"); }
+}
+
+// ---------- Roundtable dropdown (chat toolbar) ----------
+const rtSelKey = (pid) => "aesop.rt.sel." + pid;
+function rtStoredSel(pid) { try { const v = JSON.parse(localStorage.getItem(rtSelKey(pid)) || "[]"); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; } }
+function rtStoreSel(pid, ids) { try { localStorage.setItem(rtSelKey(pid), JSON.stringify(ids)); } catch { /* storage unavailable */ } }
+async function rtAuthorize() { try { await api("POST", "/api/roundtable/live-authorization", { enabled: true }); } catch { /* surfaced in the modal */ } }
+function rtMenu() {
+  const pid = S.project.id; let sel = new Set(rtStoredSel(pid)); let open = false;
+  const trig = h("button", { type: "button", class: "btn rt-entry", id: "rtMenuBtn", "aria-haspopup": "true", "aria-expanded": "false", "aria-controls": "rtMenuPop" },
+    icon("users"), "Roundtable");
+  const pop = h("div", { class: "menu rt-pop", id: "rtMenuPop", role: "group", "aria-label": "Roundtable speakers", hidden: true });
+  const count = h("p", { class: "rt-pop-count", "aria-live": "polite" });
+  const list = h("div", { class: "rt-pop-list" });
+  const setup = h("button", { type: "button", class: "menuitem rt-pop-setup", onclick: () => { close(false); openRoundtable(trig, { mode: "general", roster: [...sel] }); } }, icon("users"), "Set up roundtable…");
+  pop.append(count, list, setup);
+  const upd = () => { count.textContent = `${sel.size} selected · needs ≥4`; };
+  const items = () => [...pop.querySelectorAll("input:not([disabled]), .rt-pop-setup")];
+  const row = (l, enabled, why) => {
+    const cid = "rtm-" + l.id;
+    const cb = h("input", { type: "checkbox", id: cid, disabled: !enabled, "aria-describedby": cid + "-d",
+      onchange: (e) => { if (e.target.checked) sel.add(l.id); else sel.delete(l.id); rtStoreSel(pid, [...sel]); upd(); } });
+    cb.checked = enabled && sel.has(l.id);
+    return h("label", { class: "rt-pop-row" + (enabled ? "" : " off"), for: cid }, cb,
+      h("span", { class: "rt-pop-txt" }, h("span", { class: "rt-pop-name" }, l.name),
+        h("span", { class: "faint", id: cid + "-d" }, why || `${l.readiness || "unknown"} · ${l.route_type || "no route"}`)));
+  };
+  const load = async () => {
+    list.replaceChildren(h("p", { class: "muted" }, "Checking lanes…"));
+    await rtAuthorize();
+    let lanes = [];
+    try { lanes = (await api("GET", "/api/roundtable/lanes")).lanes || []; } catch (e) { list.replaceChildren(h("p", { class: "muted" }, e.message)); return; }
+    const isConv = (l) => l.lane_class === "admin" || l.lane_class === "speaker";
+    const conv = lanes.filter(isConv); const other = lanes.filter((l) => !isConv(l));
+    const ok = new Set(conv.filter((l) => l.counts_as_speaker).map((l) => l.id));
+    sel = new Set([...sel].filter((id) => ok.has(id)));
+    list.replaceChildren(
+      ...conv.map((l) => row(l, ok.has(l.id), ok.has(l.id) ? "" : ((l.reasons || [])[0] || "Not ready"))),
+      other.length ? h("div", { class: "rt-pop-group", role: "group", "aria-label": "Not speakers" }, h("p", { class: "rt-pop-gh" }, "Not speakers"),
+        ...other.map((l) => row(l, false, `${RT_CLASS[l.lane_class] || l.lane_class} · ${l.route_type || "no route"}`))) : null);
+    upd();
+  };
+  const outside = (e) => { if (!wrap.contains(e.target)) close(false); };
+  function close(focus) {
+    if (!open) return; open = false; pop.hidden = true; trig.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", outside, true);
+    if (focus) trig.focus();
+  }
+  const show = async () => {
+    open = true; pop.hidden = false; trig.setAttribute("aria-expanded", "true"); upd();
+    document.addEventListener("pointerdown", outside, true);
+    await load(); if (open) { const f = items()[0]; if (f) f.focus(); }
+  };
+  trig.addEventListener("click", () => (open ? close(true) : show()));
+  trig.addEventListener("keydown", (e) => { if (e.key === "ArrowDown" && !open) { e.preventDefault(); show(); } });
+  pop.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(true); return; }
+    const it = items(); const i = it.indexOf(document.activeElement); let n = null;
+    if (e.key === "ArrowDown") n = (i + 1) % it.length; else if (e.key === "ArrowUp") n = (i - 1 + it.length) % it.length;
+    else if (e.key === "Home") n = 0; else if (e.key === "End") n = it.length - 1;
+    if (n === null || !it.length) return; e.preventDefault(); it[n].focus();
+  });
+  const wrap = h("div", { class: "menuwrap rt-menuwrap" }, trig, pop);
+  return wrap;
 }
 
 // ---------- boot ----------
@@ -1207,7 +1279,7 @@ async function renderChat() {
   if (sumBtn) { sumBtn.id = "sumBtn"; if (dRunning(DERIV[dkey("summary")]) || !S.project.provider_default) sumBtn.disabled = true; }
   const bar = h("div", { class: "convbar" },
     convs.length ? h("div", { class: "convstrip", role: "list", "aria-label": "Conversations" }, ...convs.map((c) => h("button", { role: "listitem", "aria-current": c.id === cid ? "true" : "false", title: c.title, onclick: () => { S.conv = c.id; refresh("chat"); } }, icon("chat", "sm"), h("span", {}, c.title)))) : h("span", { class: "grow" }),
-    sumBtn, btn("Roundtable", (e) => openRoundtable(e.currentTarget), "rt-entry", "users"), btn("New conversation", newConv, "ghost", "plus"));
+    sumBtn, rtMenu(), btn("War Room", (e) => { rtAuthorize(); openRoundtable(e.currentTarget, { mode: "war_room" }); }, "rt-entry", "shield"), btn("New conversation", newConv, "ghost", "plus"));
   const root = h("div", { class: "chatv" }, bar, h("div", { "data-deriv": "summary", class: "section" }, ...dView("summary")));
   if (!cid) {
     root.append(empty("chat", "No conversations yet", "Start a conversation to talk with this project's provider. Messages are saved locally before anything is sent.", btn("Start a conversation", newConv, "primary", "plus")));
@@ -1754,7 +1826,7 @@ async function viewRoundtable(r) {
   const opener = document.activeElement;
   if (!S.project || S.project.id !== r.project_id) await openProject(r.project_id);
   if (!S.project || S.project.id !== r.project_id) return;
-  await openRoundtable(opener);
+  await openRoundtable(opener, { mode: r.mode });
   if (RT && RT.pid === r.project_id) rtRoom(r.id, true);
 }
 

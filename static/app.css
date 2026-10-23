@@ -517,8 +517,6 @@ input[type="checkbox"]:disabled { cursor: not-allowed; }
 .seg button { min-height: 36px; padding: 0 12px; border: 0; border-radius: var(--r-sm); background: none; color: var(--text-2); font: inherit; font-size: 13px; font-weight: 580; cursor: pointer; transition: background var(--t-hover) var(--ease), color var(--t-hover) var(--ease); }
 .seg button:hover { color: var(--text); }
 .seg button[aria-checked="true"], .seg button[aria-selected="true"] { background: var(--raised); color: var(--text); box-shadow: inset 0 0 0 1px var(--border-2); }
-.rt-mode button { min-height: 40px; padding: 0 16px; font-size: 13.5px; }
-.rt-mode button[aria-selected="true"] { color: var(--coral); }
 dialog.rt { max-width: min(960px, calc(100vw - 24px)); width: 100%; max-height: 88dvh; overflow: hidden; }
 dialog.rt[open] { display: flex; flex-direction: column; }
 .rt-in { display: flex; flex-direction: column; flex: 1; min-height: 0; }
@@ -717,3 +715,30 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 /* QA: path toggle meets the 40px desktop control minimum (44px on touch). */
 .linkish.pathtog { min-height: 40px; }
 @media (pointer: coarse) { .linkish.pathtog { min-height: 44px; } }
+/* Roundtable dropdown + War Room roster */
+.rt-menuwrap .rt-pop { left: 0; right: auto; width: min(340px, calc(100vw - 32px)); max-height: 60vh; overflow-y: auto; }
+.rt-pop[hidden] { display: none; }
+.rt-pop-count { margin: 4px 8px 6px; font-size: 12.5px; color: var(--muted, inherit); }
+.rt-pop-row { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 4px 10px; border-radius: var(--r-sm); cursor: pointer; }
+.rt-pop-row:hover { background: var(--panel); }
+.rt-pop-row input { width: 20px; height: 20px; flex: none; }
+.rt-pop-row.off { opacity: .55; cursor: not-allowed; }
+.rt-pop-txt { display: flex; flex-direction: column; min-width: 0; }
+.rt-pop-name { font-size: 13.5px; }
+.rt-pop-txt .faint { font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.rt-pop-group { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-2); opacity: .8; }
+.rt-pop-gh { margin: 2px 10px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+.rt-pop-setup { min-height: 44px; margin-top: 6px; border-top: 1px solid var(--border-2); border-radius: 0; }
+.rt-admins { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+
+/* QA fixes: the Roundtable dropdown opens leftward from its button so it never runs off the canvas edge, and the
+   War Room's locked admin cards lay out on full width (name + tag on one line, readiness + route on one line). */
+.rt-menuwrap { position: relative; }
+.rt-menuwrap .rt-pop { left: auto; right: 0; width: min(360px, calc(100vw - 32px)); }
+.rt-pop-txt { flex: 1 1 auto; }
+.rt-pop-txt .faint { white-space: normal; overflow-wrap: anywhere; }
+.rt-admins .lane { display: block; width: 100%; }
+.rt-admins .lbody { display: flex; flex-direction: column; gap: 6px; min-width: 0; width: 100%; }
+.rt-admins .lname { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rt-admins .lmeta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; white-space: normal; }
+.rt-admins .lmeta > span { white-space: nowrap; }
