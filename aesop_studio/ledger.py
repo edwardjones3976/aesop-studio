@@ -16,7 +16,7 @@ import time
 from .store import Store, new_id
 
 CEILING_USD = 165.0
-ALLOWED_BILLERS = {"openai"}
+ALLOWED_BILLERS = {"openai", "perplexity"}  # Perplexity added on owner request 2026-10-23 (Sonar chat route)
 FREEZE_OPTIONAL_AT = 120.0
 PRIORITIZE_CORE_AT = 145.0
 

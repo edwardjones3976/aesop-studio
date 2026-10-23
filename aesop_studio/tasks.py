@@ -306,7 +306,7 @@ class Supervisor:
 
     # ---- lifecycle ----
     def create(self, project: dict, route_id: str, prompt: str, mode: str = "agent",
-               timeout: int = DEFAULT_TIMEOUT, images: list[str] | None = None) -> str:
+               timeout: int = DEFAULT_TIMEOUT, images: list[str] | None = None, research: dict | None = None) -> str:
         routes = providers.cached(self.store)
         route = routes.get(route_id)
         tid = new_id("task")
@@ -334,6 +334,10 @@ class Supervisor:
                 self._end(tid, "BLOCKED_OWNER", None, None,
                           error="acknowledge how agent tasks run before starting one: " + AGENT_ACK_STATEMENT)
                 return tid
+        if route.get("transport") == "research":
+            return self._start_research(tid, route_id, route, research or {"question": prompt,
+                                                                           "messages": [{"role": "user", "content": prompt}]},
+                                        out_path)
         if route["billing_basis"] == "metered":
             return self._start_api(tid, project, route_id, route, prompt, out_path, timeout, images)
         try:
@@ -357,6 +361,43 @@ class Supervisor:
             return tid
         threading.Thread(target=self._run, args=(tid, route_id, mode, cwd, prompt, out_path, timeout, lid,
                                                  project.get("model"), images), daemon=True).start()
+        return tid
+
+    # ---- research API routes (Firecrawl, Perplexity): one bounded HTTPS call, no subprocess ----
+    def _start_research(self, tid, route_id, route, payload, out_path) -> str:
+        from . import research_routes
+        metered = route["billing_basis"] == "metered"
+        try:
+            lid = ledger.reserve(self.store, route["provider"], route_id, route["billing_basis"],
+                                 research_routes.PPLX_RESERVE_USD if metered else None, task_ref=tid,
+                                 price_source=research_routes.PPLX_PRICE_NOTE if metered else "Firecrawl plan credits")
+        except ledger.BudgetError as e:
+            self._end(tid, "BLOCKED_OWNER", None, None, error=str(e))
+            return tid
+        self._set(tid, "RUNNING", started=time.time(), checkpoint=json.dumps({"mode": "chat", "ledger_id": lid}),
+                  argv_meta=json.dumps({"endpoint": route.get("executable"), "transport": "research"}))
+
+        def go():
+            try:
+                out = research_routes.run(route_id, payload)
+            except Exception as e:  # noqa: BLE001
+                msg = redact(f"{type(e).__name__}: {e}")[:400]
+                # an HTTP error reply means the call was refused before any work; a network failure is unknown
+                billed = 0 if (not metered or str(e).startswith("HTTP 4")) else None
+                return self._end(tid, "FAILED" if billed == 0 else "EFFECT_UNKNOWN", lid, billed, error=msg)
+            text = out["text"][:MAX_OUTPUT_BYTES]
+            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+            Path(out_path).write_text(text, encoding="utf-8")
+            cp = {"mode": "chat", "ledger_id": lid, "result": text, "latency_s": out.get("latency_s")}
+            cost = 0.0
+            if metered:
+                cost = out.get("cost_usd") if out.get("cost_usd") is not None else research_routes.PPLX_RESERVE_USD
+                cp.update(cost_usd=cost, usage=out.get("usage"), model=research_routes.PPLX_MODEL)
+            else:
+                cp["credits_estimate"] = out.get("credits")
+            self._end(tid, "COMPLETED", lid, cost, exit_code=0, checkpoint=json.dumps(cp))
+
+        threading.Thread(target=go, daemon=True).start()
         return tid
 
     # ---- metered API route (no subprocess; streamed, reserved, settled from real usage) ----

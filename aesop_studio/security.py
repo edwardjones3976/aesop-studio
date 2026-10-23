@@ -17,7 +17,15 @@ MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 MAX_EXTRACT_CHARS = 60_000
 MAX_FETCH_BYTES = 2 * 1024 * 1024
 TEXT_EXTS = {".txt", ".md", ".markdown", ".py", ".js", ".ts", ".json", ".csv", ".html", ".htm",
-             ".css", ".yaml", ".yml", ".toml", ".ini", ".xml", ".log", ".ps1", ".sh", ".sql", ".rst"}
+             ".css", ".yaml", ".yml", ".toml", ".ini", ".xml", ".log", ".ps1", ".sh", ".sql", ".rst",
+             # code folders (owner request 2026-10-23: attach files and folders in chat)
+             ".tsx", ".jsx", ".mjs", ".cjs", ".vue", ".svelte", ".scss", ".sass", ".less", ".java", ".kt", ".kts",
+             ".gradle", ".c", ".h", ".cc", ".cpp", ".hpp", ".cs", ".go", ".rs", ".rb", ".php", ".swift", ".dart",
+             ".lua", ".r", ".pl", ".bat", ".cmd", ".psm1", ".cfg", ".conf", ".properties", ".tex", ".tf", ".hcl",
+             ".proto", ".graphql", ".gql", ".ipynb", ".svg", ".tsv", ".jsonl", ".lock", ".editorconfig", ".gitignore"}
+# Never read, even when they arrive inside a dropped folder: they usually hold credentials.
+SECRET_FILE_RE = re.compile(r"(^|/)(\.env(\..*)?|.*\.(pem|key|p12|pfx|keystore|jks)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|"
+                            r"\.npmrc|\.pypirc|\.netrc|credentials(\.json)?|secrets?\.(json|ya?ml|toml))$", re.I)
 
 _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),
@@ -263,6 +271,8 @@ def extract(name: str, data: bytes) -> tuple[str, str | None, str]:
     ext = Path(name).suffix.lower()
     if len(data) > MAX_UPLOAD_BYTES:
         return "too_large", None, f"File exceeds {MAX_UPLOAD_BYTES // 1024 // 1024} MB limit; original not stored."
+    if SECRET_FILE_RE.search(name.replace("\\", "/")):
+        return "unsupported", None, "Looks like a credentials file (.env, key, certificate); not read or sent."
     kind = image_kind(data)
     if kind:
         dims = image_size(data)

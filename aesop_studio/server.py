@@ -366,9 +366,16 @@ class Handler(BaseHTTPRequestHandler):
     def attachments(self, sess, pid):
         self.json(self.app.svc.attachments(pid))
 
+    @route("POST", r"/api/attachments/(\w+)/discard")
+    def attachment_discard(self, sess, aid):
+        self.json(self.app.svc.discard_unsent(aid))
+
     @route("GET", r"/api/attachments/(\w+)/image")
     def attachment_image(self, sess, aid):
-        path, mime = self.app.svc.image_file(aid)
+        try:
+            path, mime = self.app.svc.image_file(aid)
+        except KeyError:  # not a photo (a text file, or already removed): nothing to show, not an error
+            return self._send(204, b"", "text/plain")
         self._send(200, path.read_bytes(), mime, {"Cache-Control": "private, max-age=86400"})
 
     @route("POST", r"/api/projects/(\w+)/attachments")

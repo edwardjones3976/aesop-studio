@@ -1600,43 +1600,98 @@ function autosize(ta) {
 function ssGet(k) { try { return sessionStorage.getItem(k); } catch { return null; } }
 function ssSet(k, v) { try { if (v) sessionStorage.setItem(k, v); else sessionStorage.removeItem(k); } catch { /* optional */ } }
 const chatChips = {}; // cid -> Set of attachment ids chosen in the composer
-// ---------- photos in chat ----------
-// Paste (Ctrl+V), drop or pick photos. Each is resized in the browser before upload so it never hits the 5 MB
-// file limit: long edge at most 2048 px, screenshots stay PNG when small, photos become JPEG (quality 0.85).
+// ---------- photos, files and folders in chat ----------
+// Photos are sized for the provider that will read them: the most pixels it can actually use, no more (beyond
+// that it shrinks the image itself, so extra pixels only cost upload time). Claude (Claude Code): long edge
+// 1568 px and about 1.15 MP. OpenAI (Codex, Codex API, detail "high"): fits 2048 x 2048 with the short side at
+// 768 px. Very tall or wide images (long screenshots, receipts) are split into overlapping parts, each sized the
+// same way, so their text stays readable instead of shrinking to a sliver.
 const PHOTO_ROUTES = ["codex", "claude", "openai-api", "simulated"]; // verified live to see an image
-const PHOTO_MAX = 6, PHOTO_EDGE = 2048, PHOTO_KEEP_PNG = 1.5 * 1024 * 1024, PHOTO_FILE_MAX = 5 * 1024 * 1024;
-const chatPhotos = {}; // cid -> [{ key, id, name, size, url, state: "uploading"|"ready"|"error", err }]
+const PHOTO_TARGETS = { claude: { edge: 1568, mp: 1.15e6 }, codex: { edge: 2048, short: 768 }, "openai-api": { edge: 2048, short: 768 } };
+const PHOTO_DEFAULT = { edge: 2048 };
+const photoTarget = (route) => PHOTO_TARGETS[route] || PHOTO_DEFAULT;
+const PHOTO_MAX = 6, PHOTO_PARTS_MAX = 12, PHOTO_FILE_MAX = 5 * 1024 * 1024;
+const chatPhotos = {}; // cid -> [{ key, orig, name, size, url, parts: [ids], target, dims, state, err }]
+const chatFiles = {};  // cid -> [{ key, name, size, group, id, state: "uploading"|"ready"|"unreadable"|"error", err }]
 const photoCache = {}; // attachment id -> blob URL (thumbnails in sent messages)
-const isPhotoFile = (f) => f && (/^image\//.test(f.type) || /\.(png|jpe?g|gif|webp|heic|heif)$/i.test(f.name || ""));
+const isPhotoFile = (f) => f && (/^image\/(png|jpeg|gif|webp|heic|heif)$/.test(f.type) || /\.(png|jpe?g|gif|webp|heic|heif)$/i.test(f.name || ""));
 const fmtKB = (n) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
-async function preparePhoto(file) {
-  const type = file.type || "";
-  if (/heic|heif/i.test(type) || /\.hei[cf]$/i.test(file.name || "")) throw new Error(`${file.name}: HEIC photos can't be read here. Save it as JPG or PNG first.`);
-  if (!/^image\/(png|jpeg|gif|webp)$/.test(type)) throw new Error(`${file.name || "That file"} isn't a PNG, JPG, GIF or WebP photo.`);
-  if (type === "image/gif" && file.size <= PHOTO_FILE_MAX) return file; // keep animation
-  let bmp;
-  try { bmp = await createImageBitmap(file); } catch { throw new Error(`${file.name || "That photo"} couldn't be opened.`); }
-  const scale = Math.min(1, PHOTO_EDGE / Math.max(bmp.width, bmp.height));
-  if (scale === 1 && file.size <= PHOTO_KEEP_PNG) { bmp.close && bmp.close(); return file; }
-  const w = Math.max(1, Math.round(bmp.width * scale)), hh = Math.max(1, Math.round(bmp.height * scale));
+function fitScale(w, h, t) {
+  let s = Math.min(1, t.edge / Math.max(w, h));
+  if (t.short) s = Math.min(s, t.short / Math.min(w, h));
+  if (t.mp) s = Math.min(s, Math.sqrt(t.mp / (w * h)));
+  return s;
+}
+function splitRects(w, h) {
+  const long = Math.max(w, h), short = Math.min(w, h);
+  if (long / short <= 2.2) return [[0, 0, w, h]];
+  const k = Math.min(4, Math.ceil(long / short / 1.6)); const seg = long / k; const ov = Math.round(seg * 0.06);
+  return Array.from({ length: k }, (_, i) => {
+    const a = Math.max(0, Math.round(i * seg - ov)), b = Math.min(long, Math.round((i + 1) * seg + ov));
+    return w >= h ? [a, 0, b - a, h] : [0, a, w, b - a];
+  });
+}
+async function encodeRect(bmp, [sx, sy, sw, sh], t, type, base) {
+  const s = fitScale(sw, sh, t);
+  const w = Math.max(1, Math.round(sw * s)), hh = Math.max(1, Math.round(sh * s));
   const cv = document.createElement("canvas"); cv.width = w; cv.height = hh;
-  const cx = cv.getContext("2d");
-  const blobOf = (t, q) => new Promise((res) => cv.toBlob(res, t, q));
-  cx.drawImage(bmp, 0, 0, w, hh);
-  const base = (file.name || "photo").replace(/\.[^.]+$/, "") || "photo";
-  if (type === "image/png") { const png = await blobOf("image/png"); if (png && png.size <= PHOTO_KEEP_PNG) return new File([png], base + ".png", { type: "image/png" }); }
+  const cx = cv.getContext("2d"); cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = "high";
+  cx.drawImage(bmp, sx, sy, sw, sh, 0, 0, w, hh);
+  const blobOf = (ty, q) => new Promise((res) => cv.toBlob(res, ty, q));
+  if (type === "image/png") { // screenshots stay lossless when they fit: text edges stay sharp
+    const png = await blobOf("image/png");
+    if (png && png.size <= PHOTO_FILE_MAX) return new File([png], base + ".png", { type: "image/png" });
+  }
   cx.globalCompositeOperation = "destination-over"; cx.fillStyle = "#ffffff"; cx.fillRect(0, 0, w, hh); // no black where it was transparent
-  for (const q of [0.85, 0.72, 0.6]) {
+  for (const q of [0.92, 0.85, 0.75, 0.6]) {
     const jpg = await blobOf("image/jpeg", q);
     if (jpg && jpg.size <= PHOTO_FILE_MAX) return new File([jpg], base + ".jpg", { type: "image/jpeg" });
   }
-  throw new Error(`${file.name || "That photo"} is still over 5 MB after resizing.`);
+  throw new Error(`${base} is still over 5 MB after resizing.`);
+}
+async function preparePhoto(file, route) {
+  const type = file.type || "";
+  if (/heic|heif/i.test(type) || /\.hei[cf]$/i.test(file.name || "")) throw new Error(`${file.name}: HEIC photos can't be read here. Save it as JPG or PNG first.`);
+  if (!/^image\/(png|jpeg|gif|webp)$/.test(type)) throw new Error(`${file.name || "That file"} isn't a PNG, JPG, GIF or WebP photo.`);
+  const t = photoTarget(route); const key = JSON.stringify(t);
+  if (type === "image/gif" && file.size <= PHOTO_FILE_MAX) return { parts: [file], target: key, dims: "", split: 1 }; // keep animation
+  let bmp;
+  try { bmp = await createImageBitmap(file); } catch { throw new Error(`${file.name || "That photo"} couldn't be opened.`); }
+  try {
+    const rects = splitRects(bmp.width, bmp.height);
+    const base = (file.name || "photo").replace(/\.[^.]+$/, "") || "photo";
+    if (rects.length === 1 && fitScale(bmp.width, bmp.height, t) === 1 && file.size <= PHOTO_FILE_MAX)
+      return { parts: [file], target: key, dims: `${bmp.width}×${bmp.height}`, split: 1 }; // already the right size
+    const parts = [];
+    for (let i = 0; i < rects.length; i++) parts.push(await encodeRect(bmp, rects[i], t, type, rects.length > 1 ? `${base}-part${i + 1}` : base));
+    const s = fitScale(rects[0][2], rects[0][3], t);
+    return { parts, target: key, dims: `${Math.round(rects[0][2] * s)}×${Math.round(rects[0][3] * s)}`, split: rects.length };
+  } finally { bmp.close && bmp.close(); }
+}
+// Folders: walk dropped directories (or a picked folder), skipping build output and dependency folders.
+const SKIP_DIRS = /^(node_modules|\.git|\.hg|\.svn|\.venv|venv|env|__pycache__|\.mypy_cache|\.pytest_cache|dist|build|out|\.next|\.nuxt|target|bin|obj|coverage|\.cache|\.idea|\.gradle)$/i;
+const FILE_MAX = 60, FOLDER_SCAN_MAX = 600;
+async function walkEntries(entries) {
+  const out = []; let scanned = 0, skipped = 0;
+  const readAll = (dir) => new Promise((res) => { const r = dir.createReader(); const acc = [];
+    const step = () => r.readEntries((b) => { if (!b.length) res(acc); else { acc.push(...b); step(); } }, () => res(acc)); step(); });
+  const fileOf = (fe) => new Promise((res) => fe.file(res, () => res(null)));
+  async function walk(entry, prefix) {
+    if (scanned >= FOLDER_SCAN_MAX) { skipped++; return; }
+    if (entry.isFile) { scanned++; const f = await fileOf(entry); if (f) out.push({ file: f, path: prefix + entry.name }); return; }
+    if (entry.isDirectory) {
+      if (SKIP_DIRS.test(entry.name)) { skipped++; return; }
+      for (const c of await readAll(entry)) await walk(c, prefix + entry.name + "/");
+    }
+  }
+  for (const e of entries) await walk(e, "");
+  return { files: out, skipped };
 }
 async function photoURL(id) {
   if (photoCache[id] !== undefined) return photoCache[id];
   try {
     const r = await fetch(`/api/attachments/${id}/image`, { headers: { "X-Aesop-Key": apiKey() }, credentials: "same-origin" });
-    photoCache[id] = r.ok ? URL.createObjectURL(await r.blob()) : null;
+    photoCache[id] = r.status === 200 ? URL.createObjectURL(await r.blob()) : null;
   } catch { photoCache[id] = null; }
   return photoCache[id];
 }
@@ -1656,7 +1711,7 @@ async function renderChat() {
   const gen = ++S.viewGen;
   const convs = await api("GET", `/api/projects/${pid}/conversations`);
   if (gen !== S.viewGen) return;
-  const atts = (await api("GET", `/api/projects/${pid}/attachments`)).filter((a) => a.extract_status === "extracted");
+  let atts = (await api("GET", `/api/projects/${pid}/attachments`)).filter((a) => a.extract_status === "extracted");
   if (gen !== S.viewGen) return;
   // Only a current render may change shared chat state.
   if (!S.conv || !convs.some((c) => c.id === S.conv)) S.conv = convs.length ? convs[0].id : null;
@@ -1691,88 +1746,186 @@ async function renderChat() {
   ta.addEventListener("input", () => ssSet(draftKey, ta.value));
   const chosen = () => [...chips].filter((id) => atts.some((a) => a.id === id));
   const photos = chatPhotos[cid] || (chatPhotos[cid] = []);
-  const tray = h("div", { class: "ptray", role: "group", "aria-label": "Photos for this message" });
+  const files = chatFiles[cid] || (chatFiles[cid] = []);
+  const tray = h("div", { class: "ptray", role: "group", "aria-label": "Photos and files for this message" });
   const trayNote = h("div", { class: "pnote", role: "status", "aria-live": "polite" });
-  const readyPhotos = () => photos.filter((x) => x.state === "ready").map((x) => x.id);
+  const readyPhotos = () => photos.filter((x) => x.state === "ready").flatMap((x) => x.parts);
+  const readyFiles = () => files.filter((x) => x.state === "ready").map((x) => x.id);
+  const busy = () => photos.some((x) => x.state === "uploading") || files.some((x) => x.state === "uploading");
+  const discard = (ids) => { for (const id of ids || []) if (id) api("POST", `/api/attachments/${id}/discard`).catch(() => {}); };
+  const removeFiles = (pred) => { for (let i = files.length - 1; i >= 0; i--) if (pred(files[i])) { discard([files[i].id]); files.splice(i, 1); } drawTray(); ta.focus(); };
   const drawTray = () => {
-    tray.hidden = !photos.length;
-    tray.replaceChildren(...photos.map((x) => h("figure", { class: "pthumb " + x.state, title: x.err || `${x.name} · ${fmtKB(x.size)}` },
-      h("img", { src: x.url, alt: x.name }),
-      x.state === "uploading" ? h("span", { class: "pbusy", "aria-label": "Uploading" }) : null,
-      x.state === "error" ? h("span", { class: "perr" }, icon("alert", "sm")) : null,
-      h("button", { type: "button", class: "pdel", "aria-label": `Remove ${x.name}`, onclick: () => {
-        const i = photos.indexOf(x); if (i >= 0) photos.splice(i, 1); URL.revokeObjectURL(x.url); drawTray(); ta.focus(); } }, icon("x", "sm")))),
-      photos.length ? h("span", { class: "pcount faint" }, `${photos.length}/${PHOTO_MAX} photos · resized automatically`) : null);
-    checkPhotos();
+    const prov = messageProvider(); const t = photoTarget(prov);
+    const groups = {}; const singles = [];
+    for (const f of files) { if (f.group) (groups[f.group] = groups[f.group] || []).push(f); else singles.push(f); }
+    const fileChip = (label, title, state, onRemove, ico) => h("span", { class: "fchip " + state, title },
+      icon(ico, "sm"), h("span", { class: "t" }, label), state === "uploading" ? h("span", { class: "pbusy sm", "aria-label": "Uploading" }) : null,
+      h("button", { type: "button", class: "fdel", "aria-label": `Remove ${label}`, onclick: onRemove }, icon("x", "sm")));
+    tray.hidden = !photos.length && !files.length;
+    tray.replaceChildren(
+      ...photos.map((x) => h("figure", { class: "pthumb " + x.state, title: x.err || `${x.name} · ${x.dims || ""} · ${fmtKB(x.size)}${x.parts.length > 1 ? ` · split into ${x.parts.length} parts so the text stays readable` : ""}` },
+        x.url ? h("img", { src: x.url, alt: x.name }) : null,
+        x.state === "uploading" ? h("span", { class: "pbusy", "aria-label": "Preparing" }) : null,
+        x.state === "error" ? h("span", { class: "perr" }, icon("alert", "sm")) : null,
+        x.parts.length > 1 ? h("span", { class: "pparts" }, `×${x.parts.length}`) : null,
+        h("button", { type: "button", class: "pdel", "aria-label": `Remove ${x.name}`, onclick: () => {
+          const i = photos.indexOf(x); if (i >= 0) photos.splice(i, 1); discard(x.parts); if (x.url) URL.revokeObjectURL(x.url); drawTray(); ta.focus(); } }, icon("x", "sm")))),
+      ...Object.entries(groups).map(([g, list]) => {
+        const ok = list.filter((f) => f.state === "ready").length, bad = list.filter((f) => f.state === "unreadable" || f.state === "error").length;
+        const up = list.some((f) => f.state === "uploading");
+        return fileChip(`${g}/ · ${ok} file${ok === 1 ? "" : "s"}${bad ? ` (${bad} not readable)` : ""}`, list.map((f) => `${f.name}${f.err ? " — " + f.err : ""}`).join("\n"),
+          up ? "uploading" : ok ? "ready" : "error", () => removeFiles((f) => f.group === g), "layers");
+      }),
+      ...singles.map((f) => fileChip(f.name, f.err || `${f.name} · ${fmtKB(f.size)}`, f.state, () => removeFiles((y) => y === f), "file")),
+      photos.length || files.length ? h("span", { class: "pcount faint" }, [
+        photos.length ? `${photos.length}/${PHOTO_MAX} photos · sized for ${routeName(prov) || "the provider"} (up to ${t.edge}px)` : "",
+        files.length ? `${readyFiles().length}/${FILE_MAX} files` : ""].filter(Boolean).join(" · ")) : null);
+    checkAttach();
   };
-  const checkPhotos = () => {
-    const prov = messageProvider(); const n = readyPhotos().length; const errs = photos.filter((x) => x.state === "error");
+  const checkAttach = () => {
+    const prov = messageProvider(); const nP = readyPhotos().length; const nF = readyFiles().length + chosen().length;
+    const errs = [...photos, ...files].filter((x) => x.state === "error" && x.err);
     const bits = [];
     if (errs.length) bits.push(h("span", { class: "bad" }, errs[errs.length - 1].err));
-    if (n && prov && !PHOTO_ROUTES.includes(prov)) {
+    const research = ["firecrawl", "perplexity"].includes(prov);
+    if ((nP || nF) && research) {
+      bits.push(h("span", {}, `${routeName(prov)} takes questions and links, not files or photos.`), ...usable.filter(([id]) => PHOTO_ROUTES.includes(id)).map(([id]) => h("button", { type: "button", class: "linkish", onclick: () => {
+        provSel.value = id; ssSet(provKey, id); refreshRouteLabels(); refit(); } }, `Use ${routeName(id)}`)));
+    } else if (nP && prov && !PHOTO_ROUTES.includes(prov)) {
       const alts = usable.filter(([id]) => PHOTO_ROUTES.includes(id));
       bits.push(h("span", {}, `${routeName(prov)} can't see photos.`), ...alts.map(([id]) => h("button", { type: "button", class: "linkish", onclick: () => {
-        provSel.value = id; ssSet(provKey, id); refreshRouteLabels(); checkPhotos(); } }, `Use ${routeName(id)}`)));
-    } else if (n && prov && !(S.project.transfer_policy || {})[prov]) {
+        provSel.value = id; ssSet(provKey, id); refreshRouteLabels(); refit(); } }, `Use ${routeName(id)}`)));
+    } else if ((nP || nF) && prov && !(S.project.transfer_policy || {})[prov]) {
       bits.push(h("span", {}, `Sending files to ${routeName(prov)} is off for this project.`), abtn(`Allow for ${routeName(prov)}`, async () => {
         const pol = { ...(S.project.transfer_policy || {}), [prov]: true };
         const up = await api("PATCH", `/api/projects/${pid}`, { transfer_policy: pol });
-        S.project = { ...S.project, ...up, transfer_policy: up.transfer_policy || pol }; banner(`Photos and files can now be sent to ${routeName(prov)} in this project.`, "ok"); checkPhotos();
+        S.project = { ...S.project, ...up, transfer_policy: up.transfer_policy || pol }; banner(`Photos and files can now be sent to ${routeName(prov)} in this project.`, "ok"); checkAttach();
       }, "sm"));
     }
     trayNote.replaceChildren(...bits); trayNote.hidden = !bits.length;
   };
-  const addPhotos = async (files) => {
-    const list = [...files].filter(isPhotoFile);
-    if (!list.length) return false;
-    const room = PHOTO_MAX - photos.length;
-    if (room <= 0) { banner(`Up to ${PHOTO_MAX} photos per message. Remove one to add another.`, "bad"); return true; }
-    if (list.length > room) banner(`Added ${room} of ${list.length}: up to ${PHOTO_MAX} photos per message.`);
-    await Promise.all(list.slice(0, room).map(async (f) => {
-      const x = { key: Math.random().toString(36).slice(2), name: f.name || "pasted photo", size: f.size, url: "", state: "uploading" };
-      photos.push(x);
-      try {
-        const ready = await preparePhoto(f);
-        x.url = URL.createObjectURL(ready); x.size = ready.size; x.name = f.name ? ready.name : `pasted-${new Date().toTimeString().slice(0, 8).replace(/:/g, "")}${ready.name.slice(ready.name.lastIndexOf("."))}`;
-        drawTray();
-        const a = await api("POST", `/api/projects/${pid}/attachments`, undefined, { name: x.name, data: ready });
-        if (a.extract_status !== "image") throw new Error(`${x.name}: ${a.extract_note || "not recognised as a photo"}`);
-        x.id = a.id; x.state = "ready"; photoCache[a.id] = x.url;
-      } catch (e) {
-        x.state = "error"; x.err = e.message;
-        if (!x.url) { const i = photos.indexOf(x); if (i >= 0) photos.splice(i, 1); banner(e.message, "bad"); }
-      }
+  const uploadPhoto = async (x, route) => {
+    x.state = "uploading"; drawTray();
+    try {
+      const prep = await preparePhoto(x.orig, route);
+      if (x.url) URL.revokeObjectURL(x.url);
+      x.url = URL.createObjectURL(prep.parts[0]); x.dims = prep.dims; x.size = prep.parts.reduce((n, p) => n + p.size, 0);
       drawTray();
-    }));
-    return true;
+      const ids = [];
+      for (const part of prep.parts) {
+        const nm = x.pasted ? `pasted-${x.key.slice(0, 5)}${part.name.slice(part.name.lastIndexOf("."))}` : part.name;
+        const a = await api("POST", `/api/projects/${pid}/attachments`, undefined, { name: nm, data: part });
+        if (a.extract_status !== "image") throw new Error(`${x.name}: ${a.extract_note || "not recognised as a photo"}`);
+        ids.push(a.id);
+        if (ids.length === 1) photoCache[a.id] = x.url;
+      }
+      discard(x.parts.filter((id) => !ids.includes(id))); // the previous size is no longer needed
+      x.parts = ids; x.target = prep.target; x.state = "ready"; x.err = "";
+    } catch (e) {
+      x.state = "error"; x.err = e.message; x.parts = [];
+      if (!x.url) { const i = photos.indexOf(x); if (i >= 0) photos.splice(i, 1); banner(e.message, "bad"); }
+    }
+    drawTray();
   };
-  const picker = h("input", { type: "file", accept: "image/png,image/jpeg,image/gif,image/webp", multiple: true, class: "sr-only", tabindex: "-1", "aria-hidden": "true",
+  // switching provider re-sizes photos for the new one (from the original, never from a smaller copy)
+  const refit = () => {
+    const prov = messageProvider(); const want = JSON.stringify(photoTarget(prov));
+    for (const x of photos) if (x.state === "ready" && x.target !== want && x.orig.type !== "image/gif") uploadPhoto(x, prov);
+    drawTray();
+  };
+  const addPhotos = async (list) => {
+    list = [...list].filter(isPhotoFile);
+    if (!list.length) return 0;
+    const room = PHOTO_MAX - photos.length;
+    if (room <= 0) { banner(`Up to ${PHOTO_MAX} photos per message. Remove one to add another.`, "bad"); return list.length; }
+    if (list.length > room) banner(`Added ${room} of ${list.length}: up to ${PHOTO_MAX} photos per message.`);
+    const items = list.slice(0, room).map((f) => ({ key: Math.random().toString(36).slice(2), orig: f, pasted: !f.name || /^image\.(png|jpe?g)$/i.test(f.name),
+      name: f.name || "pasted photo", size: f.size, url: "", parts: [], target: "", dims: "", state: "uploading" }));
+    photos.push(...items);
+    await Promise.all(items.map((x) => uploadPhoto(x, messageProvider())));
+    return list.length;
+  };
+  // Files and folders: entries are { file, path } (path keeps the folder, e.g. "app/src/main.py").
+  const addFiles = async (entries, group, skippedDirs) => {
+    entries = [...entries];
+    const pics = entries.filter((e) => isPhotoFile(e.file)).map((e) => e.file);
+    let rest = entries.filter((e) => !isPhotoFile(e.file));
+    if (pics.length) await addPhotos(pics);
+    if (!rest.length) return pics.length;
+    const room = FILE_MAX - files.length;
+    let extra = 0;
+    if (rest.length > room) { extra = rest.length - Math.max(0, room); rest = rest.slice(0, Math.max(0, room)); }
+    const items = rest.map((e) => ({ key: Math.random().toString(36).slice(2), name: e.path || e.file.name || "file", size: e.file.size, group: group || null, file: e.file, state: "uploading" }));
+    files.push(...items); drawTray();
+    let i = 0;
+    const worker = async () => {
+      while (i < items.length) {
+        const x = items[i++];
+        if (x.size > PHOTO_FILE_MAX) { x.state = "error"; x.err = `${x.name} is over the 5 MB file limit.`; continue; }
+        try {
+          const a = await api("POST", `/api/projects/${pid}/attachments`, undefined, { name: x.name, data: x.file });
+          x.id = a.id;
+          if (a.extract_status === "extracted") x.state = "ready";
+          else { x.state = "unreadable"; x.err = a.extract_note || `${a.extract_status}`; }
+        } catch (e) { x.state = "error"; x.err = e.message; }
+        delete x.file; drawTray();
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]); // three uploads at a time
+    const unread = items.filter((x) => x.state === "unreadable").length;
+    const notes = [];
+    if (extra) notes.push(`${extra} more file${extra === 1 ? "" : "s"} left out (up to ${FILE_MAX} per message)`);
+    if (skippedDirs) notes.push(`skipped ${skippedDirs} build/dependency folder${skippedDirs === 1 ? "" : "s"} (node_modules, .git, dist…)`);
+    if (unread) notes.push(`${unread} file${unread === 1 ? "" : "s"} couldn't be read as text and won't be sent`);
+    if (notes.length) banner(notes.join("; ") + ".");
+    drawTray();
+    return entries.length;
+  };
+  const photoPick = h("input", { type: "file", accept: "image/png,image/jpeg,image/gif,image/webp", multiple: true, class: "sr-only", tabindex: "-1", "aria-hidden": "true",
     onchange: (e) => { addPhotos(e.target.files); e.target.value = ""; } });
-  const photoBtn = h("button", { type: "button", class: "btn ghost sm", title: "Add photos (or paste with Ctrl+V, or drop them here)", onclick: () => picker.click() }, icon("image", "sm"), "Photo");
+  const filePick = h("input", { type: "file", multiple: true, class: "sr-only", tabindex: "-1", "aria-hidden": "true",
+    onchange: (e) => { addFiles([...e.target.files].map((f) => ({ file: f, path: f.name }))); e.target.value = ""; } });
+  const folderPick = h("input", { type: "file", multiple: true, webkitdirectory: true, class: "sr-only", tabindex: "-1", "aria-hidden": "true",
+    onchange: (e) => {
+      const all = [...e.target.files]; e.target.value = ""; if (!all.length) return;
+      const group = (all[0].webkitRelativePath || "folder").split("/")[0];
+      let skipped = 0; const keep = [];
+      for (const f of all) { const segs = (f.webkitRelativePath || f.name).split("/"); if (segs.slice(1, -1).some((s) => SKIP_DIRS.test(s))) skipped++; else keep.push({ file: f, path: segs.join("/") }); }
+      addFiles(keep, group, skipped ? 1 : 0);
+    } });
+  const photoBtn = h("button", { type: "button", class: "btn ghost sm", title: "Add photos (or paste with Ctrl+V, or drop them here)", onclick: () => photoPick.click() }, icon("image", "sm"), "Photo");
+  const fileBtn = h("button", { type: "button", class: "btn ghost sm", title: "Add files from this PC (or drop them here)", onclick: () => filePick.click() }, icon("file", "sm"), "File");
+  const folderBtn = h("button", { type: "button", class: "btn ghost sm", title: "Add a folder from this PC: its readable files are attached (build and dependency folders are skipped)", onclick: () => folderPick.click() }, icon("layers", "sm"), "Folder");
   S.chatPaste = (e) => {
     if (S.tab !== "chat" || !document.body.contains(ta) || document.querySelector("dialog[open]")) return;
-    const files = [...(e.clipboardData ? e.clipboardData.items : [])].filter((i) => i.kind === "file" && /^image\//.test(i.type)).map((i) => i.getAsFile()).filter(Boolean);
-    if (!files.length) return; // plain text pastes normally
-    e.preventDefault(); addPhotos(files);
+    const got = [...(e.clipboardData ? e.clipboardData.items : [])].filter((i) => i.kind === "file").map((i) => i.getAsFile()).filter(Boolean);
+    if (!got.length) return; // plain text pastes normally
+    e.preventDefault(); addFiles(got.map((f) => ({ file: f, path: f.name })));
   };
   let sending = false;
   const messageProvider = () => ($("chatProv") && $("chatProv").value) || provPick || S.project.provider_default;
   const send = async (confirm) => {
     if (sending) return;
-    const raw = ta.value; const pics = readyPhotos();
-    const text = raw.trim() || (pics.length ? `Please look at the attached photo${pics.length > 1 ? "s" : ""}.` : "");
-    if (!text) { ta.focus(); return; }
-    const provider = messageProvider();
+    const raw = ta.value; const provider = messageProvider();
     if (!provider) { banner("Choose a provider for this message.", "bad"); return; }
-    if (photos.some((x) => x.state === "uploading")) { banner("Photos are still uploading — one moment.", "bad"); return; }
-    if (pics.length && !PHOTO_ROUTES.includes(provider)) { checkPhotos(); banner(`${routeName(provider)} can't see photos. Pick Codex or Claude Code, or remove the photos.`, "bad"); return; }
+    if (busy()) { banner("Photos or files are still uploading — one moment.", "bad"); return; }
+    let pics = readyPhotos(); const fids = readyFiles();
+    if (pics.length && !PHOTO_ROUTES.includes(provider)) { checkAttach(); banner(`${routeName(provider)} can't see photos. Pick Codex or Claude Code, or remove the photos.`, "bad"); return; }
+    const want = JSON.stringify(photoTarget(provider));
+    const stale = photos.filter((x) => x.state === "ready" && x.target !== want && x.orig.type !== "image/gif");
+    if (stale.length) { sendBtn.disabled = true; await Promise.all(stale.map((x) => uploadPhoto(x, provider))); sendBtn.disabled = false; pics = readyPhotos(); }
+    if (pics.length > PHOTO_PARTS_MAX) { banner(`Too many photo parts (${pics.length}); remove a long screenshot or two.`, "bad"); return; }
+    const text = raw.trim() || (pics.length ? `Please look at the attached photo${pics.length > 1 ? "s" : ""}.` : fids.length ? "Please look at the attached files." : "");
+    if (!text) { ta.focus(); return; }
     sending = true; sendBtn.disabled = true; sendBtn.setAttribute("aria-busy", "true");
     try {
       await api("POST", `/api/projects/${pid}/conversations/${cid}/messages`,
-        { text, attachment_ids: [...chosen(), ...pics], provider, confirm_switch: !!confirm });
+        { text, attachment_ids: [...chosen(), ...fids, ...pics], provider, confirm_switch: !!confirm });
       if (ta.value === raw) { ta.value = ""; grow(); ssSet(draftKey, ""); } // keep anything typed while the request was pending
-      for (const x of photos.filter((y) => pics.includes(y.id))) photos.splice(photos.indexOf(x), 1);
-      drawTray();
+      for (const x of photos.filter((y) => y.parts.some((id) => pics.includes(id)))) photos.splice(photos.indexOf(x), 1);
+      for (const x of files.filter((y) => fids.includes(y.id) || y.state === "unreadable" || y.state === "error")) files.splice(files.indexOf(x), 1);
+      try { atts = (await api("GET", `/api/projects/${pid}/attachments`)).filter((x) => x.extract_status === "extracted"); } catch { /* list refreshes on next view */ }
+      chips.clear(); drawTray(); drawProjectPick();
       banner("Saved locally and submitted to provider.", "ok");
       if (gen === S.viewGen) { S.msgSig = ""; drawMsgs(); }
     } catch (e) {
@@ -1788,28 +1941,45 @@ async function renderChat() {
   const preview = async () => guard(async () => {
     const provider = messageProvider();
     const r = await api("POST", `/api/projects/${pid}/conversations/${cid}/preview`,
-      { text: ta.value, attachment_ids: [...chosen(), ...readyPhotos()], provider });
+      { text: ta.value, attachment_ids: [...chosen(), ...readyFiles(), ...readyPhotos()], provider });
     await dialog(`Context that will be sent to ${routeName(r.provider)} (${r.chars} chars)`, [{ name: "ctx", label: "Exact payload", type: "textarea", value: r.context, tall: true, readonly: true }], "Close");
   });
   ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(false); } });
   const grow = autosize(ta);
-  const attachRow = atts.length
-    ? h("div", { class: "attach", role: "group", "aria-label": "Attach project files" }, h("span", { class: "lbl" }, icon("clip", "sm"), "Attach"),
-      ...atts.map((a) => h("button", { type: "button", class: "achip", "aria-pressed": chips.has(a.id) ? "true" : "false", "data-id": a.id, title: `${a.name} (${a.chars} chars)`,
-        onclick: (e) => { const b = e.currentTarget; const on = b.getAttribute("aria-pressed") !== "true"; b.setAttribute("aria-pressed", on ? "true" : "false"); if (on) chips.add(a.id); else chips.delete(a.id); } },
-      h("span", {}, a.name))))
-    : h("div", { class: "attach" }, h("span", { class: "lbl" }, icon("clip", "sm"), "No readable files to attach yet."), h("button", { type: "button", class: "linkish", onclick: (e) => openInspector("files", e.currentTarget) }, "Add files"));
+  // Files already in the project: a compact searchable picker instead of one chip per file.
+  const projPick = h("details", { class: "projpick" });
+  const drawProjectPick = () => {
+    const n = chosen().length;
+    const q = h("input", { type: "search", placeholder: "Filter project files…", "aria-label": "Filter project files" });
+    const list = h("div", { class: "projlist", role: "group", "aria-label": "Project files" });
+    const fill = () => list.replaceChildren(...atts.filter((a) => !q.value || a.name.toLowerCase().includes(q.value.toLowerCase())).slice(0, 200).map((a) => {
+      const cb = h("input", { type: "checkbox", id: `pf-${a.id}`, onchange: (e) => { if (e.target.checked) chips.add(a.id); else chips.delete(a.id); sum.textContent = label(); checkAttach(); } });
+      cb.checked = chips.has(a.id);
+      return h("label", { for: `pf-${a.id}`, class: "projrow", title: `${a.name} (${a.chars} chars)` }, cb, h("span", { class: "t" }, a.name));
+    }));
+    const label = () => `Project files${chosen().length ? ` · ${chosen().length} attached` : ` (${atts.length})`}`;
+    const sum = h("summary", { class: "btn ghost sm" }, icon("clip", "sm"), label());
+    q.addEventListener("input", fill); fill();
+    projPick.replaceChildren(sum, h("div", { class: "projpop" }, q, list, atts.length ? null : h("p", { class: "faint" }, "No readable files in this project yet. Drop files or a folder here to add some.")));
+  };
+  projPick.addEventListener("toggle", async () => {
+    if (!projPick.open) return;
+    try { atts = (await api("GET", `/api/projects/${pid}/attachments`)).filter((a) => a.extract_status === "extracted"); } catch { /* keep the list we have */ }
+    const keepOpen = projPick.open; drawProjectPick(); projPick.open = keepOpen;
+    const f = projPick.querySelector("input[type=search]"); if (f) f.focus();
+  });
+  drawProjectPick();
+  const attachRow = h("div", { class: "attach", role: "group", "aria-label": "Attach" }, projPick, photoBtn, fileBtn, folderBtn, photoPick, filePick, folderPick);
   const provSel = h("select", { id: "chatProv", class: "chat-prov", "aria-label": "Provider for this message",
-    onchange: (e) => { ssSet(provKey, e.target.value); refreshRouteLabels(); checkPhotos(); } },
+    onchange: (e) => { ssSet(provKey, e.target.value); refreshRouteLabels(); refit(); } },
     ...usable.map(([id, r]) => h("option", { value: id, selected: id === provPick },
       `${routeName(id)} · ${access(r.state)}`)));
-  attachRow.append(photoBtn, picker);
   const composer = h("div", { class: "composer" }, ta, tray, trayNote, attachRow,
     h("div", { class: "cfoot" },
       h("div", { class: "row chat-prow" }, provSel, h("span", { class: "chip", id: "composerRoute" }), h("span", { class: "hint" }, h("kbd", {}, "Ctrl"), h("kbd", {}, "Enter"), " send")),
       h("div", { class: "row" }, btn("Preview context", preview, "ghost", "eye"), sendBtn)));
   root.append(msgsEl, h("div", { class: "composer-dock" }, composer));
-  // drop photos anywhere on the chat
+  // drop photos, files or whole folders anywhere on the chat
   let dragDepth = 0;
   const hasFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes("Files");
   root.addEventListener("dragenter", (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; composer.classList.add("dropping"); });
@@ -1817,11 +1987,14 @@ async function renderChat() {
   root.addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; composer.classList.remove("dropping"); } });
   root.addEventListener("drop", async (e) => {
     if (!hasFiles(e)) return; e.preventDefault(); dragDepth = 0; composer.classList.remove("dropping");
-    const files = [...e.dataTransfer.files];
-    if (!(await addPhotos(files)) && files.length) banner("Only photos can be dropped into the chat. Add other files under Files.", "bad");
-    else if (files.some((f) => !isPhotoFile(f))) banner("Added the photos; other files were skipped (add them under Files).");
+    const entries = [...e.dataTransfer.items].map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null)).filter(Boolean);
+    const dirs = entries.filter((x) => x.isDirectory);
+    if (!dirs.length) { addFiles([...e.dataTransfer.files].map((f) => ({ file: f, path: f.name }))); return; }
+    const loose = entries.filter((x) => x.isFile);
+    if (loose.length) { const w = await walkEntries(loose); addFiles(w.files); }
+    for (const d of dirs) { const w = await walkEntries([d]); addFiles(w.files, d.name, w.skipped); }
   });
-  ta.placeholder = "Ask something about this project… (paste or drop photos here)";
+  ta.placeholder = "Ask something about this project… (paste or drop photos, files or folders here)";
   $("view").replaceChildren(root);
   drawTray();
   refreshRouteLabels();
@@ -1856,7 +2029,10 @@ async function renderChat() {
     if (user && Array.isArray(meta.attachments) && meta.attachments.length) {
       const strip = h("div", { class: "mphotos" });
       body = h("div", {}, strip, body);
-      for (const aid of meta.attachments) photoURL(aid).then((u) => {
+      const named = meta.attachments.map((aid) => atts.find((x) => x.id === aid)).filter(Boolean);
+      if (named.length) strip.append(...named.slice(0, 12).map((x) => h("span", { class: "fchip ready", title: x.name }, icon("file", "sm"), h("span", { class: "t" }, x.name))),
+        named.length > 12 ? h("span", { class: "faint" }, `+${named.length - 12} more files`) : null);
+      for (const aid of meta.attachments) if (!atts.some((x) => x.id === aid)) photoURL(aid).then((u) => {
         if (!u) return;
         strip.append(h("button", { type: "button", class: "mphoto", "aria-label": "Open photo", onclick: () => photoViewer(u, "Photo") }, h("img", { src: u, alt: "Attached photo" })));
       });

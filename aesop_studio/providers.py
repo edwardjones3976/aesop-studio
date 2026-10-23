@@ -319,11 +319,27 @@ def probe(store=None) -> dict[str, dict]:
         routes[rid] = r
 
 
-    for rid, prov, note in (("perplexity", "perplexity", "Web app handoff; no verified no-charge API route"),
-                            ("firecrawl", "firecrawl", "Handoff only inside Studio; built-in fetcher used instead")):
-        r = _base(prov, "handoff", None, ["handoff"], "native app", "n/a", note)
-        r.update(state="HANDOFF_ONLY", evidence=note, last_verified_at=now, incremental_cost_status="$0 (no call)")
-        routes[rid] = r
+    from . import research_routes
+    have = research_routes.status() if os.environ.get("AESOP_PROBE_OFFLINE") != "1" else {"firecrawl": False,
+                                                                                           "perplexity": False}
+    r = _base("firecrawl", "research API", "api.firecrawl.dev", ["chat"], "api_key", "subscription_included",
+              "Web search and page reading on the spot: ask a question for sourced results, or paste a URL to read "
+              "the page. Uses Firecrawl plan credits (about 2 per search, 1 per page). No files or photos.")
+    r.update(state="READY_INCLUDED" if have["firecrawl"] else "AUTH_REQUIRED", transport="research",
+             auth_status="api_key" if have["firecrawl"] else "missing", last_verified_at=now,
+             incremental_cost_status="Firecrawl plan credits (no $ per call)",
+             evidence=("FIRECRAWL_API_KEY present (value never shown)" if have["firecrawl"]
+                       else "Set FIRECRAWL_API_KEY in your Windows user environment to enable"))
+    routes["firecrawl"] = r
+    r = _base("perplexity", "research API", "api.perplexity.ai", ["chat"], "api_key", "metered",
+              "Answers with citations (Sonar), using the recent conversation. Metered per call: each call reserves "
+              f"${research_routes.PPLX_RESERVE_USD:.2f} and settles from reported usage. No files or photos.")
+    r.update(state="READY_METERED_DISABLED" if have["perplexity"] else "AUTH_REQUIRED", transport="research",
+             auth_status="api_key" if have["perplexity"] else "missing", last_verified_at=now,
+             incremental_cost_status=f"metered; {research_routes.PPLX_PRICE_NOTE}",
+             evidence=("PERPLEXITY_API_KEY present (value never shown)" if have["perplexity"]
+                       else "Set PERPLEXITY_API_KEY in your Windows user environment to enable"))
+    routes["perplexity"] = r
 
     if os.environ.get("AESOP_SIMULATED_ROUTE") == "1":
         r = _base("simulated", "offline_simulation", "simulated_provider.py", ["chat", "agent"], "none",
@@ -370,14 +386,14 @@ def _named(routes: dict) -> dict:
 def cached(store: Store) -> dict[str, dict]:
     row = store.one("SELECT v FROM kv WHERE k='routes'")
     routes = _named(json.loads(row["v"]) if row else refresh(store))
-    api = routes.get("openai-api")
-    if api and api["state"] == "READY_METERED_DISABLED":
-        from . import ledger
-        purpose = ledger.active_purpose(store)
-        if purpose:  # overlay live spend controls on the probed state
-            api = dict(api, state="READY_METERED", incremental_cost_status=f"metered; billing the {purpose} "
-                       f"envelope; {api['incremental_cost_status'].split('; ', 1)[-1]}")
-            routes["openai-api"] = api
+    for rid in ("openai-api", "perplexity"):
+        api = routes.get(rid)
+        if api and api["state"] == "READY_METERED_DISABLED":
+            from . import ledger
+            purpose = ledger.active_purpose(store)
+            if purpose:  # overlay live spend controls on the probed state
+                routes[rid] = dict(api, state="READY_METERED", incremental_cost_status=f"metered; billing the "
+                                   f"{purpose} envelope; {api['incremental_cost_status'].split('; ', 1)[-1]}")
     return routes
 
 

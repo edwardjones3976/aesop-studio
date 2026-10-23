@@ -922,3 +922,21 @@ dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
 .pv-img { display: block; max-width: 94vw; max-height: 86dvh; object-fit: contain; border-radius: var(--r-sm); box-shadow: var(--shadow-3); }
 .pv-x { position: absolute; top: -44px; right: 0; color: var(--text); }
 .pv-cap { margin-top: 8px; text-align: center; font-size: 13px; color: var(--text-2); }
+/* files and folders in chat */
+.fchip { display: inline-flex; align-items: center; gap: 6px; max-width: min(100%, 320px); min-height: 32px; padding: 0 4px 0 10px; border-radius: 99px; border: 1px solid var(--border-2); background: var(--sunken); font-size: 12.5px; color: var(--text); }
+.fchip .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.fchip.unreadable, .fchip.error { border-color: rgba(255, 143, 143, .55); color: var(--red); }
+.fchip.uploading { opacity: .7; }
+.mphotos .fchip { padding-right: 10px; }
+.fdel { display: grid; place-items: center; width: 24px; height: 24px; border: 0; border-radius: 50%; background: none; color: var(--text-2); cursor: pointer; padding: 0; flex: none; }
+.fdel:hover, .fdel:focus-visible { background: var(--red-bg); color: var(--red); }
+.pbusy.sm { position: static; width: 12px; height: 12px; margin: 0; border-width: 2px; }
+.pparts { position: absolute; left: 4px; bottom: 4px; padding: 0 5px; border-radius: 6px; background: rgba(7, 12, 18, .8); color: var(--text); font-size: 11px; font-weight: 700; }
+.projpick { position: relative; }
+.projpick > summary { list-style: none; cursor: pointer; }
+.projpick > summary::-webkit-details-marker { display: none; }
+.projpop { position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 25; width: min(420px, 86vw); max-height: 320px; display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: var(--r-ctl); border: 1px solid var(--border-2); background: var(--raised); box-shadow: var(--shadow-3); }
+.projlist { overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+.projrow { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 8px; border-radius: var(--r-sm); font-size: 13px; cursor: pointer; color: var(--text); }
+.projrow:hover { background: var(--panel); }
+.projrow .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
