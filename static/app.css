@@ -655,3 +655,10 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="r
 .evb { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
 .mention { color: var(--sky); font-weight: 600; }
 .eref { color: var(--coral); font-family: var(--mono); font-size: .92em; }
+
+/* Roundtable window: fixed desktop height so the live feed gets the full column and scrolls on its own. */
+@media (min-width: 1024px) {
+  dialog.rt[open] { height: 88dvh; }
+  .rt-room { height: 100%; min-height: 0; }
+  .rt-feed { flex: 1 1 auto; max-height: none; min-height: 0; }
+}

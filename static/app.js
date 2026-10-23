@@ -632,7 +632,11 @@ function rtDraftsRender() {
       statePill(r.live_status || r.status || "DRAFT"), abtn("Open", () => rtOpenDraft(r.id), "sm"),
       r.live_status && r.live_status !== "DRAFT" ? abtn(LIVE_END.includes(r.live_status) ? "View record" : "Open room", () => rtRoom(r.id, LIVE_END.includes(r.live_status)), "ghost sm", "chat") : null)))
       : h("p", { class: "muted" }, "No drafts saved for this project yet."));
-  RT.el.drafts.querySelectorAll(".rt-drafts .btn").forEach((b, i) => b.setAttribute("aria-label", `Open draft ${d[i].id}`));
+  RT.el.drafts.querySelectorAll(".rt-drafts li").forEach((li, i) => {
+    const [open, room] = li.querySelectorAll(".btn");
+    if (open) open.setAttribute("aria-label", `Open draft ${d[i].id}`);
+    if (room) room.setAttribute("aria-label", `${room.textContent.trim()} for ${d[i].id}`);
+  });
 }
 function rtBody() {
   const f = RT.f; const num = (v) => (v === "" || v === null || v === undefined || !isFinite(Number(v)) ? null : Number(v));
@@ -718,7 +722,7 @@ function rtCoverage(c) {
   const valid = c.valid; const text = c.summary || "";
   return h("div", { class: "note " + (valid === true ? "ok" : "bad"), role: "status" }, icon(valid === true ? "check" : "alert"), h("div", { class: "section" },
     h("strong", {}, valid === true ? "Coverage: valid roundtable" : valid === false ? "Coverage: NOT a valid four-provider roundtable" : "Coverage summary"),
-    text ? h("p", {}, text) : null, h("pre", { class: "out" }, JSON.stringify(c, null, 1))));
+    text ? h("p", {}, text) : null));
 }
 // The room replaces the modal's centre and right columns; the feed is append-only and polled every second.
 function rtRoom(id, readOnly) {
@@ -962,9 +966,9 @@ function renderHeader() {
   if (!p) return;
   const sel = $("providerSel");
   sel.replaceChildren(h("option", { value: "" }, "— choose —"), ...Object.entries(S.routes).map(([id, r]) => {
-    const ok = USABLE.includes(r.state);
-    if (!ok && r.state !== "READY_METERED_DISABLED") return null;
-    return h("option", { value: id, selected: id === p.provider_default, disabled: !ok }, `${routeName(id)} · ${access(r.state)}${ok ? "" : " — set a monthly limit in Evidence"}`);
+    // Only routes that can actually take a request right now are listed (owner request); others live on Providers.
+    if (!USABLE.includes(r.state) || !(r.supported_modes || []).includes("chat")) return null;
+    return h("option", { value: id, selected: id === p.provider_default }, `${routeName(id)} · ${access(r.state)}`);
   }).filter(Boolean));
   refreshRouteLabels();
 }
