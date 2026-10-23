@@ -206,45 +206,91 @@ class TestFollowUp(TestBroker):
         self.assertEqual(items[0]["suggested"], "Yes")
         self.assertIsNone(followup._parse("no json here"))
 
-    def test_followup_only_after_end_then_answers_appended_to_same_record(self):
+    def _wait_end(self, rid, secs=90):
+        end = time.time() + secs
+        while time.time() < end and self.broker.status(rid)["live_status"] in ("RUNNING", "PAUSED", "DRAFT"):
+            time.sleep(0.2)
+        s = self.broker.sessions.get(rid)
+        if s:
+            s["thread"].join(10)
+
+    def test_complete_saves_once_runs_round_and_replaces_only_on_change(self):
         from aesop_studio import deletion, followup
         rec = self.draft()
         project = self.svc.project(self.p["id"])
-        res = self.broker.start(rec, project, clock={"limit_s": 25, "reserve_s": 5, "turn_timeout": 30})
-        self.assertTrue(res["started"])
-        with self.assertRaises(ValueError):
+        clock = {"limit_s": 20, "reserve_s": 5, "turn_timeout": 30}
+        self.assertTrue(self.broker.start(rec, project, clock=clock)["started"])
+        with self.assertRaises(ValueError):  # only after the session ends
             followup.prepare(self.store, self.sup, self.broker, rec, project)
-        end = time.time() + 90
-        while time.time() < end and self.broker.status(rec["id"])["live_status"] in ("RUNNING", "PAUSED"):
-            time.sleep(0.2)
+        self._wait_end(rec["id"])
         self.broker._event(rec["id"], "message", "Which storage engine should we freeze for v1?", speaker="alpha",
                            phase="exchange", names={"alpha": "Alpha"})
         d = followup.prepare(self.store, self.sup, self.broker, rec, project)
-        self.assertTrue(d["questions"])  # the simulated condense reply is not JSON: collected list is the fallback
-        self.assertTrue(any("storage engine" in q["question"] for q in d["questions"]))
-        self.assertIsNone(d["previous"])
-        n_before = len(self.broker.events(rec["id"]))
+        self.assertTrue(any("storage engine" in q["question"] for q in d["questions"]))  # fallback list
         with self.assertRaises(ValueError):
-            followup.save(self.store, self.broker, rec, {"answers": [], "note": ""})
-        r = followup.save(self.store, self.broker, rec, {"answers": [
-            {"question": "Which storage engine?", "answer": "SQLite, WAL mode", "refs": ["E2", "nope"]}], "note": "ship it"})
-        self.assertEqual(r["saved"], 1)
-        self.assertFalse(r["revised"])
-        evs = self.broker.events(rec["id"])
-        self.assertEqual(len(evs), n_before + 1)  # one note, no new session
-        self.assertEqual(evs[-1]["kind"], "owner")
-        self.assertEqual(evs[-1]["reply_to"], ["E2"])
-        self.assertIn("SQLite, WAL mode", evs[-1]["content"])
+            followup.complete(self.store, self.broker, rec, project, {"answers": [], "note": ""}, clock=clock)
+        body = {"answers": [{"question": "Which storage engine?", "answer": "SQLite, WAL mode", "refs": ["E2", "x"]}],
+                "note": "ship it"}
+        r = followup.complete(self.store, self.broker, rec, project, body, clock=clock)
+        self.assertFalse(r["unchanged"])
+        self.assertTrue(r["round"]["started"], r["round"])
+        r2_id = r["round"]["id"]
+        r2 = roundtable.get(self.store, r2_id)
+        self.assertEqual(r2["follow_up_of"], rec["id"])
+        self.assertEqual([x["lane"] for x in r2["roster"]], [x["lane"] for x in rec["roster"]])  # same members
+        self.assertIn("SQLite, WAL mode", r2["objective"])  # the owner's answers go to the speakers
+        self.assertEqual(self.broker.status(rec["id"])["next_round"]["id"], r2_id)
+        self._wait_end(r2_id)
+        self.assertEqual(self.broker.status(r2_id)["live_status"], "COMPLETED")
+        owner = [e for e in self.broker.events(rec["id"]) if e["kind"] == "owner"]
+        self.assertEqual(len(owner), 1)
+        self.assertEqual(owner[0]["reply_to"], ["E2"])
+        # same answers again (spacing/case differ): nothing saved, no new round
+        n_events = len(self.broker.events(rec["id"]))
+        n_rts = self.store.one("SELECT COUNT(*) n FROM roundtables")["n"]
+        same = {"answers": [{"question": "which storage engine?", "answer": "  sqlite,  WAL mode ", "refs": []}],
+                "note": "Ship it"}
+        r = followup.complete(self.store, self.broker, rec, project, same, clock=clock)
+        self.assertTrue(r["unchanged"])
+        self.assertEqual(r["round"]["id"], r2_id)
+        self.assertEqual(len(self.broker.events(rec["id"])), n_events)
+        self.assertEqual(self.store.one("SELECT COUNT(*) n FROM roundtables")["n"], n_rts)
+        # different answers: the original note and its round are removed and replaced
+        r = followup.complete(self.store, self.broker, rec, project, {"answers": [
+            {"question": "Which storage engine?", "answer": "LMDB", "refs": []}]}, clock=clock)
+        self.assertTrue(r["replaced"])
+        self.assertEqual(r["withdrawn"], r2_id)
+        self.assertIsNone(roundtable.get(self.store, r2_id))
+        owner = [e for e in self.broker.events(rec["id"]) if e["kind"] == "owner"]
+        self.assertEqual(len(owner), 1)
+        self.assertIn("LMDB", owner[0]["content"])
         memo = self.broker.status(rec["id"])["memo"]
-        self.assertIn("## Owner answers", memo)
-        self.assertEqual(self.store.one("SELECT COUNT(*) n FROM roundtables")["n"], 1)
-        r2 = followup.save(self.store, self.broker, rec, {"answers": [
-            {"question": "Which storage engine?", "answer": "SQLite", "refs": []}]})
-        self.assertTrue(r2["revised"])
-        memo = self.broker.status(rec["id"])["memo"]
-        self.assertEqual(memo.count("## Owner answers"), 1)  # replaced, not stacked
+        self.assertEqual(memo.count("## Owner answers"), 1)
         self.assertNotIn("WAL mode", memo)
-        d2 = followup.prepare(self.store, self.sup, self.broker, rec, project)  # cached + previous answers
-        self.assertEqual(d2["previous"]["answers"][0]["answer"], "SQLite")
+        self.assertEqual(self.store.one("SELECT COUNT(*) n FROM roundtables")["n"], n_rts)  # one round, not two
+        self._wait_end(r["round"]["id"])
+        d2 = followup.prepare(self.store, self.sup, self.broker, rec, project)
+        self.assertEqual(d2["previous"]["answers"][0]["answer"], "LMDB")
         deletion.delete_roundtable(self.store, rec["id"])
         self.assertIsNone(self.store.one("SELECT v FROM kv WHERE k LIKE ?", (f"followup:{rec['id']}%",)))
+
+
+class TestFollowUpRetry(TestFollowUp):
+    def test_round_that_cannot_start_leaves_no_draft_and_complete_retries(self):
+        from aesop_studio import followup
+        rec = self.draft()
+        project = self.svc.project(self.p["id"])
+        clock = {"limit_s": 15, "reserve_s": 5, "turn_timeout": 30}
+        self.assertTrue(self.broker.start(rec, project, clock=clock)["started"])
+        self._wait_end(rec["id"])
+        body = {"answers": [{"question": "Which engine?", "answer": "SQLite", "refs": []}]}
+        keep = self.lanes
+        self.lanes = keep[:2]  # two speakers short: preflight blocks the follow-up round
+        r = followup.complete(self.store, self.broker, rec, project, body, clock=clock)
+        self.assertFalse(r["round"]["started"])
+        self.assertEqual(self.store.one("SELECT COUNT(*) n FROM roundtables")["n"], 1)  # no dead draft
+        self.lanes = keep
+        r = followup.complete(self.store, self.broker, rec, project, body, clock=clock)
+        self.assertTrue(r["unchanged"] and r["retried"] and r["round"]["started"])
+        self.assertEqual(len([e for e in self.broker.events(rec["id"]) if e["kind"] == "owner"]), 1)
+        self._wait_end(r["round"]["id"])

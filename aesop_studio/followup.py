@@ -5,11 +5,13 @@
 2. Condense (one read-only chat turn on an included-plan route, usually Claude Code): merge to at most
    MAX_QUESTIONS and suggest an answer from what the speakers already assumed or agreed. If that turn fails, the
    collected list is used as-is with no suggestions.
-3. Save: the owner's answers are appended to the same record as an "Owner answers" event and a memo section.
-   No new session is started and nothing is sent to the speakers.
+3. Complete: the owner's answers are saved once to the same record (an "Owner answers" event and memo
+   section) and one more full round runs with the same members, who receive the answers. Pressing Complete
+   again is a no-op unless the answers changed; then the earlier note and its round are removed and replaced.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -195,11 +197,7 @@ def _previous(store, rid) -> dict | None:
     return json.loads(row["v"]) if row else None
 
 
-def save(store, broker, rec: dict, body: dict) -> dict:
-    """Append the owner's answers to the same record: a timeline event plus an 'Owner answers' memo section."""
-    st = broker.status(rec["id"])
-    if st["live_status"] not in END_STATES:
-        raise ValueError("follow-up opens once the session has ended")
+def _rows(body: dict) -> tuple[list[tuple[str, str, list[str]]], str]:
     rows = []
     for a in (body.get("answers") or [])[:MAX_QUESTIONS + 5]:
         q = " ".join(str(a.get("question") or "").split())[:300]
@@ -207,12 +205,91 @@ def save(store, broker, rec: dict, body: dict) -> dict:
         if q and ans:
             refs = [r for r in (a.get("refs") or []) if isinstance(r, str) and re.fullmatch(r"E\d+", r)][:6]
             rows.append((q, ans, refs))
-    note = str(body.get("note") or "").strip()[:2000]
+    return rows, " ".join(str(body.get("note") or "").split())[:2000]
+
+
+def _signature(rows, note) -> str:
+    """What counts as 'actually different': the answers and note, ignoring case, spacing and reference order."""
+    norm = sorted((q.lower(), a.lower()) for q, a, _ in rows)
+    return hashlib.sha256(json.dumps([norm, note.lower()]).encode("utf-8")).hexdigest()
+
+
+def current_round(store, rid: str) -> dict | None:
+    """The live follow-up round of this record (the newest one that has not been withdrawn)."""
+    return store.one("SELECT id, live_status FROM roundtables WHERE follow_up_of=? ORDER BY created DESC LIMIT 1", (rid,))
+
+
+def _withdraw_round(store, broker, rid: str) -> None:
+    """Remove the round built on superseded answers (stopped first if it is still running)."""
+    from . import deletion
+    live = broker.sessions.get(rid)
+    if live and live["thread"].is_alive():
+        broker.stop(rid)
+        live["thread"].join(30)
+    broker.sessions.pop(rid, None)
+    deletion.delete_roundtable(store, rid)
+
+
+def _memo_section(memo: str, key: str) -> str:
+    m = re.search(rf"## {re.escape(key)}\n\n([\s\S]*?)(?:\n## |\Z)", memo or "")
+    return re.sub(r"\s+", " ", m.group(1)).strip() if m else ""
+
+
+def _round_objective(rec, st, rows, note) -> str:
+    qa = "\n".join(f"{i}. {q}\n   Owner: {a}" for i, (q, a, _) in enumerate(rows, 1))
+    best = _memo_section(st.get("memo") or "", "Best-supported proposal")[:700]
+    parts = [f"Follow-up round of roundtable {rec['id']}. Original objective: {rec['objective'][:1400]}",
+             f"The owner has now answered the open questions:\n{qa}" if qa else "",
+             f"Owner note: {note}" if note else "",
+             f"Previous round's best-supported proposal (summary): {best}" if best else "",
+             "Use the owner's answers: settle what they resolve, revise your positions where they change the picture, "
+             "and converge on the deliverable."]
+    return "\n\n".join(p for p in parts if p)[:4000]
+
+
+def _start_round(store, broker, rec, project, st, rows, note, clock=None) -> dict:
+    from . import lanes as lane_mod, roundtable
+    lane_mod.set_live_authorized(store, True)  # the owner's Complete is the go-ahead; it switches off after the round
+    body = {"mode": rec["mode"], "objective": _round_objective(rec, st, rows, note), "deliverable": rec["deliverable"],
+            "outcome_type": rec["outcome_type"], "time_limit_min": rec["time_limit_min"],
+            "response_window_s": rec.get("response_window_s"), "roster": [r["lane"] for r in rec["roster"]],
+            "sharing_ack": True, "caps": rec["caps"]}
+    new = roundtable.save(store, rec["project_id"], body)
+    store.x("UPDATE roundtables SET follow_up_of=? WHERE id=?", (rec["id"], new["id"]))
+    try:
+        res = broker.start(roundtable.get(store, new["id"]), project, clock=clock)
+    except ValueError as e:
+        res = {"started": False, "block_reasons": [str(e)]}
+    if not res.get("started"):  # never leave a dead draft behind: pressing Complete again simply retries
+        from . import deletion
+        deletion.delete_roundtable(store, new["id"])
+        return {"id": None, "started": False, "block_reasons": res.get("block_reasons") or ["preflight did not pass"]}
+    return {"id": new["id"], "started": True, "block_reasons": []}
+
+
+def complete(store, broker, rec: dict, project: dict, body: dict, run_round: bool = True, clock=None) -> dict:
+    """Owner presses Complete: save the answers once and run one more full round with the same members.
+
+    Pressing it again changes nothing unless the answers differ; if they do, the earlier note (and the round
+    built on it) is withdrawn and replaced, so the record never holds two versions."""
+    st = broker.status(rec["id"])
+    if st["live_status"] not in END_STATES:
+        raise ValueError("follow-up opens once the session has ended")
+    rows, note = _rows(body)
     if not rows and not note:
         raise ValueError("answer at least one question or add a note")
-    revised = any(e["kind"] == "owner" for e in broker.events(rec["id"]))
-    lines = [f"**Owner answers{' (revised)' if revised else ''}** — added after the session; the speakers have not "
-             "seen these.", ""]
+    sig = _signature(rows, note)
+    prev = _previous(store, rec["id"])
+    child = current_round(store, rec["id"])
+    if prev and prev.get("sig") == sig:
+        if child or not run_round:
+            return {"unchanged": True, "saved": 0, "round": child, "status": st}
+        # same answers, but their round never started (e.g. a speaker was offline): retry the round only
+        rnd = _start_round(store, broker, rec, project, st, rows, note, clock)
+        return {"unchanged": True, "saved": 0, "retried": True, "round": rnd, "status": broker.status(rec["id"])}
+    replaced = bool(prev)
+    lines = ["**Owner answers** — added after the session" + (" (replaces the earlier answers)" if replaced else "")
+             + "; they were given to the speakers in a follow-up round.", ""]
     for i, (q, ans, refs) in enumerate(rows, 1):
         lines.append(f"{i}. **{q}**" + (f" [{', '.join(refs)}]" if refs else ""))
         lines.append(f"   {ans}")
@@ -220,18 +297,22 @@ def save(store, broker, rec: dict, body: dict) -> dict:
         lines += ["", f"Note: {note}"]
     content = redact("\n".join(lines))
     reply = sorted({r for _, _, refs in rows for r in refs}, key=lambda x: int(x[1:]))
+    with store.tx() as c:  # withdraw the original note: one Owner answers entry per record, ever
+        c.execute("DELETE FROM roundtable_events WHERE rt_id=? AND kind='owner'", (rec["id"],))
     broker._event(rec["id"], "owner", content, speaker="owner", phase="followup", reply_to=reply)
+    memo = re.split(r"\n## Owner answers\b", st.get("memo") or "")[0].rstrip()
+    broker._save(rec["id"], memo=redact(f"{memo}\n\n## Owner answers\n\n" + "\n".join(lines[2:]) + "\n"))
     store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
             (_kv_key(rec["id"]) + ":answers", json.dumps({"answers": [{"question": q, "answer": a, "refs": r}
                                                                      for q, a, r in rows],
-                                                         "note": note, "saved_at": time.time()})))
-    memo = st.get("memo") or ""
-    memo = re.split(r"\n## Owner answers\b", memo)[0].rstrip()
-    memo = f"{memo}\n\n## Owner answers\n\n" + "\n".join(lines[2:]) + "\n"
-    broker._save(rec["id"], memo=redact(memo))
+                                                         "note": note, "sig": sig, "saved_at": time.time()})))
+    if child:
+        _withdraw_round(store, broker, child["id"])
+    rnd = _start_round(store, broker, rec, project, st, rows, note, clock) if run_round else None
     store.event("roundtable_owner_answers", rec["project_id"], roundtable_id=rec["id"], answers=len(rows),
-                revised=revised)
-    return {"saved": len(rows), "revised": revised, "status": broker.status(rec["id"])}
+                replaced=replaced, follow_up_round=rnd and rnd["id"])
+    return {"unchanged": False, "saved": len(rows), "replaced": replaced, "withdrawn": child and child["id"],
+            "round": rnd, "status": broker.status(rec["id"])}
 
 
 def forget(store, rid: str) -> set[str]:

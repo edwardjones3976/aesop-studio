@@ -975,7 +975,7 @@ function rtRoom(id, readOnly) {
   const s = RT; if (!s) return;
   clearTimeout(s.timer); const gen = ++s.gen; s.roomId = id;
   const room = { after: 0, id, byLabel: {}, phase: null, opened: false, closed: false, passes: 0, tints: {}, only: null, collapse: rtPref("collapse", true) };
-  const clock = h("span", { class: "rt-clock" }, "—"); const stPill = h("span");
+  const clock = h("span", { class: "rt-clock" }, "—"); const stPill = h("span"); const roundLinks = h("span", { class: "rt-roundlinks" });
   const chips = room.chips = h("div", { class: "rt-chips", role: "group", "aria-label": "Speakers (select one to show only their messages)" });
   const feed = room.feed = h("ol", { class: "rt-feed" + (rtPref("big", false) ? " big" : ""), "aria-label": "Roundtable feed", tabindex: "0" });
   const announce = h("div", { class: "sr-only", "aria-live": "polite" });
@@ -1020,7 +1020,7 @@ function rtRoom(id, readOnly) {
   const ask = h("form", { class: "rt-ask", hidden: true, onsubmit: (e) => { e.preventDefault(); askBtn.click(); } }, askIn, askBtn);
   const main = h("section", { class: "rt-col rt-main rt-room", "aria-label": "Live room" },
     h("div", { class: "rt-roomhead" },
-      h("div", { class: "ttl" }, h("h3", {}, readOnly ? "Roundtable record" : "Live room"), stPill, clock),
+      h("div", { class: "ttl" }, h("h3", {}, readOnly ? "Roundtable record" : "Live room"), stPill, clock, roundLinks),
       h("div", { class: "row rt-roomctl" }, pauseBtn, resumeBtn, stopBtn, exportBtn, followBtn, back)),
     h("div", { class: "rt-bar" }, chips,
       (viewctl = h("div", { class: "row rt-viewctl", role: "toolbar", "aria-label": "Reading options" }, room.showAll, clampBtn, bigBtn, passBtn, memoBtn))),
@@ -1037,8 +1037,16 @@ function rtRoom(id, readOnly) {
     try { d = await api("GET", `/api/roundtables/${id}/live?after=${room.after}`); }
     catch (e) { if (RT === s && s.gen === gen) { rtSay(e.message, "bad"); s.timer = setTimeout(tick, 3000); } return; }
     if (RT !== s || s.gen !== gen) return;
-    const st = d.status || {}; const sps = st.speakers || {};
+    const st = d.status || {}; const sps = st.speakers || {}; room.sps = sps;
     Object.keys(sps).forEach((k) => rtTint(room, k));
+    const lsig = JSON.stringify([st.follow_up_of, st.next_round]);
+    if (lsig !== room.linkSig) {
+      room.linkSig = lsig;
+      roundLinks.replaceChildren(
+        st.follow_up_of ? h("button", { type: "button", class: "linkish rt-roundlink", onclick: () => rtRoom(st.follow_up_of, true) }, "← Follow-up of the previous round") : null,
+        st.next_round ? h("button", { type: "button", class: "linkish rt-roundlink", onclick: () => rtRoom(st.next_round.id, LIVE_END.includes(st.next_round.live_status)) },
+          `Follow-up round (${String(st.next_round.live_status || "draft").toLowerCase()}) →`) : null);
+    }
     const stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
     for (const ev of d.events || []) {
       if (ev.seq <= room.after) continue; room.after = ev.seq;
@@ -1118,26 +1126,42 @@ async function rtFollowLoad(s, gen, id, fu, room, refreshFeed, refresh) {
   });
   const note = h("textarea", { id: "rtFuNote", rows: "2", maxlength: "2000", placeholder: "Anything else the speakers should know next time (optional)" });
   if (prev && prev.note) note.value = prev.note;
-  const save = abtn(prev ? "Update answers" : "Save answers to record", async () => {
+  const people = Object.values(room.sps || {}).filter((v) => v.role !== "researcher").map((v) => v.name);
+  const save = abtn("Complete", async () => {
     const answers = rows.map((r) => r._get()).filter((a) => a.answer);
     if (!answers.length && !note.value.trim()) { rtSay("Answer at least one question or add a note.", "bad"); return; }
+    rtSay(`Saving your answers and starting the follow-up round with ${people.length || "the same"} speakers…`);
     try {
       const r = await api("POST", `/api/roundtables/${id}/followup`, { answers, note: note.value.trim() });
       if (!alive()) return;
-      rtSay(`${r.revised ? "Updated" : "Saved"} ${r.saved} answer${r.saved === 1 ? "" : "s"} to this record (timeline and memo).`, "ok");
+      if (r.unchanged && r.retried) {
+        if (r.round.started) { rtSay("Your answers were already saved; the follow-up round has now started.", "ok"); rtRoom(r.round.id, false); }
+        else rtSay(`Your answers were already saved. The follow-up round still could not start: ${r.round.block_reasons.join(" ")}`, "bad");
+        return;
+      }
+      if (r.unchanged) {
+        rtSay("Nothing changed since you completed this, so nothing was saved again. Opening the follow-up round.");
+        if (r.round) rtRoom(r.round.id, LIVE_END.includes(r.round.live_status));
+        return;
+      }
+      const what = `${r.replaced ? "Replaced your earlier answers" : "Saved your answers"} (${r.saved}) on this record${r.withdrawn ? " and removed the round built on the old ones" : ""}.`;
+      if (r.round && r.round.started) { rtSay(`${what} Follow-up round started with the same speakers.`, "ok"); rtRoom(r.round.id, false); return; }
+      rtSay(`${what} The follow-up round could not start: ${(r.round && r.round.block_reasons || []).join(" ") || "preflight did not pass"} Fix that, then press Complete again to start it (your answers stay saved once).`, "bad");
       refreshFeed(); rtFollowLoad(s, gen, id, fu, room, refreshFeed, false);
     } catch (e) { if (alive()) rtSay(e.message, "bad"); }
-  }, "primary", "check");
+  }, "primary", "send");
   const source = d.condensed_by ? `Condensed by ${d.condensed_by} from ${d.candidates} question${d.candidates === 1 ? "" : "s"} in the transcript and memo.`
     : d.candidates ? `${d.candidates} question${d.candidates === 1 ? "" : "s"} found in the transcript and memo${d.note ? ` (${d.note})` : ""}.` : "";
   fu.replaceChildren(
     h("div", { class: "rt-fu-head" }, h("h4", {}, qs.length ? `Follow-up · ${qs.length} question${qs.length === 1 ? "" : "s"} for you` : "Follow-up"),
       btn("Refresh", () => rtFollowLoad(s, gen, id, fu, room, refreshFeed, true), "ghost sm")),
-    h("p", { class: "faint" }, `${source} Pre-filled answers come from what the speakers assumed or agreed; your answers are added to this record only.`),
+    h("p", { class: "faint" }, `${source} Pre-filled answers come from what the speakers assumed or agreed.`),
     qs.length ? h("ol", { class: "rt-fu-list" }, ...rows) : h("p", { class: "muted" }, "The speakers didn't leave any questions for you. You can still add a note to the record."),
     h("div", { class: "field" }, h("label", { for: "rtFuNote" }, "Note (optional)"), note),
     h("div", { class: "row rt-fu-actions" }, save,
-      prev ? h("span", { class: "faint" }, `Last saved ${fmtTime(prev.saved_at)}`) : null));
+      h("span", { class: "faint" }, prev
+        ? `Completed ${fmtTime(prev.saved_at)}. Complete again only saves if your answers changed; the earlier answers and their round are then replaced.`
+        : `Saves your answers to this record once, then runs one more full round with the same speakers${people.length ? ` (${people.join(", ")})` : ""}, who receive your answers.`)));
 }
 async function rtOpenDraft(id) {
   const s = RT; if (!s) return;

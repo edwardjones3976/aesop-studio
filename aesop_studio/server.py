@@ -287,7 +287,9 @@ class Handler(BaseHTTPRequestHandler):
 
     @route("POST", r"/api/roundtables/(\w+)/followup")
     def rt_followup_save(self, sess, rid):
-        self.json(followup.save(self.app.store, self.app.broker, self._rt(rid), self.body()))
+        rec = self._rt(rid)
+        self.json(followup.complete(self.app.store, self.app.broker, rec, self.app.svc.project(rec["project_id"]),
+                                    self.body()))
 
     @route("GET", r"/api/roundtable/researcher")
     def rt_researcher(self, sess):

@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS roundtable_events(
 CREATE INDEX IF NOT EXISTS rte_rt ON roundtable_events(rt_id, seq);
 """
 SESSION_COLS = {"live_status": "TEXT", "started": "REAL", "ended": "REAL", "paused_s": "REAL",
-                "speaker_state": "TEXT", "memo": "TEXT", "coverage": "TEXT", "consent": "TEXT"}
+                "speaker_state": "TEXT", "memo": "TEXT", "coverage": "TEXT", "consent": "TEXT",
+                "follow_up_of": "TEXT"}
 
 
 def ensure_schema(store: Store) -> None:
@@ -122,7 +123,10 @@ class Broker:
                 "remaining_s": round(max(0, limit - elapsed), 1) if started else limit,
                 "speakers": json.loads(r.get("speaker_state") or "{}"),
                 "coverage": json.loads(r.get("coverage") or "{}"), "memo": r.get("memo"),
-                "consent": json.loads(r.get("consent") or "{}")}
+                "consent": json.loads(r.get("consent") or "{}"), "follow_up_of": r.get("follow_up_of"),
+                "next_round": (self.store.one("SELECT id, live_status FROM roundtables WHERE follow_up_of=? "
+                                              "ORDER BY created DESC LIMIT 1",
+                                              (rt_id,)) or None)}
 
     # ---- control ----
     def start(self, rec: dict, project: dict, clock: dict | None = None) -> dict:

@@ -894,3 +894,6 @@ button.rt-chip { min-height: 40px; }
   .rt-fu-meta, .rt-fu-foot { padding-left: 0; }
   .rt-fu-q textarea { margin-left: 0; width: 100%; }
 }
+.rt-roundlinks { display: inline-flex; gap: 10px; flex-wrap: wrap; }
+.rt-roundlink { min-height: 28px; padding: 0 4px; font-size: 13px; font-weight: 600; color: var(--coral); }
+.rt-fu-actions .faint { flex: 1 1 260px; font-size: 12.5px; }
