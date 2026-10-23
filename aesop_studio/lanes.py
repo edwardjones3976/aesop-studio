@@ -20,7 +20,7 @@ from .store import Store
 ADMINS = ("openai", "claude", "cursor")  # documented administrator identities (Codex, Claude Code, Cursor)
 # Owner naming rule: each family is titled by its code-based product (OpenAI/ChatGPT/Codex -> "Codex").
 DOCUMENTED_EXAMPLE = ["Codex", "Claude Code", "Cursor", "Grok CLI", "Antigravity", "Perplexity", "Firecrawl",
-                      "Copilot CLI", "Z.ai GLM Coding"]
+                      "Copilot CLI", "Z.ai GLM Coding", "LM Studio (local)"]
 
 _HOME = Path.home()
 _LOCAL = Path(os.environ.get("LOCALAPPDATA", _HOME / "AppData" / "Local"))
@@ -43,6 +43,8 @@ CATALOG = [
      "research tool (credit-based); not a conversational speaker"),
     ("copilot", "Copilot CLI", "speaker", ["copilot"], [], ["copilot"],
      "GitHub Copilot premium-request quota"),
+    ("lmstudio", "LM Studio (local)", "speaker", ["lms"], [_HOME / ".lmstudio" / "bin" / "lms.exe"], ["lmstudio"],
+     "local model on this PC: $0, nothing leaves the machine"),
     ("zai", "Z.ai GLM Coding", "speaker", ["claude-zai"], [_HOME / ".local" / "bin" / "claude-zai.cmd"], [],
      "paid non-OpenAI biller: blocked by the $165 mission's OpenAI-only rule"),
 ]
@@ -96,7 +98,7 @@ def discover(store: Store) -> dict:
         path = _find(launchers, extra)
         own = [r for r in route_ids if r in routes]
         claimed_routes.update(own)
-        verified = [r for r in own if routes[r]["state"] in ("READY_INCLUDED", "READY_METERED")]
+        verified = [r for r in own if routes[r]["state"] in ("READY_INCLUDED", "READY_LOCAL", "READY_METERED")]
         reasons = []
         if verified:
             readiness, conv = "VERIFIED_READY", "in_app_verified"
@@ -158,6 +160,7 @@ def discover(store: Store) -> dict:
 def _route_type(cls, verified, routes) -> str:
     if not verified:
         return {"research": "research tool", "review": "review tool"}.get(cls, "official CLI (not integrated)")
-    kinds = sorted({"separately billed API" if routes[r]["billing_basis"] == "metered" else "official CLI · plan quota"
+    kinds = sorted({"separately billed API" if routes[r]["billing_basis"] == "metered"
+                    else "local model · $0" if routes[r]["route_type"] == "local_model" else "official CLI · plan quota"
                     for r in verified})
     return " + ".join(kinds)

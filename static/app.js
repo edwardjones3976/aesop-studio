@@ -37,11 +37,11 @@ const tone = (s) => {
 };
 const statePill = (s) => h("span", { class: "pill " + tone(s) }, s);
 const DONE = ["COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED", "BLOCKED_OWNER", "EFFECT_UNKNOWN"];
-const USABLE = ["READY_INCLUDED", "SIMULATED", "READY_METERED"];
+const USABLE = ["READY_INCLUDED", "READY_LOCAL", "SIMULATED", "READY_METERED"];
 const usableRoutes = () => Object.entries(S.routes).filter(([, r]) => USABLE.includes(r.state));
 const isMetered = (r) => !!r && /METERED/.test(r.state || "");
 // The access route is always shown next to the provider so billing is never ambiguous.
-const access = (state) => state === "READY_INCLUDED" ? "official CLI · plan quota"
+const access = (state) => state === "READY_LOCAL" ? "local model · $0" : state === "READY_INCLUDED" ? "official CLI · plan quota"
   : /^READY_METERED/.test(state || "") ? "separately billed API"
   : state === "HANDOFF_ONLY" ? "native-site handoff"
   : state === "SIMULATED" ? "simulated test route" : "unavailable";

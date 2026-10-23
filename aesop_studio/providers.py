@@ -112,6 +112,28 @@ def verify_live(store, rid: str) -> dict:
     return rec
 
 
+LMSTUDIO_PORT = 1234
+LMSTUDIO_DEFAULT = "homemade-llm/m1/qwen3-8b-q4_k_m.gguf"
+
+
+def _lms_cmd() -> list[str] | None:
+    exe = shutil.which("lms") or shutil.which("lms.exe") or str(Path.home() / ".lmstudio" / "bin" / "lms.exe")
+    return [exe] if exe and Path(exe).is_file() else None
+
+
+def _lms_models() -> list[str] | None:
+    """Model ids from LM Studio's local server (loopback, no proxy), or None if the server is not up."""
+    import urllib.request
+    try:
+        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with op.open(f"http://127.0.0.1:{LMSTUDIO_PORT}/v1/models", timeout=5) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+    ids = [m.get("id") for m in data.get("data", []) if m.get("id")]
+    return [i for i in ids if "embed" not in i.lower() and "smoke" not in i.lower()]
+
+
 def _sim_cmd() -> list[str]:
     return [sys.executable, "-I", str(Path(__file__).with_name("simulated_provider.py"))]
 
@@ -285,6 +307,29 @@ def probe(store=None) -> dict[str, dict]:
         r["last_verified_at"] = (ver or {}).get("at") or now
         routes[rid] = r
 
+    # ---- LM Studio: local models on this PC ($0, private). Probe = server status + model list (loopback only).
+    r = _base("local", "local_model", "LM Studio (127.0.0.1)", ["chat"], "none (local)", "subscription_included",
+              "Runs on this PC's CPU/GPU; speed depends on the model; nothing leaves the machine.")
+    r["filesystem_scope"] = "none: the local model only receives the previewed context"
+    lms = _lms_cmd()
+    if not lms:
+        r.update(state="UNAVAILABLE", evidence="LM Studio (lms) not installed")
+    elif os.environ.get("AESOP_PROBE_OFFLINE") == "1":
+        r.update(state="UNVERIFIED", evidence="probe skipped (offline test mode)")
+    else:
+        models = _lms_models()
+        if models is None:
+            _run(lms + ["server", "start"], timeout=60)  # starts LM Studio's own local server (127.0.0.1)
+            models = _lms_models()
+        if models:
+            r.update(state="READY_LOCAL", incremental_cost_status="$0 (local model)", version=f"{len(models)} models",
+                     evidence=f"LM Studio server on 127.0.0.1:{LMSTUDIO_PORT}; default model {LMSTUDIO_DEFAULT}",
+                     models=models)
+        else:
+            r.update(state="UNAVAILABLE", evidence="LM Studio server not reachable or no chat models loaded")
+    r["last_verified_at"] = now
+    routes["lmstudio"] = r
+
     r = _base("xai", "official_cli", None, ["chat"], "xAI sign-in (grok CLI)", "unknown",
               "Billing basis not verifiable (subscription vs API key); not enabled to avoid unbounded charges.")
     cmd = _grok_cmd()
@@ -327,6 +372,7 @@ DISPLAY = {
     "codex": ("Codex", "Codex"), "openai-api": ("Codex API", "Codex"), "claude": ("Claude Code", "Claude Code"),
     "cursor": ("Cursor", "Cursor"), "antigravity": ("Antigravity", "Antigravity"),
     "copilot": ("Copilot CLI", "Copilot CLI"), "grok": ("Grok CLI", "Grok CLI"),
+    "lmstudio": ("LM Studio (local)", "LM Studio"),
     "perplexity": ("Perplexity", "Perplexity"), "firecrawl": ("Firecrawl", "Firecrawl"),
     "simulated": ("Simulated (test only)", "Simulated"),
 }
@@ -357,7 +403,7 @@ def cached(store: Store) -> dict[str, dict]:
 
 
 def usable(route: dict, mode: str) -> bool:
-    return (route["state"] in ("READY_INCLUDED", "READY_METERED", "SIMULATED")
+    return (route["state"] in ("READY_INCLUDED", "READY_LOCAL", "READY_METERED", "SIMULATED")
             and mode in route["supported_modes"])
 
 
@@ -409,6 +455,9 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         if not cmd:
             raise RuntimeError("copilot unavailable")
         return cmd + ["-s", "--no-color"] + (["--model", model] if model else [])  # prompt via stdin
+    if route_id == "lmstudio" and mode == "chat":
+        return [sys.executable, "-I", str(Path(__file__).with_name("local_llm_client.py")),
+                model or LMSTUDIO_DEFAULT, out_file]
     if route_id == "simulated":
         return _sim_cmd() + [mode, out_file]
     raise RuntimeError(f"route {route_id} has no in-app execution path for {mode}")
