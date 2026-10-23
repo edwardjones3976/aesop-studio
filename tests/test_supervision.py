@@ -104,6 +104,16 @@ class TestSupervision(Base):
         self.assertTrue(any(o.get("ledger_id") == lid for o in out))
         self.assertEqual(self.store.one("SELECT status FROM ledger WHERE id=?", (lid,))["status"], "settled")
 
+    def test_interrupted_chat_turns_open_no_repair(self):  # health check: no noise repairs for read-only chat
+        now = time.time()
+        for tid, mode in (("task_chat_run", "chat"), ("task_agent_run", "agent")):
+            self.store.x("INSERT INTO tasks(id,project_id,provider,prompt,state,pid,created,checkpoint) VALUES(?,?,?,?,?,?,?,?)",
+                         (tid, self.p["id"], "simulated", "x", "RUNNING", 999999, now, json.dumps({"mode": mode})))
+        self.sup.reconcile()
+        tasks_with_repairs = {r["task_id"] for r in self.store.q("SELECT task_id FROM repairs")}
+        self.assertNotIn("task_chat_run", tasks_with_repairs)
+        self.assertIn("task_agent_run", tasks_with_repairs)
+
     def test_truncated_snapshot_reports_no_false_changes(self):  # stability-14
         before = {"a": "1", "b": "1"}
         after = {"a": "2", "c": "1"}

@@ -562,11 +562,21 @@ class Supervisor:
             metered_started = bool(cp.get("reservation_usd")) and t["state"] in ("STARTING", "RUNNING")
             billed = None if (metered_started or new_state == "EFFECT_UNKNOWN") else 0
             self._end(t["id"], new_state, cp.get("ledger_id"), billed, error=note)
-            if t["state"] in ("STARTING", "RUNNING"):
+            # Read-only chat turns have no side effects to review: only agent tasks get a repair packet.
+            if t["state"] in ("STARTING", "RUNNING") and cp.get("mode") != "chat":  # unknown mode: conservative
                 self.open_repair(t["id"], f"{t['state']}->{new_state}", "task supervision / restart reconciliation")
             if cp.get("mode") != "agent":
                 _remove_chat_dir(t["cwd"])
             outcomes.append({"task_id": t["id"], "from": t["state"], "to": new_state, "note": note})
+        # sweep: chat/verify sandboxes left by crashes or older builds (only our own prefixes, older than 24h)
+        tmp = Path(tempfile.gettempdir())
+        cutoff = time.time() - 24 * 3600
+        for d in list(tmp.glob(CHAT_DIR_PREFIX + "*")) + list(tmp.glob("aesop-verify-*")):
+            try:
+                if d.is_dir() and not _is_link(str(d)) and d.stat().st_mtime < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+            except OSError:
+                pass
         # sweep: reservations still open whose task is terminal or unknown (crash between the two writes)
         for row in self.store.q("SELECT l.id, l.billing_basis, l.task_ref, t.state, t.started FROM ledger l "
                                 "LEFT JOIN tasks t ON t.id = l.task_ref WHERE l.status='reserved' AND "
