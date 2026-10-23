@@ -67,7 +67,9 @@ class App:
         self.broker = Broker(self.store, self.sup)
         self.reconciled += self.broker.reconcile()
         providers.refresh(self.store)
-        ledger.set_permit(self.store, False)  # shipped app never inherits a billable permit
+        # The mission permit is the owner's switch (Evidence -> Spend controls). It survives restarts (owner request
+        # 2026-10-23: "switch all API routes to on"); a fresh install starts off, and the $165 mission ceiling
+        # still bounds every reservation.
 
     def allowed_hosts(self) -> set[str]:
         return {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
