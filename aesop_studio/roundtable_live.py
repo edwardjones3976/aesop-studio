@@ -88,7 +88,7 @@ class Broker:
         last = evs[-1]["seq"] if evs else 0
         lines = []
         for e in evs:
-            if e["kind"] in ("message", "opening"):
+            if e["kind"] in ("message", "opening", "closing"):
                 lines.append(f"[{e['label']}] {names.get(e['speaker'], e['speaker'])}: {e['content']}")
             elif e["kind"] in ("gap", "system"):
                 lines.append(f"[{e['label']}] (relay) {e['content']}")
@@ -148,6 +148,7 @@ class Broker:
             sess = {"rec": rec, "project": project, "names": names, "speakers": speakers, "state": state,
                     "limit_s": limit, "reserve_s": (clock or {}).get("reserve_s", min(SYNTH_RESERVE_S, limit * 0.25)),
                     "turn_timeout": (clock or {}).get("turn_timeout", self._turn_timeout(rec)),
+                    "closing_s": (clock or {}).get("closing_s", min(45, limit * 0.15)),
                     "paused": threading.Event(), "stop": threading.Event(), "paused_at": None, "inflight": {},
                     "cond": threading.Condition()}
             self._event(rec["id"], "system", f"Roundtable started ({rec['mode'].replace('_', ' ')}). Speakers: "
@@ -238,11 +239,32 @@ class Broker:
         if phase == "opening":
             return head + ("\nGive your independent OPENING position (max 120 words). You have not seen anyone "
                            "else's view yet. End with one line 'POSITION: <one sentence>'.")
+        if phase == "closing":
+            return head + (f"\nThe open floor has closed. Full timeline:\n\n{transcript}\n\nGive your CLOSING "
+                           "statement (max 70 words): your final recommendation, what you changed your mind on, and "
+                           "the one disagreement you still hold. End with 'POSITION: <one sentence>'.")
         window = (f" Reply within about {rec['response_window_s']} seconds." if rec["mode"] == "war_room" else "")
-        return head + (f"\nShared timeline so far (each entry is [E#] speaker: text):\n\n{transcript}\n\n"
-                       "Now reply to the room (max 110 words). Address participants with @Name, cite events like "
-                       "[E3], challenge weak points, and say explicitly if you changed your position. End with "
-                       f"'POSITION: <one sentence>'.{window}")
+        directed = self._directed(s, lane["id"])
+        lead = ("\nMessages addressed to YOU that you have not answered yet — answer these first, directly, by "
+                "name:\n" + "\n".join(directed) + "\n") if directed else ""
+        return head + (f"\nThis is an open floor: everyone speaks whenever they have something new, so messages "
+                       f"arrive while you think. Timeline so far ([E#] speaker: text):\n\n{transcript}\n{lead}\n"
+                       "Reply in max 80 words. Talk TO someone: start with @Name, cite the event you answer like "
+                       "[E3], push back, concede, or propose a concrete change. If you have nothing new to add, "
+                       f"reply with exactly PASS. Otherwise end with 'POSITION: <one sentence>'.{window}")
+
+    def _directed(self, s, lid) -> list[str]:
+        """Unanswered messages that @mention this speaker (newest last), for direct one-to-one replies."""
+        rt_id = s["rec"]["id"]
+        evs = self.events(rt_id)
+        answered = {r for e in evs if e["speaker"] == lid for r in e["reply_to"]}
+        mine_last = max([e["seq"] for e in evs if e["speaker"] == lid], default=0)
+        out = []
+        for e in evs:
+            if e["kind"] == "message" and lid in e["mentions"] and e["label"] not in answered and e["seq"] > mine_last - 10**9:
+                if e["seq"] > (s["state"][lid].get("answered_upto") or 0):
+                    out.append(f"[{e['label']}] {s['names'].get(e['speaker'], e['speaker'])}: {e['content'][:400]}")
+        return out[-3:]
 
     def _dispatch(self, rt_id, s, lane, phase):
         transcript, seen = self._transcript(rt_id, s["names"])
@@ -274,10 +296,16 @@ class Broker:
             text = (cp.get("result") or "").strip() or self.sup.output(tid)[0].strip()
             cost = cp.get("cost_usd") or 0.0
             st = s["state"][lane["id"]]
-            if t["state"] == "COMPLETED" and text:
+            if t["state"] == "COMPLETED" and text.strip().upper().rstrip(".") == "PASS":
+                self._event(rt_id, "pass", f"{lane['name']} passed (nothing new to add).", speaker=lane["id"],
+                            phase=phase, seen_upto=seen, task_id=tid, latency=latency)
+                self._set_speaker(rt_id, s, lane["id"], state="idle", last_seen=seen, last_latency_s=latency,
+                                  passes=st.get("passes", 0) + 1)
+            elif t["state"] == "COMPLETED" and text:
                 clipped = text if len(text) <= MAX_REPLY_CHARS else text[:MAX_REPLY_CHARS] + " …[clipped by relay]"
-                self._event(rt_id, "opening" if phase == "opening" else "message", clipped, speaker=lane["id"],
-                            phase=phase, seen_upto=seen, task_id=tid, latency=latency, names=s["names"])
+                kind = {"opening": "opening", "closing": "closing"}.get(phase, "message")
+                self._event(rt_id, kind, clipped, speaker=lane["id"], phase=phase, seen_upto=seen, task_id=tid,
+                            latency=latency, names=s["names"])
                 self._set_speaker(rt_id, s, lane["id"], state="idle", turns=st["turns"] + 1, failures=0,
                                   last_latency_s=latency, cost_usd=round(st["cost_usd"] + cost, 6), last_seen=seen)
             else:
@@ -295,7 +323,7 @@ class Broker:
 
     def _others_since(self, rt_id, lid, seen) -> bool:
         return self.store.one("SELECT COUNT(*) n FROM roundtable_events WHERE rt_id=? AND seq>? AND kind IN "
-                              "('message','opening') AND speaker<>?", (rt_id, seen, lid))["n"] > 0
+                              "('message','opening','closing') AND speaker<>?", (rt_id, seen, lid))["n"] > 0
 
     def _wait(self, rt_id, s, done, hard=False):
         while not done():
@@ -310,10 +338,11 @@ class Broker:
         try:
             for lane in s["speakers"]:
                 self._dispatch(rt_id, s, lane, "opening")
-            self._wait(rt_id, s, lambda: not s["inflight"], hard=True)
+            # Open floor starts as soon as each opening lands: no barrier, so turns interleave instead of lockstep.
+            closing_at = s["limit_s"] - s["reserve_s"] - s.get("closing_s", 45)
             while not s["stop"].is_set():
                 turns = sum(v["turns"] for v in s["state"].values())
-                if self._elapsed(rt_id, s) >= s["limit_s"] - s["reserve_s"] or turns >= caps["max_turns"]:
+                if self._elapsed(rt_id, s) >= closing_at or turns >= caps["max_turns"]:
                     break
                 if s["paused"].is_set():
                     with s["cond"]:
@@ -322,8 +351,11 @@ class Broker:
                 ready = [l for l in s["speakers"]
                          if l["id"] not in s["inflight"]
                          and s["state"][l["id"]]["state"] not in ("disconnected", "budget_exhausted")
-                         and s["state"][l["id"]]["turns"] < caps["max_messages_per_speaker"]
+                         and s["state"][l["id"]]["turns"] >= 1  # has given its independent opening
+                         and s["state"][l["id"]]["turns"] < caps["max_messages_per_speaker"] + 1
                          and self._others_since(rt_id, l["id"], s["state"][l["id"]].get("last_seen") or 0)]
+                # speakers with unanswered @mentions go first (direct, one-to-one replies)
+                ready.sort(key=lambda l: not self._directed(s, l["id"]))
                 for lane in ready:
                     if turns + len(s["inflight"]) >= caps["max_turns"]:
                         break
@@ -333,6 +365,12 @@ class Broker:
                 with s["cond"]:
                     s["cond"].wait(1.0)
             self._wait(rt_id, s, lambda: not s["inflight"], hard=True)
+            if not s["stop"].is_set():  # brief parallel closing statements
+                self._event(rt_id, "system", "Open floor closed. Closing statements.", phase="closing")
+                for lane in s["speakers"]:
+                    if s["state"][lane["id"]]["state"] not in ("disconnected", "budget_exhausted"):
+                        self._dispatch(rt_id, s, lane, "closing")
+                self._wait(rt_id, s, lambda: not s["inflight"], hard=True)
             for tid in list(s["inflight"].values()):
                 self.sup.cancel(tid)
             stopped = s["stop"].is_set()
@@ -358,7 +396,8 @@ class Broker:
                   f"even-handed).\nObjective: {rec['objective']}\nDeliverable: {rec['deliverable'] or 'recommendation'}"
                   f"\n\nTranscript:\n\n{transcript}\n\nWrite a concise decision memo in Markdown with sections: "
                   "## Best-supported proposal, ## Competing recommendations, ## Evidence cited ([E#]), ## Dissent, "
-                  "## Unresolved risks, ## Follow-ups, ## Conditions for implementation. Attribute every view. No "
+                  "## Unresolved risks, ## Direct exchanges (who answered whom, and what changed), ## Follow-ups, "
+                  "## Conditions for implementation. Attribute every view. No "
                   "false consensus. Votes are advisory and confer no authority.")
         tid = self.sup.create(s["project"], synth["route_id"], prompt, mode="chat", timeout=180)
         while self.sup.get(tid)["state"] not in TERMINAL:

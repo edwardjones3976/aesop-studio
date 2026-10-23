@@ -267,6 +267,17 @@ class Handler(BaseHTTPRequestHandler):
         self._rt(rid)
         self.json(getattr(self.app.broker, op)(rid))
 
+    @route("GET", r"/api/roundtables")
+    def rt_history(self, sess):
+        """History of every roundtable across projects (newest first)."""
+        rows = self.app.store.q("SELECT r.id, r.project_id, p.name AS project, r.mode, r.objective, r.live_status, "
+                                "r.started, r.ended, r.coverage, r.updated, (SELECT COUNT(*) FROM roundtable_events e "
+                                "WHERE e.rt_id = r.id AND e.kind IN ('opening','message','closing')) AS messages "
+                                "FROM roundtables r JOIN projects p ON p.id = r.project_id ORDER BY r.updated DESC LIMIT 200")
+        for r in rows:
+            r["coverage"] = json.loads(r["coverage"]) if r["coverage"] else None
+        self.json(rows)
+
     @route("GET", r"/api/roundtables/(\w+)/live")
     def rt_live(self, sess, rid):
         self._rt(rid)

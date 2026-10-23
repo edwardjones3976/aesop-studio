@@ -49,7 +49,7 @@ def main():
     proj = next((p for p in svc.projects() if p["name"] == "Aesop Studio design review"), None) \
         or svc.create_project("Aesop Studio design review", str(root), "claude")
     rec = roundtable.save(store, proj["id"], {
-        "mode": "war_room", "objective": BRIEF, "deliverable": "ranked list of 5 visual changes with CSS-level specifics",
+        "mode": "war_room", "objective": BRIEF.replace("agree the 5 highest-impact visual improvements", "settle the open questions: the empty-state link colour (mint vs neutral), zebra vs separators, and whether a light theme belongs in the next release"), "deliverable": "a decision on each open question with the reasoning and dissent",
         "outcome_type": "adversarial challenge", "time_limit_min": 8, "response_window_s": 45, "roster": list(lanes.ADMINS),
         "sharing_ack": True, "caps": {"max_turns": 12, "max_messages_per_speaker": 3, "cost_cap_usd": 0}})
     pf = rec["preflight"]

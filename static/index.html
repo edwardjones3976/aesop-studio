@@ -50,7 +50,7 @@
       <h2>Projects</h2>
       <button id="explorerClose" class="iconbtn ov-only" type="button" aria-label="Close projects" data-icon="x"></button>
     </div>
-    <div class="explorer-new"><button id="newProjectBtn" class="btn primary wide" data-icon="plus">New project</button></div>
+    <div class="explorer-new"><button id="newProjectBtn" class="btn outline wide" data-icon="plus">New project</button></div>
     <nav id="projectList" class="plist" aria-label="Project list"></nav>
     <div class="explorer-global">
       <button class="navbtn" data-global="providers" data-icon="providers">Providers</button>
@@ -62,12 +62,17 @@
   <main id="main" class="canvas pane" tabindex="-1">
     <header class="canvas-head">
       <div class="top-title">
-        <h1 id="projTitle">No project open</h1>
+        <nav class="headcrumb" aria-label="Location"><span id="headWs"></span><h1 id="projTitle">No project open</h1></nav>
         <p id="projMeta" class="meta"></p>
       </div>
       <div id="projControls" class="controls" hidden>
         <label class="provider-pick"><span>Provider</span><select id="providerSel"></select></label>
-        <button id="settingsBtn" class="btn" data-icon="settings">Settings</button>
+        <div class="menuwrap">
+          <button id="moreBtn" class="iconbtn" type="button" aria-label="More project actions" aria-haspopup="menu" aria-expanded="false" aria-controls="moreMenu" data-icon="more"></button>
+          <div id="moreMenu" class="menu" role="menu" aria-labelledby="moreBtn" hidden>
+            <button id="settingsBtn" class="menuitem" role="menuitem" tabindex="-1" data-icon="settings">Project settings</button>
+          </div>
+        </div>
       </div>
     </header>
     <section id="view" class="view"></section>

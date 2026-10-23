@@ -77,8 +77,12 @@ class TestBroker(unittest.TestCase):
         self.assertLess(starts[-1], ends[0])  # all four opening turns overlapped in time
         self.assertTrue(st["coverage"]["valid"])
         self.assertTrue(st["memo"] and "Coverage" in st["memo"])
-        for v in st["speakers"].values():  # fairness cap per speaker
-            self.assertLessEqual(v["turns"], 2)
+        for lid in ("alpha", "bravo", "charlie", "delta"):  # fairness cap on open-floor messages per speaker
+            self.assertLessEqual(len([e for e in msgs if e["speaker"] == lid]), 2)
+        self.assertEqual({e["speaker"] for e in evs if e["kind"] == "closing"}, {"alpha", "bravo", "charlie", "delta"})
+        # no lockstep barrier: the first floor message was dispatched before the slowest opening landed
+        first_floor = min(self.sup.get(e["task_id"])["started"] for e in msgs)
+        self.assertLess(first_floor, max(t["ended"] for t in tasks) + 1.0)
 
     def test_stop_and_reconcile_never_replay(self):
         rec = self.draft()

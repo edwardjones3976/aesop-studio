@@ -26,7 +26,12 @@
   "none": 0
  },
  "unnamed_controls": [],
- "controls_under_40px_desktop": [],
+ "controls_under_40px_desktop": [
+  [
+   "show full path",
+   24
+  ]
+ ],
  "separators": 2,
  "pane_resize": {
   "before": "220",

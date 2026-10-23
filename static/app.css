@@ -662,3 +662,58 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="r
   .rt-room { height: 100%; min-height: 0; }
   .rt-feed { flex: 1 1 auto; max-height: none; min-height: 0; }
 }
+
+/* threaded roundtable feed */
+.ev.reply { margin-left: 18px; border-left: 3px solid var(--border-2); }
+.evr { min-height: 28px; padding: 0 4px; font-size: 12.5px; margin-bottom: 2px; }
+.ev-pass { display: none; padding: 4px 10px; background: none; border-style: dashed; font-size: 12.5px; color: var(--text-2); }
+.rt-feed.show-pass .ev-pass { display: block; }
+.ev-closing { border-color: rgba(128, 225, 203, .4); }
+.ev.flash { box-shadow: 0 0 0 2px var(--focus); }
+.evdiv { display: flex; align-items: center; gap: 10px; font-size: 12px; font-weight: 600; color: var(--text-2); text-transform: uppercase; letter-spacing: .04em; }
+.evdiv::before, .evdiv::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.tag.mention { background: var(--sky-bg); color: var(--sky); }
+
+/* ---------- war room visual package ---------- */
+/* 1. compact project header */
+.canvas-head { min-height: 56px; padding-block: 8px; align-items: center; gap: 8px 16px; }
+.top-title { gap: 2px; flex: 1 1 240px; }
+.headcrumb { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.headcrumb #headWs { color: #AFBED0; font-size: 13px; white-space: nowrap; }
+.headcrumb #headWs:not(:empty)::after { content: " /"; }
+.canvas-head h1 { font-size: 16px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.meta { gap: 0 8px; font-size: 12px; color: #AFBED0; flex-wrap: wrap; min-width: 0; }
+.rootline { font-family: var(--mono); font-size: 12px; color: #AFBED0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(48ch, 100%); min-width: 0; }
+.rootline.full { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.pathtog { min-height: 24px; font-size: 12px; padding: 0 4px; }
+.mdot { font-size: 12px; color: #AFBED0; }
+.mdot::before { content: "·"; margin-right: 8px; }
+.menuwrap { position: relative; }
+.menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 30; min-width: 200px; padding: 4px; background: var(--raised); border: 1px solid var(--border-2); border-radius: var(--r-ctl); box-shadow: var(--shadow-3); }
+.menuitem { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 0 12px; border: 0; border-radius: var(--r-sm); background: none; color: var(--text); font: inherit; font-size: 13.5px; cursor: pointer; text-align: left; }
+.menuitem:hover, .menuitem:focus-visible { background: var(--panel); outline: none; box-shadow: inset 0 0 0 2px var(--focus); }
+/* 2. one coral per viewport */
+.btn.outline { background: transparent; border: 1px solid #2B3B4D; color: #EEF4FA; }
+.btn.outline:hover { background: var(--raised); }
+.btn.rt-entry { background: transparent; border-color: #2B3B4D; color: #EEF4FA; }
+.btn.rt-entry:hover { background: var(--raised); border-color: var(--border-2); }
+/* 3. unboxed metadata: plain text; filled pills only for exceptional states */
+.chip { background: none; border: 0; padding: 0; min-height: 0; font-size: 12px; color: #AFBED0; }
+.tag.route { background: none; padding: 0; color: #AFBED0; font-size: 12px; }
+.pill:not(.warn):not(.bad):not(.info) { background: none; padding: 0; color: #AFBED0; }
+/* 4. structured tables */
+.tablewrap { max-height: 70vh; overflow: auto; }
+thead th { position: sticky; top: 0; z-index: 1; background: #141F2C; }
+th, td { padding: 10px 12px; height: 44px; border-bottom: 1px solid #2B3B4D; }
+tbody tr:hover { background: #243243; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* 5. tight empty states; neutral text-link actions (coral only in the no-projects welcome) */
+.empty strong { font-size: 20px; line-height: 1.3; }
+.empty p { max-width: 36ch; }
+.empty:not(.welcome) .btn { background: none; border: 0; min-height: 32px; padding: 0; color: #AFBED0; text-decoration: underline; text-underline-offset: 3px; font-weight: 560; }
+.empty:not(.welcome) .btn .ico { display: none; }
+.empty:not(.welcome) .btn:hover, .empty:not(.welcome) .btn:focus-visible { color: #9BD7FF; background: none; }
+
+/* QA: path toggle meets the 40px desktop control minimum (44px on touch). */
+.linkish.pathtog { min-height: 40px; }
+@media (pointer: coarse) { .linkish.pathtog { min-height: 44px; } }

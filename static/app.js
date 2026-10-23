@@ -70,7 +70,7 @@ const ICONS = {
   shield: "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z", db: "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
   dollar: "M12 2v20M17 6H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6", note: "M4 4h16v16H4zM8 9h8M8 13h8M8 17h5",
   help: "M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0z",
-  panel: "M3 4h18v16H3zM15 4v16", users: "M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM22 19v-1a4 4 0 0 0-3-3.9M16 4.1a3 3 0 0 1 0 5.8", diff: "M12 3v12M6 9h12M6 21h12", list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+  panel: "M3 4h18v16H3zM15 4v16", more: "M12 5h.01M12 12h.01M12 19h.01", users: "M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM22 19v-1a4 4 0 0 0-3-3.9M16 4.1a3 3 0 0 1 0 5.8", diff: "M12 3v12M6 9h12M6 21h12", list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
 };
 function icon(name, cls = "") {
   const s = document.createElementNS(SVGNS, "svg");
@@ -85,8 +85,9 @@ function decorateIcons(root = document) {
 
 // ---------- building blocks ----------
 function empty(ico, title, text, ...actions) {
+  const one = text ? String(text).split(/(?<=[.!?])\s+/)[0] : "";
   return h("div", { class: "empty" }, h("div", { class: "eico" }, icon(ico)),
-    h("div", { class: "et" }, title ? h("strong", {}, title) : null, text ? h("p", {}, text) : null, actions.length ? h("div", { class: "row" }, ...actions) : null));
+    h("div", { class: "et" }, title ? h("strong", {}, title) : null, one ? h("p", {}, one) : null, actions.length ? h("div", { class: "row" }, actions[0]) : null));
 }
 function section(title, desc, ...kids) {
   return h("section", { class: "section" }, h("div", { class: "section-head" }, h("h2", {}, title), desc ? h("p", {}, desc) : null), ...kids);
@@ -361,6 +362,7 @@ function paletteItems() {
   it.push({ g: "Studio", ico: "evidence", label: "Open Evidence", run: () => openGlobal("evidence") });
   it.push({ g: "View", ico: "panel", label: "Toggle inspector", run: () => toggleInspector($("inspectorBtn")) });
   for (const t of ["preview", "files", "changes", "terminal", "logs"]) it.push({ g: "View", ico: "panel", label: `Inspector: ${t[0].toUpperCase() + t.slice(1)}`, run: () => openInspector(t, $("inspectorBtn")) });
+  if (S.project) it.push({ g: "Action", ico: "users", label: "Roundtable history", run: async () => { await setTab("artifacts"); const el = $("rtHistory"); if (el) el.scrollIntoView({ block: "start" }); } });
   it.push({ g: "Help", ico: "help", label: "Keyboard shortcuts", key: "?", run: showShortcuts });
   return it;
 }
@@ -530,7 +532,7 @@ function rtBuild(focusId) {
   const start = el.start = h("button", { type: "button", class: "btn rt-start", "aria-disabled": "true", "aria-describedby": "rtStartWhy",
     onclick: () => rtStart() }, icon("send"), "Start");
   const foot = h("div", { class: "rt-foot" },
-    h("div", { class: "row" }, abtn("Save draft", () => rtSave(false), "primary", "check"), abtn("Check preflight", rtPreflight, "", "shield"), el.exportBtn),
+    h("div", { class: "row" }, (el.saveBtn = abtn("Save draft", () => rtSave(false), "primary", "check")), abtn("Check preflight", rtPreflight, "", "shield"), el.exportBtn),
     h("div", { class: "rt-startgrp" }, start, el.startWhy));
   $("rtIn").replaceChildren(
     h("header", { class: "rt-head" }, h("div", { class: "ttl" }, icon("users"), h("div", {}, h("h2", { id: "rtTitle" }, "Configure Roundtable"),
@@ -616,7 +618,7 @@ function rtStartRender() {
   RT.el.liveNote.textContent = RT.live ? "Live roundtables are switched on. Start runs a brokered, time-boxed session once preflight passes." : "Live roundtables are switched off (Evidence → Spend controls). You can still plan and save drafts.";
   const ok = rtCanStart();
   RT.el.start.setAttribute("aria-disabled", ok ? "false" : "true");
-  RT.el.start.classList.toggle("primary", ok);
+  RT.el.start.classList.toggle("primary", ok); RT.el.saveBtn.classList.toggle("primary", !ok);
   if (ok) { RT.el.startWhy.textContent = "Ready: the current preflight passed. Start opens the live room."; return; }
   const fresh = RT.pre && !RT.preStale && (RT.pre.block_reasons || []).length;
   const reasons = fresh ? RT.pre.block_reasons : !RT.live ? [RT_NOT_LIVE] : RT.gates.length ? RT.gates.map((g) => g.reason)
@@ -708,14 +710,34 @@ function rtText(t) {
   if (last < t.length) out.push(t.slice(last));
   return out;
 }
-function rtEvent(ev, sps) {
+// Feed items are threaded: replies link to the event they answer; passes are compact and can be hidden.
+function rtEvent(ev, sps, room) {
   const sp = sps[ev.speaker]; const name = sp ? sp.name : ev.speaker || (ev.kind === "system" ? "Studio" : ev.kind);
-  return h("li", { class: "ev ev-" + ev.kind },
-    h("div", { class: "evh" }, h("code", {}, ev.label || `E${ev.seq}`), h("strong", {}, name), ev.kind === "gap" ? h("span", { class: "pill warn" }, "gap") : null,
-      ev.phase ? h("span", { class: "tag" }, ev.phase) : null, ev.latency_s != null ? h("span", {}, `${ev.latency_s}s`) : null,
-      ev.seen_label ? h("span", {}, `saw up to ${ev.seen_label}`) : null),
+  const label = ev.label || `E${ev.seq}`;
+  const li = h("li", { class: "ev ev-" + ev.kind, id: `rtev-${room.id}-${label}`, tabindex: "-1" });
+  room.byLabel[label] = { li, name };
+  if (ev.kind === "pass") {
+    li.append(h("span", { class: "evp" }, h("code", {}, label), ` ${name} passed`, ev.content ? ` · ${ev.content}` : ""));
+    return li;
+  }
+  const refs = Array.isArray(ev.reply_to) ? ev.reply_to : ev.reply_to ? [ev.reply_to] : [];
+  const replies = refs.map((r) => {
+    const tgt = room.byLabel[r];
+    return h("button", { type: "button", class: "linkish evr", onclick: () => {
+      const t = room.byLabel[r]; if (!t) return;
+      t.li.scrollIntoView({ block: "center" }); t.li.focus({ preventScroll: true });
+      t.li.classList.add("flash"); setTimeout(() => t.li.classList.remove("flash"), 1600);
+    } }, `↳ replying to ${r}${tgt ? " · " + tgt.name : ""}`);
+  });
+  if (refs.length) li.classList.add("reply");
+  const mentions = (ev.mentions || []).map((m) => { const ms = sps[m]; return h("span", { class: "tag mention" }, `@${ms ? ms.name : m}`); });
+  li.append(...replies,
+    h("div", { class: "evh" }, h("code", {}, label), h("strong", {}, name), ev.kind === "gap" ? h("span", { class: "pill warn" }, "gap") : null,
+      ...mentions, ev.latency_s != null ? h("span", {}, `${ev.latency_s}s`) : null, ev.seen_label ? h("span", {}, `saw up to ${ev.seen_label}`) : null),
     h("div", { class: "evb" }, ...rtText(String(ev.content || ""))));
+  return li;
 }
+function rtDivider(text) { return h("li", { class: "evdiv", role: "presentation" }, h("span", {}, text)); }
 function rtCoverage(c) {
   if (!c) return h("p", { class: "muted" }, "No coverage summary was returned.");
   if (typeof c === "string") return h("div", { class: "note" }, icon("info"), h("span", {}, c));
@@ -728,7 +750,7 @@ function rtCoverage(c) {
 function rtRoom(id, readOnly) {
   const s = RT; if (!s) return;
   clearTimeout(s.timer); const gen = ++s.gen;
-  const room = { after: 0 };
+  const room = { after: 0, id, byLabel: {}, phase: null, opened: false, closed: false, passes: 0 };
   const clock = h("span", { class: "rt-clock" }, "—"); const stPill = h("span");
   const chips = h("div", { class: "rt-chips", "aria-label": "Speakers" });
   const feed = h("ol", { class: "rt-feed", "aria-label": "Roundtable feed", tabindex: "0" });
@@ -741,11 +763,14 @@ function rtRoom(id, readOnly) {
   const pauseBtn = ctl("Pause", "pause", "clock"), resumeBtn = ctl("Resume", "resume", "send"), stopBtn = ctl("Stop", "stop", "stop");
   stopBtn.classList.add("danger");
   const exportBtn = abtn("Export record", async () => { try { await download(`/api/roundtables/${id}/record`, `roundtable-record-${id}.json`); } catch (e) { rtSay(e.message, "bad"); } }, "sm", "download");
+  const passBtn = h("button", { type: "button", class: "btn ghost sm", "aria-pressed": "false", hidden: true, onclick: () => {
+    const show = feed.classList.toggle("show-pass"); passBtn.setAttribute("aria-pressed", show ? "true" : "false");
+    passBtn.textContent = `${show ? "hide" : "show"} passes (${room.passes})`; } }, "show passes (0)");
   const back = btn("Back to setup", () => { clearTimeout(s.timer); s.gen++; rtBuild(); }, "ghost sm");
   pauseBtn.hidden = resumeBtn.hidden = stopBtn.hidden = true;
   const main = h("section", { class: "rt-col rt-main rt-room", "aria-label": "Live room" },
     h("div", { class: "card-head" }, h("div", { class: "ttl" }, h("h3", {}, readOnly ? "Roundtable record" : "Live room"), stPill), clock),
-    chips, h("div", { class: "row" }, pauseBtn, resumeBtn, stopBtn, exportBtn, back), cov, feed, announce);
+    chips, h("div", { class: "row" }, pauseBtn, resumeBtn, stopBtn, exportBtn, passBtn, back), cov, feed, announce);
   const side = h("section", { class: "rt-col rt-side", "aria-label": "Memo" }, memo);
   s.el.body.replaceChildren(s.el.part, main, side); s.el.foot.hidden = true;
   memo.replaceChildren(h("h3", {}, "Memo"), h("p", { class: "muted" }, "The memo appears here when the session writes one."));
@@ -758,7 +783,15 @@ function rtRoom(id, readOnly) {
     if (RT !== s || s.gen !== gen) return;
     const st = d.status || {}; const sps = st.speakers || {};
     const stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
-    for (const ev of d.events || []) { if (ev.seq <= room.after) continue; room.after = ev.seq; feed.append(rtEvent(ev, sps)); pending++; }
+    for (const ev of d.events || []) {
+      if (ev.seq <= room.after) continue; room.after = ev.seq;
+      if (ev.kind === "opening" && !room.opened) { room.opened = true; feed.append(rtDivider("Openings (independent)")); }
+      else if (ev.kind === "closing" && !room.closed) { room.closed = true; feed.append(rtDivider("Closing statements")); }
+      else if (ev.phase && ev.phase !== room.phase && room.phase !== null && !["opening", "closing", "pass"].includes(ev.kind)) feed.append(rtDivider(`Phase: ${ev.phase}`));
+      if (ev.phase && ev.kind !== "pass") room.phase = ev.phase;
+      feed.append(rtEvent(ev, sps, room));
+      if (ev.kind === "pass") { room.passes++; passBtn.hidden = false; passBtn.textContent = `${feed.classList.contains("show-pass") ? "hide" : "show"} passes (${room.passes})`; } else pending++;
+    }
     if (stick) feed.scrollTop = feed.scrollHeight;
     if (pending && Date.now() - lastSay > 4000) { announce.textContent = `${pending} new item${pending > 1 ? "s" : ""} in the roundtable feed.`; pending = 0; lastSay = Date.now(); }
     clock.textContent = `${fmtS(st.elapsed_s)} elapsed · ${fmtS(st.remaining_s)} left of ${fmtS(st.limit_s)}`;
@@ -817,7 +850,12 @@ let navWired = false;
 function wireNav() {
   if (navWired) return; navWired = true;
   $("newProjectBtn").onclick = newProject;
-  $("settingsBtn").onclick = projectSettings;
+  const menu = $("moreMenu"), more = $("moreBtn");
+  const closeMenu = (focus) => { menu.hidden = true; more.setAttribute("aria-expanded", "false"); if (focus) more.focus(); };
+  more.onclick = () => { const open = menu.hidden; menu.hidden = !open; more.setAttribute("aria-expanded", open ? "true" : "false"); if (open) $("settingsBtn").focus(); };
+  menu.addEventListener("keydown", (e) => { if (e.key === "Escape" || e.key === "Tab") { e.preventDefault(); e.stopPropagation(); closeMenu(true); } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) { e.preventDefault(); $("settingsBtn").focus(); } });
+  document.addEventListener("click", (e) => { if (!menu.hidden && !e.target.closest(".menuwrap")) closeMenu(false); });
+  $("settingsBtn").onclick = () => { closeMenu(true); projectSettings(); };
   $("providerSel").onchange = (e) => {
     const pid = S.project && S.project.id; const val = e.target.value; if (!pid) return;
     guard(async () => {
@@ -950,16 +988,18 @@ function refreshRouteLabels() {
 function renderHeader() {
   const p = S.project;
   if (S.global) {
-    $("projTitle").textContent = GL[S.global]; $("projMeta").replaceChildren(); $("projControls").hidden = true; $("tabs").hidden = !p;
+    $("projTitle").textContent = GL[S.global]; $("headWs").textContent = "Studio"; $("projMeta").replaceChildren(); $("projControls").hidden = true; $("tabs").hidden = !p;
     routeIndicator(); crumbs(); return;
   }
   $("projTitle").textContent = p ? p.name : "No project open";
+  $("headWs").textContent = p && WS[S.tab] ? WS[S.tab] : "";
   const meta = $("projMeta");
   if (p) {
     const r = S.routes[p.provider_default];
-    meta.replaceChildren(h("span", { class: "chip mono", title: p.root }, icon("folder"), h("span", { class: "t" }, p.root)),
-      h("span", { class: "chip" }, p.provider_default ? routeDot(p.provider_default) : null, h("span", { class: "t" }, `default provider: ${routeName(p.provider_default) || "not set"}${r ? " · " + access(r.state) : ""}`)),
-      h("span", { class: "chip saved" }, icon("check"), h("span", { class: "t" }, "Saved locally")));
+    const root = h("span", { class: "rootline", id: "rootLine", title: p.root }, p.root);
+    const tog = h("button", { type: "button", class: "linkish pathtog", "aria-controls": "rootLine", "aria-expanded": "false", onclick: () => {
+      const full = root.classList.toggle("full"); tog.setAttribute("aria-expanded", full ? "true" : "false"); tog.textContent = full ? "hide full path" : "show full path"; } }, "show full path");
+    meta.replaceChildren(root, tog, h("span", { class: "mdot" }, `${routeName(p.provider_default) || "no default provider"}${r ? " · " + access(r.state) : ""}`), h("span", { class: "mdot" }, "saved locally"));
   } else meta.replaceChildren();
   $("projControls").hidden = !p; $("tabs").hidden = !p;
   routeIndicator(); crumbs();
@@ -1252,7 +1292,7 @@ async function renderChat() {
       h("div", { class: "bubble" },
         h("div", { class: "mhead" },
           h("div", { class: "who" }, h("strong", {}, user ? "You" : routeName(m.provider) || "Assistant"), !user ? routeTag(r) : null,
-            user && m.status === "saved" ? null : statePill(m.status), user ? h("span", { class: "chip saved" }, icon("check"), h("span", { class: "t" }, "saved locally")) : null),
+            user && m.status === "saved" ? null : statePill(m.status), user ? h("span", { class: "mdot" }, "saved locally") : null),
           save),
         body,
         h("div", { class: "mtime" }, fmtClock(m.created), meta.duration_s ? ` · ${meta.duration_s}s provider wait` : ""),
@@ -1676,6 +1716,7 @@ async function renderArtifacts() {
   const arts = await api("GET", `/api/projects/${pid}/artifacts`);
   if (gen !== S.viewGen) return;
   setActivity(`${arts.length} item(s)`);
+  const hist = h("section", { class: "section", id: "rtHistory" }, h("h2", {}, "Roundtables"), h("p", { class: "muted" }, "Loading sessions…"));
   $("view").replaceChildren(h("div", { class: "row between" }, h("div", { class: "section-head" }, h("h2", {}, "Saved items", h("span", { class: "count" }, String(arts.length)))),
     h("div", { class: "row" }, dlBtn("Export project (JSON)", `/api/projects/${pid}/export`, `aesop-${pid}.json`, "primary"),
       btn("Archive project", () => guard(async () => {
@@ -1687,7 +1728,31 @@ async function renderArtifacts() {
       }), "danger", "archive"))),
     ...(arts.length ? arts.map((a) => h("details", { class: "card" }, h("summary", {}, statePill(a.kind), h("span", { class: "st" }, a.title), h("span", { class: "faint" }, fmtTime(a.created)),
       h("button", { type: "button", class: "linkish", onclick: (e) => { e.preventDefault(); S.preview = a.id; openInspector("preview", e.currentTarget); } }, icon("eye", "sm"), "Preview")), h("pre", { class: "out" }, a.content)))
-      : [empty("bookmark", "Nothing saved yet", "Save chat answers or task results to keep them here.")]));
+      : [empty("bookmark", "Nothing saved yet", "Save chat answers or task results to keep them here.")]),
+    hist);
+  loadRtHistory(hist, gen);
+}
+// Roundtable history across all projects; View opens the read-only room in the right project.
+async function loadRtHistory(el, gen) {
+  let rows;
+  try { rows = await api("GET", "/api/roundtables"); } catch (e) { if (gen === S.viewGen) el.replaceChildren(h("h2", {}, "Roundtables"), h("div", { class: "note bad" }, icon("alert"), h("span", {}, e.message))); return; }
+  if (gen !== S.viewGen) return;
+  el.replaceChildren(h("div", { class: "section-head" }, h("h2", {}, "Roundtables", h("span", { class: "count" }, String(rows.length))), h("p", {}, "Every session across projects.")),
+    rows.length ? table(["Project", "Mode", "Objective", "Status", "Messages", "Coverage", "Date", ""], rows.map((r) => h("tr", {},
+      h("td", {}, r.project || r.project_id), h("td", {}, RT_MODES[r.mode] || r.mode), h("td", { class: "wrap" }, (r.objective || "").slice(0, 90)),
+      h("td", {}, statePill(r.live_status || "DRAFT")), h("td", { class: "num" }, String(r.messages ?? "—")),
+      h("td", {}, r.coverage ? h("span", { class: "pill " + (r.coverage.valid ? "ok" : "bad"), title: r.coverage.summary || "" }, r.coverage.valid ? "valid" : "not valid") : h("span", { class: "faint" }, "—")),
+      h("td", {}, fmtTime(r.ended || r.started || r.updated)),
+      h("td", {}, h("div", { class: "row" }, abtn("View", () => viewRoundtable(r), "sm", "eye"),
+        abtn("Export record", () => guard(() => download(`/api/roundtables/${r.id}/record`, `roundtable-record-${r.id}.json`)), "ghost sm", "download"))))))
+      : h("p", { class: "muted" }, "No roundtable sessions yet."));
+}
+async function viewRoundtable(r) {
+  const opener = document.activeElement;
+  if (!S.project || S.project.id !== r.project_id) await openProject(r.project_id);
+  if (!S.project || S.project.id !== r.project_id) return;
+  await openRoundtable(opener);
+  if (RT && RT.pid === r.project_id) rtRoom(r.id, true);
 }
 
 // ---------- global views ----------

@@ -9,19 +9,11 @@
  },
  {
   "viewport": "1920x1080",
-  "view": "research",
+  "view": "artifacts",
   "scrollWidth": 1920,
   "clientWidth": 1920,
   "overflow": false,
-  "screenshot": "docs\\qa\\after\\1920x1080-research.png"
- },
- {
-  "viewport": "1920x1080",
-  "view": "memory",
-  "scrollWidth": 1920,
-  "clientWidth": 1920,
-  "overflow": false,
-  "screenshot": "docs\\qa\\after\\1920x1080-memory.png"
+  "screenshot": "docs\\qa\\after\\1920x1080-artifacts.png"
  },
  {
   "viewport": "1920x1080",
@@ -41,19 +33,11 @@
  },
  {
   "viewport": "1440x900",
-  "view": "research",
+  "view": "artifacts",
   "scrollWidth": 1440,
   "clientWidth": 1440,
   "overflow": false,
-  "screenshot": "docs\\qa\\after\\1440x900-research.png"
- },
- {
-  "viewport": "1440x900",
-  "view": "memory",
-  "scrollWidth": 1440,
-  "clientWidth": 1440,
-  "overflow": false,
-  "screenshot": "docs\\qa\\after\\1440x900-memory.png"
+  "screenshot": "docs\\qa\\after\\1440x900-artifacts.png"
  },
  {
   "viewport": "1440x900",
@@ -73,19 +57,11 @@
  },
  {
   "viewport": "1366x768",
-  "view": "research",
+  "view": "artifacts",
   "scrollWidth": 1366,
   "clientWidth": 1366,
   "overflow": false,
-  "screenshot": "docs\\qa\\after\\1366x768-research.png"
- },
- {
-  "viewport": "1366x768",
-  "view": "memory",
-  "scrollWidth": 1366,
-  "clientWidth": 1366,
-  "overflow": false,
-  "screenshot": "docs\\qa\\after\\1366x768-memory.png"
+  "screenshot": "docs\\qa\\after\\1366x768-artifacts.png"
  },
  {
   "viewport": "1366x768",
@@ -105,19 +81,11 @@
  },
  {
   "viewport": "1024x768",
-  "view": "research",
+  "view": "artifacts",
   "scrollWidth": 1024,
   "clientWidth": 1024,
   "overflow": false,
-  "screenshot": "docs\\qa\\after\\1024x768-research.png"
- },
- {
-  "viewport": "1024x768",
-  "view": "memory",
-  "scrollWidth": 1024,
-  "clientWidth": 1024,
-  "overflow": false,
-  "screenshot": "docs\\qa\\after\\1024x768-memory.png"
+  "screenshot": "docs\\qa\\after\\1024x768-artifacts.png"
  },
  {
   "viewport": "1024x768",
@@ -137,19 +105,11 @@
  },
  {
   "viewport": "768x1024",
-  "view": "research",
+  "view": "artifacts",
   "scrollWidth": 768,
   "clientWidth": 768,
   "overflow": false,
-  "screenshot": "docs\\qa\\after\\768x1024-research.png"
- },
- {
-  "viewport": "768x1024",
-  "view": "memory",
-  "scrollWidth": 768,
-  "clientWidth": 768,
-  "overflow": false,
-  "screenshot": "docs\\qa\\after\\768x1024-memory.png"
+  "screenshot": "docs\\qa\\after\\768x1024-artifacts.png"
  },
  {
   "viewport": "768x1024",
@@ -169,19 +129,11 @@
  },
  {
   "viewport": "390x844",
-  "view": "research",
+  "view": "artifacts",
   "scrollWidth": 390,
   "clientWidth": 390,
   "overflow": false,
-  "screenshot": "docs\\qa\\after\\390x844-research.png"
- },
- {
-  "viewport": "390x844",
-  "view": "memory",
-  "scrollWidth": 390,
-  "clientWidth": 390,
-  "overflow": false,
-  "screenshot": "docs\\qa\\after\\390x844-memory.png"
+  "screenshot": "docs\\qa\\after\\390x844-artifacts.png"
  },
  {
   "viewport": "390x844",
@@ -201,19 +153,11 @@
  },
  {
   "viewport": "360x780",
-  "view": "research",
+  "view": "artifacts",
   "scrollWidth": 360,
   "clientWidth": 360,
   "overflow": false,
-  "screenshot": "docs\\qa\\after\\360x780-research.png"
- },
- {
-  "viewport": "360x780",
-  "view": "memory",
-  "scrollWidth": 360,
-  "clientWidth": 360,
-  "overflow": false,
-  "screenshot": "docs\\qa\\after\\360x780-memory.png"
+  "screenshot": "docs\\qa\\after\\360x780-artifacts.png"
  },
  {
   "viewport": "360x780",
