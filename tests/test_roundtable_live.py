@@ -99,6 +99,25 @@ class TestBroker(unittest.TestCase):
         out = Broker(self.store, self.sup).reconcile()
         self.assertIn({"roundtable_id": rec2["id"], "to": "INTERRUPTED"}, out)
 
+    def test_switch_turns_off_after_conclusion_and_history_kept(self):
+        import aesop_studio.roundtable_live as rl
+        lanes.set_live_authorized(self.store, True)
+        with mock.patch.object(rl, "AUTO_OFF_S", 0.5):
+            rec = self.draft()
+            st = self.run_session(rec)
+            self.assertEqual(st["live_status"], "COMPLETED")
+            end = time.time() + 10
+            while time.time() < end and lanes.live_authorized(self.store):
+                time.sleep(0.2)
+        self.assertFalse(lanes.live_authorized(self.store))
+        self.assertTrue(self.broker.events(rec["id"]))  # the conversation stays saved in history
+        self.assertEqual(roundtable.get(self.store, rec["id"])["live_status"], "COMPLETED")
+
+    def test_restart_switches_live_off(self):
+        lanes.set_live_authorized(self.store, True)
+        Broker(self.store, self.sup).reconcile()
+        self.assertFalse(lanes.live_authorized(self.store))
+
     def test_rt06_nothing_said_is_executed(self):
         rec = self.draft()
         before = self.store.one("SELECT COUNT(*) n FROM tasks WHERE checkpoint LIKE '%\"mode\": \"agent\"%'")["n"]

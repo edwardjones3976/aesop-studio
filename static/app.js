@@ -451,6 +451,9 @@ async function openRoundtable(opener) {
     f: rtBlank(), filter: "all", q: "", timer: null, loading: true, err: "", el: {}, gen: 0 };
   rtBuild(); $("rtDlg").showModal(); $("rtObjective").focus();
   try {
+    // Owner rule: opening Roundtable / War Room turns the Live roundtables switch on; the server turns it
+    // back off 30s after a session concludes.
+    try { await api("POST", "/api/roundtable/live-authorization", { enabled: true }); } catch { /* shown via lanes */ }
     const [lanes, drafts] = await Promise.all([api("GET", "/api/roundtable/lanes"), api("GET", `/api/projects/${s.pid}/roundtables`)]);
     if (RT !== s) return;
     s.lanes = lanes.lanes || []; s.gates = lanes.mission_gates || []; s.example = lanes.documented_example || [];

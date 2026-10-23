@@ -24,6 +24,7 @@ TRANSCRIPT_CHARS = 14_000
 MAX_REPLY_CHARS = 2_400
 GENERAL_TURN_TIMEOUT = 180
 SYNTH_RESERVE_S = 75
+AUTO_OFF_S = 30  # switch returns to off this long after a session concludes
 
 EVENTS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS roundtable_events(
@@ -214,6 +215,9 @@ class Broker:
                     v["state"] = "disconnected"
             self._save(r["id"], live_status="INTERRUPTED", ended=time.time(), speaker_state=st)
             out.append({"roundtable_id": r["id"], "to": "INTERRUPTED"})
+        if lane_mod.live_authorized(self.store):  # nothing can be live right after a restart
+            lane_mod.set_live_authorized(self.store, False)
+            out.append({"live_roundtables": "switched off at startup"})
         return out
 
     # ---- run loop ----
@@ -433,6 +437,17 @@ class Broker:
         self._event(rt_id, "system", f"Session {status.lower()}. {cov['summary']}", phase="end")
         self.store.event("roundtable_finished", s["project"]["id"], roundtable_id=rt_id, status=status,
                          valid=cov["valid"], spoke=cov["spoke"])
+        # Owner rule: once a session concludes, the Live roundtables switch returns to off within 30s
+        # (unless another session is still live). The saved record/history is unaffected.
+        t = threading.Timer(AUTO_OFF_S, self._auto_off, args=(rt_id,))
+        t.daemon = True
+        t.start()
+
+    def _auto_off(self, rt_id: str) -> None:
+        busy = self.store.one("SELECT COUNT(*) n FROM roundtables WHERE live_status IN ('RUNNING','PAUSED')")["n"]
+        if not busy and lane_mod.live_authorized(self.store):
+            lane_mod.set_live_authorized(self.store, False)
+            self.store.event("roundtable_live_auto_off", None, after_session=rt_id, seconds=AUTO_OFF_S)
 
     def export(self, rt_id: str) -> dict:
         r = self.store.one("SELECT * FROM roundtables WHERE id=?", (rt_id,))
