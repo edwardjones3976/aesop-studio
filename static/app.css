@@ -865,3 +865,32 @@ button.rt-chip { min-height: 40px; }
 .rt-ask { display: flex; gap: 8px; align-items: center; }
 .rt-ask input { flex: 1 1 auto; min-width: 0; }
 .rt-research .rt-ack .ico { vertical-align: -3px; }
+/* follow-up panel */
+.spo { --sp: var(--coral); --sp-bg: var(--coral-soft); }
+.rt-feed .ev-owner { border-color: rgba(255, 145, 108, .4); background: linear-gradient(0deg, var(--coral-soft), var(--coral-soft)), var(--sunken); }
+.rt-feed .ev-owner .evav { font-size: 10.5px; }
+.btn.rt-followbtn { border-color: rgba(255, 145, 108, .55); color: var(--coral); background: var(--coral-soft); }
+.btn.rt-followbtn:hover { background: rgba(255, 145, 108, .22); }
+.rt-fu { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 2px 6px 24px 2px; max-width: 110ch; }
+.rt-fu-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.rt-fu-head h4 { margin: 0; font-size: 16px; }
+.rt-fu > .faint { margin: 0; }
+.rt-fu-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.rt-fu-q { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--r-panel); background: var(--sunken); }
+.rt-fu-q.skipped { opacity: .55; }
+.rt-fu-qt { display: flex; gap: 10px; align-items: baseline; font-size: 14.5px; font-weight: 600; color: var(--text); line-height: 1.45; cursor: pointer; }
+.rt-fu-n { flex: none; display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: var(--coral-soft); color: var(--coral); font-size: 12px; font-weight: 700; }
+.rt-fu-meta { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; padding-left: 32px; font-size: 12px; color: var(--text-2); }
+.rt-fu-q textarea { min-height: 56px; margin-left: 32px; width: calc(100% - 32px); box-sizing: border-box; font: inherit; font-size: 14px; }
+.rt-fu-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-left: 32px; flex-wrap: wrap; }
+.rt-fu-foot .faint { font-size: 12px; }
+.rt-fu-skip { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; font-size: 13px; color: var(--text-2); cursor: pointer; }
+.rt-fu-actions { gap: 10px; align-items: center; }
+.rt-fu-skel { display: flex; flex-direction: column; gap: 10px; }
+.rt-fu-skel span { height: 86px; border-radius: var(--r-panel); background: var(--sunken); border: 1px solid var(--border); animation: fuPulse 1.4s ease-in-out infinite; }
+@keyframes fuPulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .rt-fu-skel span { animation: none; } }
+@media (max-width: 699px) {
+  .rt-fu-meta, .rt-fu-foot { padding-left: 0; }
+  .rt-fu-q textarea { margin-left: 0; width: 100%; }
+}

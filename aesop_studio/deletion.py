@@ -57,6 +57,8 @@ def delete_roundtable(store: Store, rid: str) -> dict:
         raise KeyError("roundtable not found")
     tids = {e["task_id"] for e in store.q("SELECT task_id FROM roundtable_events WHERE rt_id=? AND task_id IS NOT NULL",
                                           (rid,))}
+    from . import followup
+    tids |= followup.forget(store, rid)
     scrubbed = _scrub_tasks(store, tids)
     with store.tx() as c:
         n = c.execute("DELETE FROM roundtable_events WHERE rt_id=?", (rid,)).rowcount

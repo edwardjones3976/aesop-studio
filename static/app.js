@@ -911,12 +911,12 @@ function rtJump(room, label) {
   t.li.scrollIntoView({ block: "center", behavior: "smooth" }); t.li.focus({ preventScroll: true });
   t.li.classList.add("flash"); setTimeout(() => t.li.classList.remove("flash"), 1600);
 }
-const RT_KIND = { opening: "Opening", closing: "Closing", system: "Studio", memo: "Memo", gap: "Gap", research: "Sources" };
+const RT_KIND = { opening: "Opening", closing: "Closing", system: "Studio", memo: "Memo", gap: "Gap", research: "Sources", owner: "Owner answers" };
 const RT_CLAMP_CHARS = 1100, RT_CLAMP_LINES = 16;
-const rtTint = (room, k) => { if (!k) return null; if (k === "researcher") return "r"; if (!(k in room.tints)) room.tints[k] = Object.keys(room.tints).length % 6; return room.tints[k]; };
+const rtTint = (room, k) => { if (!k) return null; if (k === "researcher") return "r"; if (k === "owner") return "o"; if (!(k in room.tints)) room.tints[k] = Object.keys(room.tints).length % 6; return room.tints[k]; };
 // Feed items are threaded: replies link to the event they answer; passes are compact and can be hidden.
 function rtEvent(ev, sps, room) {
-  const sp = sps[ev.speaker]; const name = sp ? sp.name : ev.speaker || (ev.kind === "system" ? "Studio" : ev.kind);
+  const sp = sps[ev.speaker]; const name = ev.speaker === "owner" ? "You" : sp ? sp.name : ev.speaker || (ev.kind === "system" ? "Studio" : ev.kind);
   const label = ev.label || `E${ev.seq}`;
   const tint = rtTint(room, ev.speaker);
   const li = h("li", { class: "ev ev-" + ev.kind + (tint !== null ? " sp" + tint : ""), id: `rtev-${room.id}-${label}`, tabindex: "-1", "data-sp": ev.speaker || "" });
@@ -928,11 +928,12 @@ function rtEvent(ev, sps, room) {
   const refs = Array.isArray(ev.reply_to) ? ev.reply_to : ev.reply_to ? [ev.reply_to] : [];
   const replies = refs.map((r) => { const tgt = room.byLabel[r];
     return h("button", { type: "button", class: "linkish evr", onclick: () => rtJump(room, r) }, `↳ replying to ${r}${tgt ? " · " + tgt.name : ""}`); });
-  if (refs.length) li.classList.add("reply");
+  if (ev.kind === "owner") replies.length = 0; // the note cites its questions inline
+  else if (refs.length) li.classList.add("reply");
   const mentions = (ev.mentions || []).map((m) => { const ms = sps[m]; return h("span", { class: "tag mention" }, `@${ms ? ms.name : m}`); });
   const text = String(ev.content || "");
   const body = h("div", { class: "evb" }, ...rtMd(text, room));
-  const long = text.length > RT_CLAMP_CHARS || text.split("\n").length > RT_CLAMP_LINES;
+  const long = ev.kind !== "owner" && text.length > RT_CLAMP_CHARS || text.split("\n").length > RT_CLAMP_LINES;
   let more = null;
   if (long) {
     more = h("button", { type: "button", class: "linkish evmore", "aria-expanded": "false" }, "Show full message");
@@ -943,7 +944,7 @@ function rtEvent(ev, sps, room) {
   const kind = RT_KIND[ev.kind];
   li.append(...replies,
     h("div", { class: "evh" },
-      ev.speaker === "researcher" ? h("span", { class: "evav", "aria-hidden": "true" }, icon("search")) : h("span", { class: "evav", "aria-hidden": "true" }, ev.kind === "system" ? "AS" : initials(name)),
+      ev.speaker === "researcher" ? h("span", { class: "evav", "aria-hidden": "true" }, icon("search")) : h("span", { class: "evav", "aria-hidden": "true" }, ev.kind === "system" ? "AS" : ev.speaker === "owner" ? "You" : initials(name)),
       h("strong", { class: "evname" }, name), kind ? h("span", { class: "evkind" + (ev.kind === "gap" ? " warn" : "") }, kind) : null, ...mentions,
       h("span", { class: "evmeta" }, h("code", {}, label), ev.latency_s != null ? ` · ${ev.latency_s}s` : "", ev.seen_label ? ` · saw up to ${ev.seen_label}` : "")),
     body);
@@ -997,9 +998,18 @@ function rtRoom(id, readOnly) {
   const memoBtn = toggle("Memo panel", rtPref("memo", true), (v) => { s.el.body.classList.toggle("memo-off", !v); rtSetPref("memo", v); });
   room.showAll = h("button", { type: "button", class: "btn ghost sm", hidden: true, onclick: () => rtFilter(room, null) }, "Show everyone");
   const back = btn("Back to setup", () => { clearTimeout(s.timer); s.gen++; rtBuild(); }, "ghost sm");
+  const fu = h("section", { class: "rt-fu", hidden: true, "aria-label": "Follow-up: questions for you" });
+  const followBtn = h("button", { type: "button", class: "btn sm rt-followbtn", hidden: true, "aria-expanded": "false" }, icon("chat"), "Follow-up");
+  followBtn.addEventListener("click", () => {
+    const open = fu.hidden; fu.hidden = !open; feedwrap.hidden = open; viewctl.hidden = open;
+    followBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    followBtn.replaceChildren(icon(open ? "chat" : "chat"), open ? "Back to conversation" : "Follow-up");
+    if (open && !fu.dataset.loaded) rtFollowLoad(s, gen, id, fu, room, () => tick(), false);
+  });
   const latest = h("button", { type: "button", class: "btn sm rt-latest", hidden: true, onclick: () => { feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" }); } }, "Jump to latest ↓");
   feed.addEventListener("scroll", () => { latest.hidden = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80; });
   pauseBtn.hidden = resumeBtn.hidden = stopBtn.hidden = true;
+  let feedwrap, viewctl;
   const askIn = h("input", { id: "rtAskQ", type: "search", maxlength: "300", placeholder: "Ask the Researcher, e.g. current Bid Whist tournament scoring rules", "aria-label": "Research question" });
   const askBtn = abtn("Research", async () => {
     const q = askIn.value.trim(); if (q.length < 4) { rtSay("Type a research question first.", "bad"); askIn.focus(); return; }
@@ -1011,10 +1021,10 @@ function rtRoom(id, readOnly) {
   const main = h("section", { class: "rt-col rt-main rt-room", "aria-label": "Live room" },
     h("div", { class: "rt-roomhead" },
       h("div", { class: "ttl" }, h("h3", {}, readOnly ? "Roundtable record" : "Live room"), stPill, clock),
-      h("div", { class: "row rt-roomctl" }, pauseBtn, resumeBtn, stopBtn, exportBtn, back)),
+      h("div", { class: "row rt-roomctl" }, pauseBtn, resumeBtn, stopBtn, exportBtn, followBtn, back)),
     h("div", { class: "rt-bar" }, chips,
-      h("div", { class: "row rt-viewctl", role: "toolbar", "aria-label": "Reading options" }, room.showAll, clampBtn, bigBtn, passBtn, memoBtn)),
-    cov, h("div", { class: "rt-feedwrap" }, feed, latest), ask, announce);
+      (viewctl = h("div", { class: "row rt-viewctl", role: "toolbar", "aria-label": "Reading options" }, room.showAll, clampBtn, bigBtn, passBtn, memoBtn))),
+    cov, (feedwrap = h("div", { class: "rt-feedwrap" }, feed, latest)), fu, ask, announce);
   const side = h("section", { class: "rt-col rt-side", "aria-label": "Memo" }, memo);
   $("rtDlg").classList.add("rooming");
   s.el.body.classList.toggle("memo-off", !rtPref("memo", true));
@@ -1034,7 +1044,7 @@ function rtRoom(id, readOnly) {
       if (ev.seq <= room.after) continue; room.after = ev.seq;
       if (ev.kind === "opening" && !room.opened) { room.opened = true; feed.append(rtDivider("Openings (independent)")); }
       else if (ev.kind === "closing" && !room.closed) { room.closed = true; feed.append(rtDivider("Closing statements")); }
-      else if (ev.phase && ev.phase !== room.phase && room.phase !== null && !["opening", "closing", "pass"].includes(ev.kind)) feed.append(rtDivider(`Phase: ${ev.phase}`));
+      else if (ev.phase && ev.phase !== room.phase && room.phase !== null && !["opening", "closing", "pass"].includes(ev.kind)) feed.append(rtDivider(ev.phase === "followup" ? "Your follow-up" : ev.phase === "research" ? "Research" : `Phase: ${ev.phase}`));
       if (ev.phase && ev.kind !== "pass") room.phase = ev.phase;
       feed.append(rtEvent(ev, sps, room));
       if (ev.kind === "pass") { room.passes++; passBtn.hidden = false; passBtn.textContent = `Show passes (${room.passes})`; } else pending++;
@@ -1063,10 +1073,71 @@ function rtRoom(id, readOnly) {
     stopBtn.hidden = readOnly || ended;
     ask.hidden = readOnly || ended || !sps.researcher;
     if (focused && focused.hidden) [resumeBtn, pauseBtn, exportBtn].find((b) => !b.hidden).focus();
-    if (ended) { cov.replaceChildren(rtCoverage(st.coverage)); rtSay(`Session ${st.live_status.toLowerCase()}.`); return; }
+    if (ended) { cov.replaceChildren(rtCoverage(st.coverage)); followBtn.hidden = false; if (!room.endSaid) { room.endSaid = true; rtSay(`Session ${st.live_status.toLowerCase()}.`); } return; }
     s.timer = setTimeout(tick, 1000);
   };
   tick();
+}
+// Follow-up (after a session ends): the speakers' questions for the owner, condensed and pre-filled; answers are
+// appended to the same record as an "Owner answers" note. Nothing is sent to the speakers.
+function rtAskers(list) {
+  const who = (list || []).filter(Boolean); const people = who.filter((x) => x !== "Memo");
+  if (!who.length) return null;
+  return h("span", {}, people.length ? `asked by ${people.join(", ")}${who.length > people.length ? " · in the memo" : ""}` : "from the memo");
+}
+async function rtFollowLoad(s, gen, id, fu, room, refreshFeed, refresh) {
+  const alive = () => RT === s && s.gen === gen;
+  fu.dataset.loaded = "1";
+  fu.replaceChildren(h("div", { class: "rt-fu-head" }, h("h4", {}, "Follow-up"), h("span", { class: "faint" }, "Gathering the speakers' questions for you and pre-filling answers… (about 10–40 s)")),
+    h("div", { class: "rt-fu-skel", "aria-hidden": "true" }, h("span"), h("span"), h("span")));
+  let d;
+  try { d = await api("GET", `/api/roundtables/${id}/followup${refresh ? "?refresh=1" : ""}`); }
+  catch (e) { if (alive()) { delete fu.dataset.loaded; fu.replaceChildren(h("div", { class: "note bad" }, icon("alert"), h("span", {}, e.message)), btn("Try again", () => rtFollowLoad(s, gen, id, fu, room, refreshFeed, true), "sm")); } return; }
+  if (!alive()) return;
+  const prev = d.previous || null; const prevBy = {};
+  if (prev) for (const a of prev.answers || []) prevBy[a.question.toLowerCase()] = a.answer;
+  const qs = d.questions || [];
+  const rows = qs.map((q, i) => {
+    const had = prevBy[q.question.toLowerCase()];
+    const ta = h("textarea", { id: `rtFuA${i}`, rows: "2", maxlength: "1000", placeholder: "Your answer (leave empty to skip)", "aria-describedby": `rtFuH${i}` });
+    ta.value = had != null ? had : (q.suggested || "");
+    const skip = h("input", { type: "checkbox", id: `rtFuS${i}` });
+    skip.addEventListener("change", () => { ta.disabled = skip.checked; card.classList.toggle("skipped", skip.checked); });
+    const refs = (q.refs || []).map((r) => h("button", { type: "button", class: "eref linkish", title: `Show ${r} in the conversation`, onclick: () => {
+      fu.hidden = true; fu.parentNode.querySelector(".rt-feedwrap").hidden = false; fu.parentNode.querySelector(".rt-viewctl").hidden = false;
+      const fb = fu.parentNode.querySelector(".rt-followbtn"); fb.setAttribute("aria-expanded", "false"); fb.replaceChildren(icon("chat"), "Follow-up");
+      rtJump(room, r); } }, r));
+    const hint = had != null ? "your saved answer" : q.suggested ? `suggested${q.basis ? " · " + q.basis : ""} — edit if it's wrong` : "no suggestion: the speakers didn't settle this";
+    const card = h("li", { class: "rt-fu-q" },
+      h("label", { for: `rtFuA${i}`, class: "rt-fu-qt" }, h("span", { class: "rt-fu-n" }, String(i + 1)), q.question),
+      h("div", { class: "rt-fu-meta" }, rtAskers(q.asked_by), ...refs),
+      ta, h("div", { class: "rt-fu-foot" }, h("span", { class: "faint", id: `rtFuH${i}` }, hint),
+        h("label", { class: "rt-fu-skip", for: `rtFuS${i}` }, skip, h("span", {}, "Skip"))));
+    card._get = () => ({ question: q.question, answer: skip.checked ? "" : ta.value.trim(), refs: q.refs || [] });
+    return card;
+  });
+  const note = h("textarea", { id: "rtFuNote", rows: "2", maxlength: "2000", placeholder: "Anything else the speakers should know next time (optional)" });
+  if (prev && prev.note) note.value = prev.note;
+  const save = abtn(prev ? "Update answers" : "Save answers to record", async () => {
+    const answers = rows.map((r) => r._get()).filter((a) => a.answer);
+    if (!answers.length && !note.value.trim()) { rtSay("Answer at least one question or add a note.", "bad"); return; }
+    try {
+      const r = await api("POST", `/api/roundtables/${id}/followup`, { answers, note: note.value.trim() });
+      if (!alive()) return;
+      rtSay(`${r.revised ? "Updated" : "Saved"} ${r.saved} answer${r.saved === 1 ? "" : "s"} to this record (timeline and memo).`, "ok");
+      refreshFeed(); rtFollowLoad(s, gen, id, fu, room, refreshFeed, false);
+    } catch (e) { if (alive()) rtSay(e.message, "bad"); }
+  }, "primary", "check");
+  const source = d.condensed_by ? `Condensed by ${d.condensed_by} from ${d.candidates} question${d.candidates === 1 ? "" : "s"} in the transcript and memo.`
+    : d.candidates ? `${d.candidates} question${d.candidates === 1 ? "" : "s"} found in the transcript and memo${d.note ? ` (${d.note})` : ""}.` : "";
+  fu.replaceChildren(
+    h("div", { class: "rt-fu-head" }, h("h4", {}, qs.length ? `Follow-up · ${qs.length} question${qs.length === 1 ? "" : "s"} for you` : "Follow-up"),
+      btn("Refresh", () => rtFollowLoad(s, gen, id, fu, room, refreshFeed, true), "ghost sm")),
+    h("p", { class: "faint" }, `${source} Pre-filled answers come from what the speakers assumed or agreed; your answers are added to this record only.`),
+    qs.length ? h("ol", { class: "rt-fu-list" }, ...rows) : h("p", { class: "muted" }, "The speakers didn't leave any questions for you. You can still add a note to the record."),
+    h("div", { class: "field" }, h("label", { for: "rtFuNote" }, "Note (optional)"), note),
+    h("div", { class: "row rt-fu-actions" }, save,
+      prev ? h("span", { class: "faint" }, `Last saved ${fmtTime(prev.saved_at)}`) : null));
 }
 async function rtOpenDraft(id) {
   const s = RT; if (!s) return;
