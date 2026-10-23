@@ -4,8 +4,9 @@ param([int]$Port = 8765, [string]$Data = (Join-Path $env:LOCALAPPDATA "AesopStud
 $ErrorActionPreference = "Stop"
 $pidFile = Join-Path $Data "server.pid"
 $link = Join-Path $Data "launch-link.txt"
-$running = $false
-if (Test-Path $pidFile) { $running = [bool](Get-Process -Id (Get-Content $pidFile) -ErrorAction SilentlyContinue) }
+# Running = something is actually listening on Studio's loopback port (the pid file can be stale).
+$listener = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+$running = [bool]$listener
 if (-not $running) { & (Join-Path $PSScriptRoot "start.ps1") -Port $Port -Data $Data; exit $LASTEXITCODE }
 $before = if (Test-Path $link) { Get-Content $link -Raw } else { "" }
 New-Item -ItemType File -Force (Join-Path $Data "relogin.request") | Out-Null
