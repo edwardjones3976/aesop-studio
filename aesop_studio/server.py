@@ -66,6 +66,9 @@ class App:
         self.keys: dict[str, str] = {}
         self.login_code = secrets.token_urlsafe(24)
         self.reconciled = self.sup.reconcile()
+        from .roundtable_live import Broker
+        self.broker = Broker(self.store, self.sup)
+        self.reconciled += self.broker.reconcile()
         providers.refresh(self.store)
         ledger.set_permit(self.store, False)  # shipped app never inherits a billable permit
 
@@ -246,11 +249,35 @@ class Handler(BaseHTTPRequestHandler):
     def rt_preflight(self, sess, rid):
         self.json(roundtable.preflight(self.app.store, self._rt(rid)))
 
+    @route("POST", r"/api/roundtable/live-authorization")
+    def rt_live_auth(self, sess):
+        lanes.set_live_authorized(self.app.store, bool(self.body().get("enabled")))
+        self.json({"live_authorized": lanes.live_authorized(self.app.store)})
+
     @route("POST", r"/api/roundtables/(\w+)/start")
     def rt_start(self, sess, rid):
-        pf = roundtable.preflight(self.app.store, self._rt(rid))
-        self.json({"error": "Live roundtables are not enabled in this release.", "block_reasons": pf["block_reasons"]},
-                  409)
+        rec = self._rt(rid)
+        res = self.app.broker.start(rec, self.app.svc.project(rec["project_id"]))
+        if not res["started"]:
+            return self.json({"error": "Preflight did not pass.", "block_reasons": res["block_reasons"]}, 409)
+        self.json(res, 202)
+
+    @route("POST", r"/api/roundtables/(\w+)/(pause|resume|stop)")
+    def rt_control(self, sess, rid, op):
+        self._rt(rid)
+        self.json(getattr(self.app.broker, op)(rid))
+
+    @route("GET", r"/api/roundtables/(\w+)/live")
+    def rt_live(self, sess, rid):
+        self._rt(rid)
+        after = int((self.query.get("after") or ["0"])[0])
+        self.json({"status": self.app.broker.status(rid), "events": self.app.broker.events(rid, after)})
+
+    @route("GET", r"/api/roundtables/(\w+)/record")
+    def rt_record(self, sess, rid):
+        self._rt(rid)
+        body = redact(json.dumps(self.app.broker.export(rid), indent=1, default=str)).encode()
+        self._send(200, body, "application/json", {"Content-Disposition": f'attachment; filename="roundtable-record-{rid}.json"'})
 
     @route("GET", r"/api/roundtables/(\w+)/export")
     def rt_export(self, sess, rid):

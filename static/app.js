@@ -404,7 +404,8 @@ const RT_WINDOWS = [15, 30, 45];
 const RT_CLASS = { admin: "admin", speaker: "speaker", research: "research-only", review: "review-only" };
 const RT_MODES = { general: "General Roundtable", war_room: "Admin War Room" };
 const RT_FILTERS = [["all", "All"], ["speakers", "Speakers"], ["research", "Research"], ["review", "Review"], ["ready", "Ready only"]];
-const RT_NOT_LIVE = "Live roundtables are not enabled in this release.";
+const RT_NOT_LIVE = "Live roundtables are switched off (Evidence → Spend controls).";
+const LIVE_END = ["COMPLETED", "STOPPED", "FAILED", "INTERRUPTED"];
 let RT = null;
 
 function rtBlank() {
@@ -451,7 +452,7 @@ async function openRoundtable(opener) {
     const [lanes, drafts] = await Promise.all([api("GET", "/api/roundtable/lanes"), api("GET", `/api/projects/${s.pid}/roundtables`)]);
     if (RT !== s) return;
     s.lanes = lanes.lanes || []; s.gates = lanes.mission_gates || []; s.example = lanes.documented_example || [];
-    s.discovered = lanes.discovered_at || null; s.drafts = Array.isArray(drafts) ? drafts : [];
+    s.discovered = lanes.discovered_at || null; s.live = !!lanes.live_authorized; s.drafts = Array.isArray(drafts) ? drafts : [];
   } catch (e) { if (RT === s) s.err = e.message; }
   if (RT !== s) return;
   s.loading = false; rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtDraftsRender(); rtStartRender();
@@ -519,24 +520,24 @@ function rtBuild(focusId) {
       el.sharePrev, h("label", { class: "rt-ack", for: "rtAck" }, el.ack, h("span", {}, "I've reviewed what would be shared"))),
     h("p", { class: "note info" }, icon("info"), h("span", {}, "Manual side-by-side comparison isn't available in this build.")),
     h("section", { class: "section", "aria-labelledby": "rtTransH" }, h("h3", { id: "rtTransH" }, "Transcript preview"),
-      empty("chat", "No live transcript", "No live transcript. Live roundtables are not enabled in this release.")),
+      empty("chat", "No transcript yet", "The transcript appears in the live room once a session starts. Start needs a current, passing preflight.")),
     el.drafts);
   // right column
   el.side = h("section", { class: "rt-col rt-side", "aria-labelledby": "rtPreH" });
   // footer
   el.startWhy = h("p", { class: "rt-why", id: "rtStartWhy" });
   el.exportBtn = abtn("Export planning packet", rtExport, "", "download");
-  const start = h("button", { type: "button", class: "btn rt-start", "aria-disabled": "true", "aria-describedby": "rtStartWhy",
-    onclick: () => rtSay(`Start is disabled. ${el.startWhy.textContent}`) }, icon("stop"), "Start");
+  const start = el.start = h("button", { type: "button", class: "btn rt-start", "aria-disabled": "true", "aria-describedby": "rtStartWhy",
+    onclick: () => rtStart() }, icon("send"), "Start");
   const foot = h("div", { class: "rt-foot" },
     h("div", { class: "row" }, abtn("Save draft", () => rtSave(false), "primary", "check"), abtn("Check preflight", rtPreflight, "", "shield"), el.exportBtn),
     h("div", { class: "rt-startgrp" }, start, el.startWhy));
   $("rtIn").replaceChildren(
     h("header", { class: "rt-head" }, h("div", { class: "ttl" }, icon("users"), h("div", {}, h("h2", { id: "rtTitle" }, "Configure Roundtable"),
-      h("p", { class: "faint" }, "Design-ready planning only. Nothing runs live in this release."))),
+      (el.liveNote = h("p", { class: "faint" })))),
       h("button", { type: "button", class: "iconbtn", "aria-label": "Close roundtable", onclick: () => $("rtDlg").close() }, icon("x"))),
     h("div", { id: "rtStatus", class: "rt-status", role: "status", "aria-live": "polite" }),
-    h("div", { class: "rt-body" }, part, main, el.side), foot);
+    (el.body = h("div", { class: "rt-body" }, (el.part = part), main, el.side)), (el.foot = foot));
   rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtStartRender(); rtDraftsRender();
   if (focusId && $(focusId)) $(focusId).focus();
 }
@@ -612,8 +613,14 @@ function rtSideRender() {
   RT.el.side.replaceChildren(...kids);
 }
 function rtStartRender() {
+  RT.el.liveNote.textContent = RT.live ? "Live roundtables are switched on. Start runs a brokered, time-boxed session once preflight passes." : "Live roundtables are switched off (Evidence → Spend controls). You can still plan and save drafts.";
+  const ok = rtCanStart();
+  RT.el.start.setAttribute("aria-disabled", ok ? "false" : "true");
+  RT.el.start.classList.toggle("primary", ok);
+  if (ok) { RT.el.startWhy.textContent = "Ready: the current preflight passed. Start opens the live room."; return; }
   const fresh = RT.pre && !RT.preStale && (RT.pre.block_reasons || []).length;
-  const reasons = fresh ? RT.pre.block_reasons : RT.gates.length ? RT.gates.map((g) => g.reason) : [RT_NOT_LIVE];
+  const reasons = fresh ? RT.pre.block_reasons : !RT.live ? [RT_NOT_LIVE] : RT.gates.length ? RT.gates.map((g) => g.reason)
+    : [RT.pre && RT.preStale ? "The draft changed since the last preflight; run Check preflight again." : "Run Check preflight; Start needs a current, passing preflight."];
   RT.el.startWhy.textContent = `Start disabled: ${reasons[0]}${reasons.length > 1 ? ` (+${reasons.length - 1} more${fresh ? " in preflight" : ""})` : ""}`;
 }
 function rtDraftsRender() {
@@ -622,7 +629,8 @@ function rtDraftsRender() {
     d.length ? h("ul", { class: "rt-drafts" }, ...d.map((r) => h("li", { "aria-current": RT.rec && RT.rec.id === r.id ? "true" : "false" },
       h("div", { class: "dtxt" }, h("strong", {}, `${RT_MODES[r.mode] || r.mode} · ${(r.objective || "(no objective)").slice(0, 90)}`),
         h("span", { class: "faint" }, `${r.id} · updated ${fmtTime(r.updated || r.created)}`)),
-      statePill(r.status || "DRAFT"), abtn("Open", () => rtOpenDraft(r.id), "sm"))))
+      statePill(r.live_status || r.status || "DRAFT"), abtn("Open", () => rtOpenDraft(r.id), "sm"),
+      r.live_status && r.live_status !== "DRAFT" ? abtn(LIVE_END.includes(r.live_status) ? "View record" : "Open room", () => rtRoom(r.id, LIVE_END.includes(r.live_status)), "ghost sm", "chat") : null)))
       : h("p", { class: "muted" }, "No drafts saved for this project yet."));
   RT.el.drafts.querySelectorAll(".rt-drafts .btn").forEach((b, i) => b.setAttribute("aria-label", `Open draft ${d[i].id}`));
 }
@@ -656,7 +664,7 @@ async function rtPreflight() {
     if (RT !== s || s.gen !== gen || !s.rec || s.rec.id !== rec.id) return;
     s.pre = p; s.preStale = false; rtSideRender(); rtStartRender();
     const checks = p.checks || [];
-    rtSay(`Preflight: ${checks.filter((c) => c.pass).length} of ${checks.length} checks pass. Start stays disabled in this release.`, "");
+    rtSay(`Preflight: ${checks.filter((c) => c.pass).length} of ${checks.length} checks pass. ${p.start_allowed ? "Start is available." : "Start stays disabled until the block reasons are resolved."}`, "");
   } catch (e) { if (RT === s) rtSay(e.message, "bad"); }
 }
 async function rtExport() {
@@ -664,6 +672,108 @@ async function rtExport() {
   const s = RT; const rec = await rtSave(true); if (!rec || RT !== s) return;
   try { await download(`/api/roundtables/${rec.id}/export`, `roundtable-${rec.id}.json`); if (RT === s) rtSay("Saved the current form and downloaded the planning packet (JSON).", "ok"); }
   catch (e) { if (RT === s) rtSay(e.message, "bad"); }
+}
+// ---------- live roundtable ----------
+const rtCanStart = () => !!(RT && RT.live && RT.rec && RT.pre && !RT.preStale && RT.pre.start_allowed === true);
+async function rtStart() {
+  const s = RT; if (!s) return;
+  if (!rtCanStart()) { rtSay(`Start is disabled. ${s.el.startWhy.textContent}`); return; }
+  if (s.starting) return; s.starting = true;
+  try {
+    const r = await api("POST", `/api/roundtables/${s.rec.id}/start`);
+    if (RT !== s) return;
+    rtSay(`Roundtable started (${(r.status && r.status.live_status) || r.status || "running"}).`, "ok");
+    rtRoom(s.rec.id, false);
+  } catch (e) {
+    if (RT !== s) return;
+    if (e.data && e.data.block_reasons) { s.pre = { ...(s.pre || {}), start_allowed: false, block_reasons: e.data.block_reasons }; rtSideRender(); rtStartRender(); }
+    rtSay(e.message, "bad");
+  } finally { s.starting = false; }
+}
+const fmtS = (v) => { if (typeof v !== "number" || !isFinite(v)) return "—"; const t = Math.max(0, Math.round(v)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; };
+const SP_LABEL = { idle: "idle", working: "working…", stalled: "stalled", disconnected: "disconnected", budget_exhausted: "budget exhausted" };
+const SP_TONE = { idle: "", working: "info", stalled: "warn", disconnected: "bad", budget_exhausted: "bad" };
+// @mentions and [E#] references become highlighted spans; everything stays textContent.
+function rtText(t) {
+  const out = []; const re = /(@[\w.-]+|\[E\d+\])/g; let last = 0; let m;
+  while ((m = re.exec(t))) {
+    if (m.index > last) out.push(t.slice(last, m.index));
+    out.push(h("span", { class: m[1][0] === "@" ? "mention" : "eref" }, m[1]));
+    last = m.index + m[1].length;
+  }
+  if (last < t.length) out.push(t.slice(last));
+  return out;
+}
+function rtEvent(ev, sps) {
+  const sp = sps[ev.speaker]; const name = sp ? sp.name : ev.speaker || (ev.kind === "system" ? "Studio" : ev.kind);
+  return h("li", { class: "ev ev-" + ev.kind },
+    h("div", { class: "evh" }, h("code", {}, ev.label || `E${ev.seq}`), h("strong", {}, name), ev.kind === "gap" ? h("span", { class: "pill warn" }, "gap") : null,
+      ev.phase ? h("span", { class: "tag" }, ev.phase) : null, ev.latency_s != null ? h("span", {}, `${ev.latency_s}s`) : null,
+      ev.seen_label ? h("span", {}, `saw up to ${ev.seen_label}`) : null),
+    h("div", { class: "evb" }, ...rtText(String(ev.content || ""))));
+}
+function rtCoverage(c) {
+  if (!c) return h("p", { class: "muted" }, "No coverage summary was returned.");
+  if (typeof c === "string") return h("div", { class: "note" }, icon("info"), h("span", {}, c));
+  const valid = c.valid; const text = c.summary || "";
+  return h("div", { class: "note " + (valid === true ? "ok" : "bad"), role: "status" }, icon(valid === true ? "check" : "alert"), h("div", { class: "section" },
+    h("strong", {}, valid === true ? "Coverage: valid roundtable" : valid === false ? "Coverage: NOT a valid four-provider roundtable" : "Coverage summary"),
+    text ? h("p", {}, text) : null, h("pre", { class: "out" }, JSON.stringify(c, null, 1))));
+}
+// The room replaces the modal's centre and right columns; the feed is append-only and polled every second.
+function rtRoom(id, readOnly) {
+  const s = RT; if (!s) return;
+  clearTimeout(s.timer); const gen = ++s.gen;
+  const room = { after: 0 };
+  const clock = h("span", { class: "rt-clock" }, "—"); const stPill = h("span");
+  const chips = h("div", { class: "rt-chips", "aria-label": "Speakers" });
+  const feed = h("ol", { class: "rt-feed", "aria-label": "Roundtable feed", tabindex: "0" });
+  const announce = h("div", { class: "sr-only", "aria-live": "polite" });
+  const memo = h("div", { class: "section" }); const cov = h("div");
+  const ctl = (label, op, ico) => abtn(label, async () => {
+    try { const r = await api("POST", `/api/roundtables/${id}/${op}`); if (RT === s) rtSay(`${label}: ${(r.status && r.status.live_status) || r.live_status || r.status || "requested"}.`); }
+    catch (e) { if (RT === s) rtSay(e.message, "bad"); }
+  }, "sm", ico);
+  const pauseBtn = ctl("Pause", "pause", "clock"), resumeBtn = ctl("Resume", "resume", "send"), stopBtn = ctl("Stop", "stop", "stop");
+  stopBtn.classList.add("danger");
+  const exportBtn = abtn("Export record", async () => { try { await download(`/api/roundtables/${id}/record`, `roundtable-record-${id}.json`); } catch (e) { rtSay(e.message, "bad"); } }, "sm", "download");
+  const back = btn("Back to setup", () => { clearTimeout(s.timer); s.gen++; rtBuild(); }, "ghost sm");
+  pauseBtn.hidden = resumeBtn.hidden = stopBtn.hidden = true;
+  const main = h("section", { class: "rt-col rt-main rt-room", "aria-label": "Live room" },
+    h("div", { class: "card-head" }, h("div", { class: "ttl" }, h("h3", {}, readOnly ? "Roundtable record" : "Live room"), stPill), clock),
+    chips, h("div", { class: "row" }, pauseBtn, resumeBtn, stopBtn, exportBtn, back), cov, feed, announce);
+  const side = h("section", { class: "rt-col rt-side", "aria-label": "Memo" }, memo);
+  s.el.body.replaceChildren(s.el.part, main, side); s.el.foot.hidden = true;
+  memo.replaceChildren(h("h3", {}, "Memo"), h("p", { class: "muted" }, "The memo appears here when the session writes one."));
+  let pending = 0, lastSay = 0, memoSig = "";
+  const tick = async () => {
+    if (RT !== s || s.gen !== gen) return;
+    let d;
+    try { d = await api("GET", `/api/roundtables/${id}/live?after=${room.after}`); }
+    catch (e) { if (RT === s && s.gen === gen) { rtSay(e.message, "bad"); s.timer = setTimeout(tick, 3000); } return; }
+    if (RT !== s || s.gen !== gen) return;
+    const st = d.status || {}; const sps = st.speakers || {};
+    const stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+    for (const ev of d.events || []) { if (ev.seq <= room.after) continue; room.after = ev.seq; feed.append(rtEvent(ev, sps)); pending++; }
+    if (stick) feed.scrollTop = feed.scrollHeight;
+    if (pending && Date.now() - lastSay > 4000) { announce.textContent = `${pending} new item${pending > 1 ? "s" : ""} in the roundtable feed.`; pending = 0; lastSay = Date.now(); }
+    clock.textContent = `${fmtS(st.elapsed_s)} elapsed · ${fmtS(st.remaining_s)} left of ${fmtS(st.limit_s)}`;
+    stPill.replaceChildren(statePill(st.live_status || "—"));
+    chips.replaceChildren(...Object.entries(sps).map(([k, v]) => h("span", { class: "rt-chip" }, h("span", { class: "dot " + (SP_TONE[v.state] || ""), "aria-hidden": "true" }), h("strong", {}, v.name || k),
+      h("span", {}, SP_LABEL[v.state] || v.state || "unknown"),
+      h("span", { class: "faint" }, `${v.turns || 0} turns${v.last_latency_s != null ? ` · ${v.last_latency_s}s` : ""}${typeof v.cost_usd === "number" ? ` · ${fmtCost(v.cost_usd)}` : ""}`))));
+    const ms = st.memo ? (typeof st.memo === "string" ? st.memo : JSON.stringify(st.memo, null, 1)) : "";
+    if (ms && ms !== memoSig) { memoSig = ms; memo.replaceChildren(h("h3", {}, "Memo"), h("pre", { class: "out" }, ms)); }
+    const ended = LIVE_END.includes(st.live_status);
+    const focused = document.activeElement;
+    pauseBtn.hidden = readOnly || ended || st.live_status === "PAUSED";
+    resumeBtn.hidden = readOnly || ended || st.live_status !== "PAUSED";
+    stopBtn.hidden = readOnly || ended;
+    if (focused && focused.hidden) [resumeBtn, pauseBtn, exportBtn].find((b) => !b.hidden).focus();
+    if (ended) { cov.replaceChildren(rtCoverage(st.coverage)); rtSay(`Session ${st.live_status.toLowerCase()}.`); return; }
+    s.timer = setTimeout(tick, 1000);
+  };
+  tick();
 }
 async function rtOpenDraft(id) {
   const s = RT; if (!s) return;
@@ -1690,6 +1800,10 @@ async function renderEvidence(budgetOverride) {
   const saveLimit = () => { const n = Number(limitIn.value); if (limitIn.value === "" || !isFinite(n) || n < 0) { banner("Enter a monthly operating limit of 0 or more (USD).", "bad"); return; } postBudget({ runtime_limit_usd: n }, `Monthly operating limit set to ${usd(n)}.`); };
   limitIn.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); saveLimit(); } });
   const permitOn = !!b.permit;
+  let liveOn = false; try { liveOn = !!(await api("GET", "/api/roundtable/lanes")).live_authorized; } catch { /* shown as off */ }
+  if (gen !== S.viewGen || S.global !== "evidence") return;
+  const liveSw = h("button", { type: "button", class: "switch", role: "switch", "aria-checked": liveOn ? "true" : "false", "aria-labelledby": "liveLbl", "aria-describedby": "liveDesc",
+    onclick: () => guard(async () => { const r = await api("POST", "/api/roundtable/live-authorization", { enabled: !liveOn }); banner(`Live roundtables turned ${r && r.live_authorized ? "on" : "off"}.`, "ok"); await renderEvidence(); }) }, h("span", { class: "knob" }));
   const sw = h("button", { type: "button", class: "switch", role: "switch", "aria-checked": permitOn ? "true" : "false", "aria-labelledby": "permitLbl", "aria-describedby": "permitDesc",
     onclick: () => postBudget({ mission_permit: !permitOn }, `Mission development permit turned ${!permitOn ? "on" : "off"}.`) }, h("span", { class: "knob" }));
   const spend = h("div", { class: "card", id: "spend" },
@@ -1699,7 +1813,9 @@ async function renderEvidence(budgetOverride) {
         h("div", { class: "row" }, limitIn, btn("Save", saveLimit, "primary", "check")),
         h("p", { class: "muted" }, "Caps separately billed API spend for normal use this calendar month. Metered routes stay disabled until a limit is set.")),
       h("div", { class: "section" }, h("div", { class: "row between" }, h("span", { id: "permitLbl" }, h("label", {}, "Mission development permit")), h("div", { class: "row" }, h("span", { class: "muted" }, permitOn ? "On" : "Off"), sw)),
-        h("p", { class: "muted", id: "permitDesc" }, "Lets Studio bill the $165 mission envelope for Codex API development tests. Turned off automatically every time Studio restarts."))),
+        h("p", { class: "muted", id: "permitDesc" }, "Lets Studio bill the $165 mission envelope for Codex API development tests. Turned off automatically every time Studio restarts.")),
+      h("div", { class: "section" }, h("div", { class: "row between" }, h("span", { id: "liveLbl" }, h("label", {}, "Live roundtables")), h("div", { class: "row" }, h("span", { class: "muted" }, liveOn ? "On" : "Off"), liveSw)),
+        h("p", { class: "muted", id: "liveDesc" }, "Lets approved providers talk to each other in brokered, time-boxed sessions. Off by default. Each session still needs your roster, sharing acknowledgement and caps."))),
     // Cancelled or cut-off API calls keep their reservation as unresolved exposure until the owner enters the real charge.
     ...(() => {
       const amb = (e.ledger || []).filter((r) => r.status === "ambiguous");

@@ -48,14 +48,23 @@ CATALOG = [
 ]
 _EXTS = ("", ".exe", ".cmd", ".bat", ".ps1")
 
-MISSION_GATES = [
-    {"code": "LIVE_TRANSPORT_NOT_IMPLEMENTED",
-     "reason": "No concurrent multi-party transport exists in this release. Serially asking providers and calling "
-               "it 'live' is prohibited."},
-    {"code": "MISSION_DELEGATION_CAP",
-     "reason": "The $165 mission allows at most two subordinate agent sessions and no provider-to-provider routing. "
-               "Live roundtables need a separate owner-authorized mission with its own cost ceiling."},
-]
+# Live multi-provider sessions were approved by the owner (2026-10-23) but stay behind an explicit owner switch,
+# off by default, changed only through the authenticated UI/API. The broker never changes it.
+AUTH_KEY = "roundtable_live_authorized"
+LIVE_GATE = {"code": "LIVE_ROUNDTABLES_OFF",
+             "reason": "Live roundtables are switched off. Turn them on under Evidence → Spend controls → Live "
+                       "roundtables. Each session still needs roster consent, the sharing acknowledgement and caps."}
+MISSION_GATES = [LIVE_GATE]
+
+
+def live_authorized(store: Store) -> bool:
+    row = store.one("SELECT v FROM kv WHERE k=?", (AUTH_KEY,))
+    return bool(row and row["v"] == "on")
+
+
+def set_live_authorized(store: Store, on: bool) -> None:
+    store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (AUTH_KEY, "on" if on else "off"))
+    store.event("roundtable_live_authorization", None, enabled=bool(on))
 
 
 def _find(names: list[str], extra: list[Path]) -> str | None:
@@ -142,7 +151,8 @@ def discover(store: Store) -> dict:
                       "billing_note": "", "counts_as_speaker": False,
                       "reasons": ["Registered credential only; no Studio adapter."]})
     return {"lanes": lanes, "documented_example": DOCUMENTED_EXAMPLE, "discovered_at": time.time(),
-            "mission_gates": MISSION_GATES}
+            "live_authorized": live_authorized(store),
+            "mission_gates": [] if live_authorized(store) else [LIVE_GATE]}
 
 
 def _route_type(cls, verified, routes) -> str:

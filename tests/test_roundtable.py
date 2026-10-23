@@ -109,11 +109,14 @@ class TestPlanning(Base):
         pf2 = roundtable.preflight(self.store, rec2, disc(*admins, fake_lane("grok")))
         self.assertFalse({c["id"]: c["pass"] for c in pf2["checks"]}["admins_only"])
 
-    def test_rt10_start_never_allowed_in_this_release(self):
+    def test_rt10_start_needs_owner_switch(self):
         rec = self.draft(roster=["a", "b", "c", "e"])
         pf = roundtable.preflight(self.store, rec, disc(*(fake_lane(x) for x in "abce")))
         self.assertFalse(pf["start_allowed"])
-        self.assertTrue(any("Two" in b or "two" in b or "transport" in b.lower() for b in pf["block_reasons"]))
+        self.assertTrue(any("switched off" in b for b in pf["block_reasons"]))  # owner switch is off by default
+        lanes.set_live_authorized(self.store, True)
+        pf2 = roundtable.preflight(self.store, rec, disc(*(fake_lane(x) for x in "abce"), gates=False))
+        self.assertTrue(pf2["start_allowed"], pf2["block_reasons"])
 
     def test_validation_and_export_packet(self):
         with self.assertRaises(ValueError):

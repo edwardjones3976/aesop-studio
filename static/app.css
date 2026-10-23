@@ -640,3 +640,18 @@ dialog.rt[open] { display: flex; flex-direction: column; }
 input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="range"]), select {
   height: 44px; min-height: 44px; max-height: 44px; align-self: start;
 }
+
+/* ---------- live roundtable room ---------- */
+.rt-room { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
+.rt-clock { font-variant-numeric: tabular-nums; font-weight: 600; }
+.rt-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.rt-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 99px; border: 1px solid var(--border); background: var(--sunken); font-size: 12.5px; flex-wrap: wrap; }
+.rt-feed { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; max-height: 52dvh; overflow-y: auto; }
+.ev { border: 1px solid var(--border); border-radius: var(--r-ctl); padding: 8px 12px; background: var(--sunken); }
+.ev-system, .ev-memo { background: var(--panel); }
+.ev-gap { border-color: rgba(242, 196, 109, .55); background: var(--amber-bg); }
+.evh { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 12.5px; color: var(--text-2); margin-bottom: 4px; }
+.evh strong { color: var(--text); }
+.evb { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
+.mention { color: var(--sky); font-weight: 600; }
+.eref { color: var(--coral); font-family: var(--mono); font-size: .92em; }

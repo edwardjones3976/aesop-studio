@@ -1,7 +1,7 @@
 """Roundtable session drafts, strict preflight, planning-packet export, and the labelled non-live fallback.
 
-In this $165 mission Roundtables are design-ready and NON-EXECUTING: preflight can never pass because the
-mission gates (no live multi-party transport; two-subagent delegation cap) always fail. A checked lane is a
+Live sessions run through roundtable_live.Broker once this strict preflight passes, including the owner's
+"Live roundtables" switch (off by default). A checked lane is a
 per-session owner selection only: it never changes routes, permits, transfer policies or credentials.
 """
 from __future__ import annotations
@@ -64,6 +64,8 @@ def save(store: Store, project_id: str, body: dict) -> dict:
     existing = get(store, rid) if rid else None
     if existing and existing["project_id"] != project_id:
         raise KeyError("roundtable not in this project")
+    if existing and (existing.get("live_status") or "DRAFT") != "DRAFT":
+        raise ValueError("this roundtable already ran; its record is immutable — save a new draft instead")
     prior = {r["lane"]: r["approved_at"] for r in (existing or {}).get("roster", [])}
     roster = [{"lane": l, "approved": True, "approved_at": prior.get(l, now)} for l in d["roster"]]
     if existing:
@@ -89,6 +91,9 @@ def get(store: Store, rid: str, with_preflight: bool = False) -> dict | None:
         return None
     for k in ("roster", "caps", "compare"):
         r[k] = json.loads(r[k])
+    for k in ("speaker_state", "coverage", "consent"):
+        if isinstance(r.get(k), str) and r[k]:
+            r[k] = json.loads(r[k])
     r["sharing_ack"] = bool(r["sharing_ack"])
     if with_preflight:
         r["preflight"] = preflight(store, r)
@@ -140,6 +145,13 @@ def preflight(store: Store, rec: dict, discovered: dict | None = None) -> dict:
     check("caps", "Turn/message ceilings and cost cap set",
           caps["max_turns"] > 0 and caps["max_messages_per_speaker"] > 0,
           f"{caps['max_turns']} turns · {caps['max_messages_per_speaker']}/speaker · cost cap ${caps['cost_cap_usd']:.2f}")
+    live = rec.get("live_status") or "DRAFT"
+    check("fresh", "Session has not run yet", live == "DRAFT",
+          "" if live == "DRAFT" else f"this session is {live}; save a new draft (nothing is replayed)")
+    metered = [l["id"] for l in lanes if l["counts_as_speaker"] and l["route_type"] == "separately billed API"]
+    check("cost_cap", "Cost cap covers metered speakers", not metered or caps["cost_cap_usd"] > 0,
+          f"{', '.join(metered)} bill per token: set a cost cap above $0" if metered and caps["cost_cap_usd"] <= 0
+          else ("all speakers on included plan quota ($0 incremental)" if not metered else ""))
     for g in disc["mission_gates"]:
         check(g["code"].lower(), g["code"].replace("_", " ").title(), False, g["reason"])
     blocks = [f"{c['label']}: {c['detail'] or 'not met'}" for c in checks if not c["pass"]]
