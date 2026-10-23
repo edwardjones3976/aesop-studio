@@ -37,11 +37,11 @@ const tone = (s) => {
 };
 const statePill = (s) => h("span", { class: "pill " + tone(s) }, s);
 const DONE = ["COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED", "BLOCKED_OWNER", "EFFECT_UNKNOWN"];
-const USABLE = ["READY_INCLUDED", "READY_LOCAL", "SIMULATED", "READY_METERED"];
+const USABLE = ["READY_INCLUDED", "SIMULATED", "READY_METERED"];
 const usableRoutes = () => Object.entries(S.routes).filter(([, r]) => USABLE.includes(r.state));
 const isMetered = (r) => !!r && /METERED/.test(r.state || "");
 // The access route is always shown next to the provider so billing is never ambiguous.
-const access = (state) => state === "READY_LOCAL" ? "local model · $0" : state === "READY_INCLUDED" ? "official CLI · plan quota"
+const access = (state) => state === "READY_INCLUDED" ? "official CLI · plan quota"
   : /^READY_METERED/.test(state || "") ? "separately billed API"
   : state === "HANDOFF_ONLY" ? "native-site handoff"
   : state === "SIMULATED" ? "simulated test route" : "unavailable";
@@ -70,7 +70,7 @@ const ICONS = {
   shield: "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z", db: "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
   dollar: "M12 2v20M17 6H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6", note: "M4 4h16v16H4zM8 9h8M8 13h8M8 17h5",
   help: "M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0z",
-  panel: "M3 4h18v16H3zM15 4v16", more: "M12 5h.01M12 12h.01M12 19h.01", users: "M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM22 19v-1a4 4 0 0 0-3-3.9M16 4.1a3 3 0 0 1 0 5.8", diff: "M12 3v12M6 9h12M6 21h12", list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+  panel: "M3 4h18v16H3zM15 4v16", more: "M12 5h.01M12 12h.01M12 19h.01", users: "M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM22 19v-1a4 4 0 0 0-3-3.9M16 4.1a3 3 0 0 1 0 5.8", diff: "M12 3v12M6 9h12M6 21h12", trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3", list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
 };
 function icon(name, cls = "") {
   const s = document.createElementNS(SVGNS, "svg");
@@ -440,9 +440,77 @@ function rtSay(msg, kind = "") {
 function setupRoundtable() {
   $("rtDlg").addEventListener("close", () => {
     if (!RT) return;
-    clearTimeout(RT.timer); const o = RT.opener; RT = null;
+    clearTimeout(RT.timer); clearTimeout(RT.compareTimer); const o = RT.opener; RT = null;
     if (o && o.isConnected && o.focus) o.focus();
   });
+}
+const rtCompareData = () => {
+  const c = RT && RT.compare;
+  return c && typeof c === "object" && !Array.isArray(c) ? c : null;
+};
+function rtCanCompare() {
+  if (!RT || !RT.live || !RT.f.ack || rtQualified().length < 2) return false;
+  const live = (RT.rec && RT.rec.live_status) || "DRAFT";
+  if (live !== "DRAFT") return false;
+  const cmp = rtCompareData();
+  return !(cmp && cmp.status === "RUNNING");
+}
+function rtCompareRender() {
+  if (!RT || !RT.el.compare) return;
+  const cmp = rtCompareData();
+  const kids = [h("h3", { id: "rtCmpH" }, "Side-by-side compare"),
+    h("p", { class: "muted" }, "Sends the objective once to up to four qualified speakers (read-only chat). Live roundtables must be on; nothing here is executed.")];
+  const run = abtn("Run compare", () => rtCompareRun(), "sm", "layers");
+  run.disabled = !rtCanCompare();
+  kids.push(h("div", { class: "row" }, run));
+  if (cmp && cmp.status === "BLOCKED" && (cmp.block_reasons || []).length) {
+    kids.push(h("div", { class: "note bad" }, icon("alert"), h("ul", {}, ...cmp.block_reasons.map((r) => h("li", {}, r)))));
+  } else if (cmp) {
+    kids.push(h("p", { class: "faint" }, `Status: ${cmp.status}${cmp.ended_at ? " · " + fmtTime(cmp.ended_at) : ""}`));
+    if (cmp.error) kids.push(h("p", { class: "muted" }, cmp.error));
+    for (const r of cmp.results || []) {
+      kids.push(h("div", { class: "rt-answer" },
+        h("div", { class: "card-head" }, h("strong", {}, r.name || r.lane), statePill(r.state || "—"),
+          h("span", { class: "faint" }, r.latency_s != null ? `${r.latency_s}s` : "")),
+        r.error ? h("p", { class: "muted" }, r.error) : null,
+        h("pre", { class: "out" }, r.text || "(no text returned)")));
+    }
+  }
+  RT.el.compare.replaceChildren(...kids);
+}
+async function rtCompareRun() {
+  const s = RT; if (!s || !rtCanCompare()) { rtSay("Compare is not available yet. Turn live roundtables on, acknowledge sharing, pick at least two speakers, and save."); return; }
+  const rec = await rtSave(true); if (!rec || RT !== s || s.rec.id !== rec.id) return;
+  const gen = ++s.compareGen;
+  try {
+    const out = await api("POST", `/api/roundtables/${rec.id}/compare`, { confirm: true });
+    if (RT !== s || s.compareGen !== gen || !s.rec || s.rec.id !== rec.id) return;
+    s.compare = out;
+    rtCompareRender();
+    if (out.status === "RUNNING") rtComparePoll();
+    else rtSay(out.status === "COMPLETED" ? "Side-by-side compare finished." : `Compare ${String(out.status).toLowerCase()}.`, out.status === "COMPLETED" ? "ok" : "");
+  } catch (e) {
+    if (RT !== s) return;
+    if (e.data && e.data.status === "BLOCKED") { s.compare = e.data; rtCompareRender(); }
+    rtSay(e.message, "bad");
+  }
+}
+async function rtComparePoll() {
+  const s = RT; if (!s || !s.rec) return;
+  const gen = s.compareGen; const rid = s.rec.id;
+  clearTimeout(s.compareTimer);
+  try {
+    const rec = await api("GET", `/api/roundtables/${rid}`);
+    if (RT !== s || s.compareGen !== gen || !s.rec || s.rec.id !== rid) return;
+    s.rec = rec;
+    s.compare = rec.compare;
+    rtCompareRender();
+    const st = rtCompareData()?.status;
+    if (st === "RUNNING") s.compareTimer = setTimeout(() => rtComparePoll(), 1500);
+    else if (st === "COMPLETED") rtSay("Side-by-side compare finished.", "ok");
+  } catch {
+    if (RT === s) s.compareTimer = setTimeout(() => rtComparePoll(), 3000);
+  }
 }
 const RT_ADMINS = [["openai", "Codex"], ["claude", "Claude Code"], ["cursor", "Cursor"]];
 function rtApplyMode(f, mode, roster) {
@@ -455,6 +523,7 @@ async function openRoundtable(opener, opts = {}) {
   if ($("dlg").open || $("rtDlg").open) return;
   closeOverlay(false);
   const s = RT = { opener: opener || document.activeElement, pid: S.project.id, lanes: [], gates: [], example: [], discovered: null, drafts: [], rec: null, pre: null, preStale: false,
+    compare: null, compareGen: 0, compareTimer: null,
     f: rtBlank(), filter: "all", q: "", timer: null, loading: true, err: "", el: {}, gen: 0 };
   rtApplyMode(s.f, opts.mode === "war_room" ? "war_room" : "general", opts.roster);
   rtBuild(); $("rtDlg").showModal(); $("rtObjective").focus();
@@ -471,7 +540,11 @@ async function openRoundtable(opener, opts = {}) {
   s.loading = false; rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtDraftsRender(); rtStartRender();
 }
 // Any edit after a preflight makes its pass/fail list out of date until the next check.
-function rtStale() { if (RT && RT.pre && !RT.preStale) { RT.preStale = true; rtSideRender(); rtStartRender(); } }
+function rtStale() {
+  if (!RT) return;
+  if (RT.pre && !RT.preStale) { RT.preStale = true; rtSideRender(); rtStartRender(); }
+  if (rtCompareData() && rtCompareData().status === "COMPLETED") { RT.compare = null; rtCompareRender(); }
+}
 // Buttons that start a request are disabled until it settles, so double clicks never send twice.
 function abtn(label, fn, cls = "", ico) {
   const b = btn(label, async (e) => {
@@ -481,6 +554,42 @@ function abtn(label, fn, cls = "", ico) {
   }, cls, ico);
   return b;
 }
+// ---------- deletion ----------
+const DEL_SENTENCE = { conv: "Delete this conversation and its messages? This can't be undone.",
+  rt: "Delete this roundtable session and its events? This can't be undone." };
+const confirmDelete = async (kind) => !!(await dialog(DEL_SENTENCE[kind], [], "Delete"));
+async function deleteConversation(pid, cid) {
+  if (!(await confirmDelete("conv"))) return;
+  await guard(async () => {
+    let order = [];
+    try { order = (await api("GET", `/api/projects/${pid}/conversations`)).map((c) => c.id); } catch { /* best effort */ }
+    const r = await api("POST", `/api/projects/${pid}/conversations/${cid}/delete`);
+    if (!S.project || S.project.id !== pid) return;
+    if (S.conv === cid) { const i = order.indexOf(cid); const rest = order.filter((x) => x !== cid); S.conv = rest.length ? rest[Math.min(Math.max(i, 0), rest.length - 1)] : null; }
+    delete chatChips[cid];
+    banner((r && r.note) || "Conversation deleted.", "ok");
+    await refresh("chat");
+    const focusEl = document.querySelector('.convstrip [aria-current="true"]') || document.querySelector("#view .empty .btn");
+    if (focusEl && focusEl.focus) focusEl.focus();
+  });
+}
+// Deletes one roundtable record. A 409 (running/paused) is reported as busy instead of thrown.
+async function rtDeleteOne(id) {
+  try { const r = await api("POST", `/api/roundtables/${id}/delete`); rtForget(id); return { ok: true, r }; }
+  catch (e) { if (e.status === 409) return { ok: false, busy: true, msg: `${e.message} Stop the session first, then delete it.` }; throw e; }
+}
+// If the deleted record is open in the modal (draft or room), drop it and return to a blank form.
+function rtForget(id) {
+  const s = RT; if (!s) return;
+  s.drafts = s.drafts.filter((d) => d.id !== id);
+  if ((s.rec && s.rec.id === id) || s.roomId === id) {
+    clearTimeout(s.timer); s.gen++; s.rec = null; s.roomId = null; s.pre = null; s.preStale = false;
+    const mode = s.f.mode; s.f = rtBlank(); rtApplyMode(s.f, mode);
+    rtBuild("rtObjective"); rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtStartRender();
+  }
+  if (s.el.drafts && s.el.drafts.isConnected) rtDraftsRender();
+}
+function delBtn(label, aria, fn) { const b = abtn(label, fn, "ghost danger sm del", "trash"); b.setAttribute("aria-label", aria); return b; }
 function rtBuild(focusId) {
   const f = RT.f; const el = RT.el = {};
   const fld = (id, label, control, help) => h("div", { class: "field" }, h("label", { for: id }, label), control, help ? h("p", { class: "faint", id: id + "-help" }, help) : null);
@@ -531,7 +640,7 @@ function rtBuild(focusId) {
     h("section", { class: "card rt-share", "aria-labelledby": "rtShareH" }, h("h3", { id: "rtShareH" }, "External-sharing preview"),
       h("p", { class: "muted" }, "This is exactly what would leave this machine, and who would receive it. Changing the objective or the roster clears your confirmation."),
       el.sharePrev, h("label", { class: "rt-ack", for: "rtAck" }, el.ack, h("span", {}, "I've reviewed what would be shared"))),
-    h("p", { class: "note info" }, icon("info"), h("span", {}, "Manual side-by-side comparison isn't available in this build.")),
+    (el.compare = h("section", { class: "section rt-compare", "aria-labelledby": "rtCmpH" })),
     h("section", { class: "section", "aria-labelledby": "rtTransH" }, h("h3", { id: "rtTransH" }, "Transcript preview"),
       empty("chat", "No transcript yet", "The transcript appears in the live room once a session starts. Start needs a current, passing preflight.")),
     el.drafts);
@@ -551,7 +660,7 @@ function rtBuild(focusId) {
       h("button", { type: "button", class: "iconbtn", "aria-label": "Close roundtable", onclick: () => $("rtDlg").close() }, icon("x"))),
     h("div", { id: "rtStatus", class: "rt-status", role: "status", "aria-live": "polite" }),
     (el.body = h("div", { class: "rt-body" }, (el.part = part), main, el.side)), (el.foot = foot));
-  rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtStartRender(); rtDraftsRender();
+  rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtStartRender(); rtDraftsRender(); rtCompareRender();
   if (focusId && $(focusId)) $(focusId).focus();
 }
 function rtResetAck() { if (RT.f.ack) { RT.f.ack = false; if (RT.el.ack) RT.el.ack.checked = false; } }
@@ -602,6 +711,7 @@ function rtRefresh() {
     h("pre", { class: "out" }, f.objective.trim() ? f.objective : "(objective is empty)"),
     h("div", { class: "faint" }, "Selected lanes that would receive it"),
     sel.length ? h("ul", { class: "rt-recips" }, ...sel.map((l) => h("li", {}, h("strong", {}, l.name), ` · ${l.route_type || "no route"} · ${RT_CLASS[l.lane_class] || l.lane_class}`))) : h("p", { class: "muted" }, "No lanes selected; nothing would be shared."));
+  rtCompareRender();
 }
 function rtGatesRender() {
   const g = RT.gates;
@@ -643,7 +753,19 @@ function rtDraftsRender() {
       h("div", { class: "dtxt" }, h("strong", {}, `${RT_MODES[r.mode] || r.mode} · ${(r.objective || "(no objective)").slice(0, 90)}`),
         h("span", { class: "faint" }, `${r.id} · updated ${fmtTime(r.updated || r.created)}`)),
       statePill(r.live_status || r.status || "DRAFT"), abtn("Open", () => rtOpenDraft(r.id), "sm"),
-      r.live_status && r.live_status !== "DRAFT" ? abtn(LIVE_END.includes(r.live_status) ? "View record" : "Open room", () => rtRoom(r.id, LIVE_END.includes(r.live_status)), "ghost sm", "chat") : null)))
+      r.live_status && r.live_status !== "DRAFT" ? abtn(LIVE_END.includes(r.live_status) ? "View record" : "Open room", () => rtRoom(r.id, LIVE_END.includes(r.live_status)), "ghost sm", "chat") : null,
+      delBtn("Delete", `Delete roundtable ${r.id}`, async () => {
+        const s = RT; if (!s || !(await confirmDelete("rt")) || RT !== s) return;
+        const i = s.drafts.findIndex((x) => x.id === r.id);
+        try {
+          const res = await rtDeleteOne(r.id); if (RT !== s) return;
+          if (!res.ok) { rtSay(res.msg, "bad"); return; }
+          rtSay((res.r && res.r.note) || `Deleted ${r.id}.`, "ok");
+          const lis = s.el.drafts.querySelectorAll(".rt-drafts li");
+          const li = lis[Math.min(Math.max(i, 0), lis.length - 1)];
+          const f = (li && li.querySelector(".btn")) || $("rtObjective"); if (f) f.focus();
+        } catch (err) { if (RT === s) rtSay(err.message, "bad"); }
+      }))))
       : h("p", { class: "muted" }, "No drafts saved for this project yet."));
   RT.el.drafts.querySelectorAll(".rt-drafts li").forEach((li, i) => {
     const [open, room] = li.querySelectorAll(".btn");
@@ -760,7 +882,7 @@ function rtCoverage(c) {
 // The room replaces the modal's centre and right columns; the feed is append-only and polled every second.
 function rtRoom(id, readOnly) {
   const s = RT; if (!s) return;
-  clearTimeout(s.timer); const gen = ++s.gen;
+  clearTimeout(s.timer); const gen = ++s.gen; s.roomId = id;
   const room = { after: 0, id, byLabel: {}, phase: null, opened: false, closed: false, passes: 0 };
   const clock = h("span", { class: "rt-clock" }, "—"); const stPill = h("span");
   const chips = h("div", { class: "rt-chips", "aria-label": "Speakers" });
@@ -831,6 +953,8 @@ async function rtOpenDraft(id) {
     if (RT !== s || s.gen !== gen) return;
     clearTimeout(s.timer);
     s.rec = rec; s.f = rtFromRecord(rec); if (s.f.mode === "war_room") s.f.roster = new Set(RT_ADMINS.map(([x]) => x)); s.pre = rec.preflight || null; s.preStale = false;
+    s.compare = Array.isArray(rec.compare) ? null : rec.compare;
+    s.compareGen++;
     rtBuild("rtObjective");
     rtSay(`Opened draft ${rec.id}.`);
   } catch (e) { if (RT === s) rtSay(e.message, "bad"); }
@@ -1278,8 +1402,10 @@ async function renderChat() {
   }, "ghost", "layers") : null;
   if (sumBtn) { sumBtn.id = "sumBtn"; if (dRunning(DERIV[dkey("summary")]) || !S.project.provider_default) sumBtn.disabled = true; }
   const bar = h("div", { class: "convbar" },
-    convs.length ? h("div", { class: "convstrip", role: "list", "aria-label": "Conversations" }, ...convs.map((c) => h("button", { role: "listitem", "aria-current": c.id === cid ? "true" : "false", title: c.title, onclick: () => { S.conv = c.id; refresh("chat"); } }, icon("chat", "sm"), h("span", {}, c.title)))) : h("span", { class: "grow" }),
-    sumBtn, rtMenu(), btn("War Room", (e) => { rtAuthorize(); openRoundtable(e.currentTarget, { mode: "war_room" }); }, "rt-entry", "shield"), btn("New conversation", newConv, "ghost", "plus"));
+    convs.length ? h("div", { class: "convstrip", role: "list", "aria-label": "Conversations" }, ...convs.map((c) => h("span", { role: "listitem", class: "convchip" + (c.id === cid ? " cur" : "") },
+      h("button", { type: "button", class: "convpick", "aria-current": c.id === cid ? "true" : "false", title: c.title, onclick: () => { S.conv = c.id; refresh("chat"); } }, icon("chat", "sm"), h("span", {}, c.title)),
+      h("button", { type: "button", class: "convdel", "aria-label": `Delete conversation ${c.title}`, title: "Delete conversation", onclick: () => deleteConversation(pid, c.id) }, icon("trash", "sm"))))) : h("span", { class: "grow" }),
+    sumBtn, cid ? abtn("Delete conversation", () => deleteConversation(pid, cid), "ghost danger del", "trash") : null, rtMenu(), btn("War Room", (e) => { rtAuthorize(); openRoundtable(e.currentTarget, { mode: "war_room" }); }, "rt-entry", "shield"), btn("New conversation", newConv, "ghost", "plus"));
   const root = h("div", { class: "chatv" }, bar, h("div", { "data-deriv": "summary", class: "section" }, ...dView("summary")));
   if (!cid) {
     root.append(empty("chat", "No conversations yet", "Start a conversation to talk with this project's provider. Messages are saved locally before anything is sent.", btn("Start a conversation", newConv, "primary", "plus")));
@@ -1812,15 +1938,57 @@ async function loadRtHistory(el, gen) {
   let rows;
   try { rows = await api("GET", "/api/roundtables"); } catch (e) { if (gen === S.viewGen) el.replaceChildren(h("h2", {}, "Roundtables"), h("div", { class: "note bad" }, icon("alert"), h("span", {}, e.message))); return; }
   if (gen !== S.viewGen) return;
-  el.replaceChildren(h("div", { class: "section-head" }, h("h2", {}, "Roundtables", h("span", { class: "count" }, String(rows.length))), h("p", {}, "Every session across projects.")),
-    rows.length ? table(["Project", "Mode", "Objective", "Status", "Messages", "Coverage", "Date", ""], rows.map((r) => h("tr", {},
+  const sel = new Set(); const trs = {};
+  const head = h("h2", { tabindex: "-1" }, "Roundtables", h("span", { class: "count" }, String(rows.length)));
+  const delSel = abtn("Delete selected (0)", async () => {
+    const ids = rows.filter((r) => sel.has(r.id)).map((r) => r.id); if (!ids.length) return;
+    if (!(await confirmDelete("rt"))) return;
+    let n = 0, m = 0, fail = "";
+    for (const id of ids) {
+      try { const res = await rtDeleteOne(id); if (res.ok) { n++; dropRow(id); } else m++; }
+      catch (e) { m++; fail = e.message; }
+    }
+    banner(`${n} deleted, ${m} skipped (still running)${fail ? `. Last error: ${fail}` : ""}.`, m ? "" : "ok");
+    setTimeout(() => (rows.length ? all : head).focus(), 0);
+  }, "ghost danger sm del", "trash");
+  delSel.id = "rtDelSel";
+  const all = h("input", { type: "checkbox", class: "rtchk", id: "rtSelAll", onchange: (e) => {
+    sel.clear(); if (e.target.checked) rows.forEach((r) => sel.add(r.id));
+    el.querySelectorAll("tbody .rtchk").forEach((c) => { c.checked = e.target.checked; }); sync(); } });
+  const sync = () => {
+    delSel.lastChild.textContent = `Delete selected (${sel.size})`; delSel.disabled = !sel.size;
+    all.checked = rows.length > 0 && sel.size === rows.length; all.indeterminate = sel.size > 0 && sel.size < rows.length;
+  };
+  const toolbar = h("div", { class: "row rt-bulk" }, h("label", { class: "chkl", for: "rtSelAll" }, all, "Select all"), delSel);
+  const dropRow = (id) => {
+    const i = rows.findIndex((r) => r.id === id); if (i >= 0) rows.splice(i, 1); sel.delete(id);
+    if (trs[id]) trs[id].remove(); delete trs[id];
+    head.querySelector(".count").textContent = String(rows.length);
+    if (!rows.length) { const t = el.querySelector(".tablewrap"); if (t) t.replaceWith(h("p", { class: "muted" }, "No roundtable sessions yet.")); toolbar.hidden = true; }
+    sync();
+  };
+  el.replaceChildren(h("div", { class: "section-head" }, head, h("p", {}, "Every session across projects.")),
+    rows.length ? toolbar : null,
+    rows.length ? table(["Select", "Project", "Mode", "Objective", "Status", "Messages", "Coverage", "Date", ""], rows.map((r) => trs[r.id] = h("tr", {},
+      h("td", {}, h("input", { type: "checkbox", class: "rtchk", "aria-label": `Select roundtable ${r.id}`, onchange: (e) => { if (e.target.checked) sel.add(r.id); else sel.delete(r.id); sync(); } })),
       h("td", {}, r.project || r.project_id), h("td", {}, RT_MODES[r.mode] || r.mode), h("td", { class: "wrap" }, (r.objective || "").slice(0, 90)),
       h("td", {}, statePill(r.live_status || "DRAFT")), h("td", { class: "num" }, String(r.messages ?? "—")),
       h("td", {}, r.coverage ? h("span", { class: "pill " + (r.coverage.valid ? "ok" : "bad"), title: r.coverage.summary || "" }, r.coverage.valid ? "valid" : "not valid") : h("span", { class: "faint" }, "—")),
       h("td", {}, fmtTime(r.ended || r.started || r.updated)),
       h("td", {}, h("div", { class: "row" }, abtn("View", () => viewRoundtable(r), "sm", "eye"),
-        abtn("Export record", () => guard(() => download(`/api/roundtables/${r.id}/record`, `roundtable-record-${r.id}.json`)), "ghost sm", "download"))))))
+        abtn("Export record", () => guard(() => download(`/api/roundtables/${r.id}/record`, `roundtable-record-${r.id}.json`)), "ghost sm", "download"),
+        delBtn("Delete", `Delete roundtable ${r.id}`, async () => {
+          if (!(await confirmDelete("rt"))) return;
+          try {
+            const res = await rtDeleteOne(r.id);
+            if (!res.ok) { banner(res.msg, "bad"); return; }
+            const tr = trs[r.id]; const nx = tr && (tr.nextElementSibling || tr.previousElementSibling);
+            dropRow(r.id); banner((res.r && res.r.note) || `Deleted ${r.id}.`, "ok");
+            const f = (nx && nx.querySelector(".del")) || head; f.focus();
+          } catch (e) { banner(e.message, "bad"); }
+        }))))))
       : h("p", { class: "muted" }, "No roundtable sessions yet."));
+  if (rows.length) sync();
 }
 async function viewRoundtable(r) {
   const opener = document.activeElement;

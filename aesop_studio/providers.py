@@ -5,6 +5,7 @@ Routes never touch credential files; readiness comes from each CLI's own status 
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -69,10 +70,10 @@ def _grok_cmd() -> list[str] | None:
 
 # Routes whose CLI only accepts the prompt as an argument (never via a shell; Windows caps a command line at
 # 32,767 characters, so longer prompts are refused rather than truncated).
-ARGV_PROMPT_ROUTES = {"antigravity"}
+ARGV_PROMPT_ROUTES = {"antigravity", "grok"}
 MAX_ARGV_PROMPT = 24_000
 # Live-verified CLI routes: an owner-triggered minimal call is the only proof of usable access + quota.
-LIVE_VERIFY_ROUTES = {"cursor", "antigravity", "copilot"}
+LIVE_VERIFY_ROUTES = {"cursor", "antigravity", "copilot", "grok", "zai"}
 VERIFY_MAX_AGE_S = 7 * 24 * 3600
 
 
@@ -112,26 +113,10 @@ def verify_live(store, rid: str) -> dict:
     return rec
 
 
-LMSTUDIO_PORT = 1234
-LMSTUDIO_DEFAULT = "homemade-llm/m1/qwen3-8b-q4_k_m.gguf"
-
-
-def _lms_cmd() -> list[str] | None:
-    exe = shutil.which("lms") or shutil.which("lms.exe") or str(Path.home() / ".lmstudio" / "bin" / "lms.exe")
-    return [exe] if exe and Path(exe).is_file() else None
-
-
-def _lms_models() -> list[str] | None:
-    """Model ids from LM Studio's local server (loopback, no proxy), or None if the server is not up."""
-    import urllib.request
-    try:
-        op = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with op.open(f"http://127.0.0.1:{LMSTUDIO_PORT}/v1/models", timeout=5) as r:
-            data = json.loads(r.read().decode("utf-8"))
-    except Exception:  # noqa: BLE001
-        return None
-    ids = [m.get("id") for m in data.get("data", []) if m.get("id")]
-    return [i for i in ids if "embed" not in i.lower() and "smoke" not in i.lower()]
+def _zai_cmd() -> list[str] | None:
+    ps1 = Path.home() / ".claude" / "tools" / "zai" / "claude-zai.ps1"
+    pwsh = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+    return [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1)] if ps1.is_file() and pwsh else None
 
 
 def _sim_cmd() -> list[str]:
@@ -269,7 +254,11 @@ def probe(store=None) -> dict[str, dict]:
             ("antigravity", "google", _agy_cmd, "Google sign-in (Antigravity)",
              "Antigravity/Gemini account quota; billing not observable here"),
             ("copilot", "github", _copilot_cmd, "GitHub sign-in (Copilot CLI)",
-             "GitHub Copilot premium-request quota; paid overage only if enabled on the account")):
+             "GitHub Copilot premium-request quota; paid overage only if enabled on the account"),
+            ("grok", "xai", _grok_cmd, "xAI sign-in (SuperGrok, grok CLI)",
+             "SuperGrok subscription quota (owner-confirmed paid plan)"),
+            ("zai", "zai", _zai_cmd, "Z.ai GLM Coding Plan key (claude-zai launcher)",
+             "Z.ai GLM Coding Plan credits (owner-confirmed paid plan); Claude Code client against Z.ai")):
         r = _base(prov, "official_cli", None, ["chat"], auth, "subscription_included", billing_note)
         r["filesystem_scope"] = ("chat only, read-only/ask/plan mode in an empty temp dir; not an isolation "
                                  "boundary — the CLI runs as your Windows user")
@@ -284,7 +273,8 @@ def probe(store=None) -> dict[str, dict]:
             continue
         r["executable"] = Path(cmd[-1]).name if rid == "cursor" else Path(cmd[0]).name
         code, out = _run(cmd + ["--version"], timeout=30)
-        first = (out.strip().splitlines() or [""])[0][:80]
+        lines = [l for l in out.strip().splitlines() if re.search(r"\d+\.\d+", l) and "WARNING" not in l]
+        first = (lines or out.strip().splitlines() or [""])[0][:80]
         r["version"] = first if code == 0 and first else None
         signed_in = None
         if rid == "cursor":
@@ -307,43 +297,6 @@ def probe(store=None) -> dict[str, dict]:
         r["last_verified_at"] = (ver or {}).get("at") or now
         routes[rid] = r
 
-    # ---- LM Studio: local models on this PC ($0, private). Probe = server status + model list (loopback only).
-    r = _base("local", "local_model", "LM Studio (127.0.0.1)", ["chat"], "none (local)", "subscription_included",
-              "Runs on this PC's CPU/GPU; speed depends on the model; nothing leaves the machine.")
-    r["filesystem_scope"] = "none: the local model only receives the previewed context"
-    lms = _lms_cmd()
-    if not lms:
-        r.update(state="UNAVAILABLE", evidence="LM Studio (lms) not installed")
-    elif os.environ.get("AESOP_PROBE_OFFLINE") == "1":
-        r.update(state="UNVERIFIED", evidence="probe skipped (offline test mode)")
-    else:
-        models = _lms_models()
-        if models is None:
-            _run(lms + ["server", "start"], timeout=60)  # starts LM Studio's own local server (127.0.0.1)
-            models = _lms_models()
-        if models:
-            r.update(state="READY_LOCAL", incremental_cost_status="$0 (local model)", version=f"{len(models)} models",
-                     evidence=f"LM Studio server on 127.0.0.1:{LMSTUDIO_PORT}; default model {LMSTUDIO_DEFAULT}",
-                     models=models)
-        else:
-            r.update(state="UNAVAILABLE", evidence="LM Studio server not reachable or no chat models loaded")
-    r["last_verified_at"] = now
-    routes["lmstudio"] = r
-
-    r = _base("xai", "official_cli", None, ["chat"], "xAI sign-in (grok CLI)", "unknown",
-              "Billing basis not verifiable (subscription vs API key); not enabled to avoid unbounded charges.")
-    cmd = _grok_cmd()
-    if cmd and os.environ.get("AESOP_PROBE_OFFLINE") == "1":
-        r.update(executable="grok.exe", state="BLOCKED_POLICY", evidence="probe skipped (offline test mode)")
-    elif cmd:
-        code, out = _run(cmd + ["--version"], timeout=30)
-        r.update(executable="grok.exe", version=(out.strip().splitlines() or [None])[0] if code == 0 else None,
-                 state="BLOCKED_POLICY", evidence="grok CLI installed; billing basis unverified, so no calls are made",
-                 incremental_cost_status="unknown (not enabled)")
-    else:
-        r.update(state="UNAVAILABLE", evidence="grok CLI not found")
-    r["last_verified_at"] = now
-    routes["grok"] = r
 
     for rid, prov, note in (("perplexity", "perplexity", "Web app handoff; no verified no-charge API route"),
                             ("firecrawl", "firecrawl", "Handoff only inside Studio; built-in fetcher used instead")):
@@ -372,7 +325,7 @@ DISPLAY = {
     "codex": ("Codex", "Codex"), "openai-api": ("Codex API", "Codex"), "claude": ("Claude Code", "Claude Code"),
     "cursor": ("Cursor", "Cursor"), "antigravity": ("Antigravity", "Antigravity"),
     "copilot": ("Copilot CLI", "Copilot CLI"), "grok": ("Grok CLI", "Grok CLI"),
-    "lmstudio": ("LM Studio (local)", "LM Studio"),
+    "zai": ("Z.ai GLM", "Z.ai GLM"),
     "perplexity": ("Perplexity", "Perplexity"), "firecrawl": ("Firecrawl", "Firecrawl"),
     "simulated": ("Simulated (test only)", "Simulated"),
 }
@@ -403,7 +356,7 @@ def cached(store: Store) -> dict[str, dict]:
 
 
 def usable(route: dict, mode: str) -> bool:
-    return (route["state"] in ("READY_INCLUDED", "READY_LOCAL", "READY_METERED", "SIMULATED")
+    return (route["state"] in ("READY_INCLUDED", "READY_METERED", "SIMULATED")
             and mode in route["supported_modes"])
 
 
@@ -455,9 +408,22 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         if not cmd:
             raise RuntimeError("copilot unavailable")
         return cmd + ["-s", "--no-color"] + (["--model", model] if model else [])  # prompt via stdin
-    if route_id == "lmstudio" and mode == "chat":
-        return [sys.executable, "-I", str(Path(__file__).with_name("local_llm_client.py")),
-                model or LMSTUDIO_DEFAULT, out_file]
+    if route_id == "grok" and mode == "chat":
+        cmd = _grok_cmd()
+        if not cmd:
+            raise RuntimeError("grok CLI unavailable")
+        if prompt is None or len(prompt) > MAX_ARGV_PROMPT:
+            raise RuntimeError(f"Grok takes the prompt as an argument; context over {MAX_ARGV_PROMPT:,} characters "
+                               "is refused")
+        return cmd + ["--permission-mode", "plan", "--output-format", "plain"] + (["-m", model] if model else []) + [
+            "-p", prompt]
+    if route_id == "zai" and mode == "chat":
+        cmd = _zai_cmd()
+        if not cmd:
+            raise RuntimeError("claude-zai launcher unavailable")
+        return cmd + (["-Model", model] if model else []) + [
+            "-p", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config",
+            "--disallowedTools", "Bash,Edit,Write,WebFetch,WebSearch,NotebookEdit,Task"]
     if route_id == "simulated":
         return _sim_cmd() + [mode, out_file]
     raise RuntimeError(f"route {route_id} has no in-app execution path for {mode}")

@@ -5,20 +5,22 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ["AESOP_SIMULATED_ROUTE"] = "1"
 os.environ["AESOP_PROBE_OFFLINE"] = "1"
 
-from aesop_studio import lanes, ledger, providers, roundtable  # noqa: E402
+from aesop_studio import lanes, ledger, providers, roundtable, roundtable_compare  # noqa: E402
 from aesop_studio.services import Services  # noqa: E402
 from aesop_studio.store import Store  # noqa: E402
 from aesop_studio.tasks import Supervisor  # noqa: E402
 
 
-def fake_lane(lid, cls="speaker", speaker=True, readiness="VERIFIED_READY"):
+def fake_lane(lid, cls="speaker", speaker=True, readiness="VERIFIED_READY", route_id=None):
+    rid = route_id if route_id is not None else lid
     return {"id": lid, "name": lid.title(), "lane_class": cls, "detected": True, "detection": "test",
-            "readiness": readiness, "route_type": "official CLI · plan quota", "route_id": lid,
-            "verified_routes": [lid], "conversation_support": "in_app_verified" if speaker else "none",
+            "readiness": readiness, "route_type": "official CLI · plan quota", "route_id": rid,
+            "verified_routes": [rid], "conversation_support": "in_app_verified" if speaker else "none",
             "cost_visibility": "plan quota", "billing_note": "", "counts_as_speaker": speaker, "reasons": []}
 
 
@@ -131,6 +133,38 @@ class TestPlanning(Base):
     def test_verify_rejects_non_cli_routes(self):
         with self.assertRaises(ValueError):
             providers.verify_live(self.store, "openai-api")
+
+    def test_compare_needs_live_switch_and_confirm(self):
+        rec = self.draft(roster=["a", "b"])
+        lane_disc = disc(fake_lane("a", route_id="simulated"), fake_lane("b", route_id="simulated"), gates=False)
+        with mock.patch.object(lanes, "discover", lambda store: lane_disc):
+            blocked = roundtable_compare.start(self.store, self.sup, self.svc, rec, confirm=True)
+        self.assertEqual(blocked["status"], "BLOCKED")
+        lanes.set_live_authorized(self.store, True)
+        with mock.patch.object(lanes, "discover", lambda store: lane_disc):
+            with self.assertRaises(ValueError):
+                roundtable_compare.start(self.store, self.sup, self.svc, rec, confirm=False)
+
+    def test_compare_runs_parallel_simulated(self):
+        import time as _time
+        lanes.set_live_authorized(self.store, True)
+        rec = self.draft(roster=["a", "b"])
+        lane_disc = disc(fake_lane("a", route_id="simulated"), fake_lane("b", route_id="simulated"), gates=False)
+        with mock.patch.object(lanes, "discover", lambda store: lane_disc):
+            out = roundtable_compare.start(self.store, self.sup, self.svc, rec, confirm=True)
+        self.assertEqual(out["status"], "RUNNING")
+        end = _time.time() + 45
+        while _time.time() < end:
+            row = roundtable.get(self.store, rec["id"])
+            cmp = row["compare"]
+            if isinstance(cmp, dict) and cmp.get("status") in ("COMPLETED", "FAILED"):
+                break
+            _time.sleep(0.15)
+        row = roundtable.get(self.store, rec["id"])
+        cmp = row["compare"]
+        self.assertEqual(cmp["status"], "COMPLETED")
+        self.assertEqual(len(cmp["results"]), 2)
+        self.assertTrue(all(r["state"] == "COMPLETED" and "[simulated chat]" in r["text"] for r in cmp["results"]))
 
 
 if __name__ == "__main__":

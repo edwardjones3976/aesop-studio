@@ -20,7 +20,7 @@ from .store import Store
 ADMINS = ("openai", "claude", "cursor")  # documented administrator identities (Codex, Claude Code, Cursor)
 # Owner naming rule: each family is titled by its code-based product (OpenAI/ChatGPT/Codex -> "Codex").
 DOCUMENTED_EXAMPLE = ["Codex", "Claude Code", "Cursor", "Grok CLI", "Antigravity", "Perplexity", "Firecrawl",
-                      "Copilot CLI", "Z.ai GLM Coding", "LM Studio (local)"]
+                      "Copilot CLI", "Z.ai GLM Coding"]
 
 _HOME = Path.home()
 _LOCAL = Path(os.environ.get("LOCALAPPDATA", _HOME / "AppData" / "Local"))
@@ -33,7 +33,7 @@ CATALOG = [
     ("cursor", "Cursor", "admin", ["cursor-agent"], [_LOCAL / "cursor-agent" / "cursor-agent.ps1"], ["cursor"],
      "Cursor plan; usage-based overage possible and not verifiable from here"),
     ("grok", "Grok CLI", "speaker", ["grok"], [_HOME / ".grok" / "bin" / "grok.exe"], ["grok"],
-     "xAI billing not verified as included"),
+     "SuperGrok subscription quota (owner-confirmed paid plan)"),
     ("antigravity", "Antigravity", "speaker", ["agy", "antigravity"], [_LOCAL / "agy" / "bin" / "agy.exe"],
      ["antigravity"],
      "Google billing not verified as included"),
@@ -43,10 +43,8 @@ CATALOG = [
      "research tool (credit-based); not a conversational speaker"),
     ("copilot", "Copilot CLI", "speaker", ["copilot"], [], ["copilot"],
      "GitHub Copilot premium-request quota"),
-    ("lmstudio", "LM Studio (local)", "speaker", ["lms"], [_HOME / ".lmstudio" / "bin" / "lms.exe"], ["lmstudio"],
-     "local model on this PC: $0, nothing leaves the machine"),
-    ("zai", "Z.ai GLM Coding", "speaker", ["claude-zai"], [_HOME / ".local" / "bin" / "claude-zai.cmd"], [],
-     "paid non-OpenAI biller: blocked by the $165 mission's OpenAI-only rule"),
+    ("zai", "Z.ai GLM Coding", "speaker", ["claude-zai"], [_HOME / ".local" / "bin" / "claude-zai.cmd"], ["zai"],
+     "Z.ai GLM Coding Plan credits (owner-confirmed paid plan)"),
 ]
 _EXTS = ("", ".exe", ".cmd", ".bat", ".ps1")
 
@@ -98,13 +96,10 @@ def discover(store: Store) -> dict:
         path = _find(launchers, extra)
         own = [r for r in route_ids if r in routes]
         claimed_routes.update(own)
-        verified = [r for r in own if routes[r]["state"] in ("READY_INCLUDED", "READY_LOCAL", "READY_METERED")]
+        verified = [r for r in own if routes[r]["state"] in ("READY_INCLUDED", "READY_METERED")]
         reasons = []
         if verified:
             readiness, conv = "VERIFIED_READY", "in_app_verified"
-        elif lid == "zai" and path:
-            readiness, conv = "BLOCKED_POLICY", "adapter_missing"
-            reasons.append("Z.ai is a paid non-OpenAI biller; this mission allows $0 non-OpenAI spend.")
         elif path or own or lid in secrets:
             readiness, conv = "INSTALLED_UNVERIFIED", "adapter_missing" if cls in ("admin", "speaker") else "none"
             reasons.append("Installed, but Studio has no verified in-app conversation adapter for this lane.")
@@ -161,6 +156,6 @@ def _route_type(cls, verified, routes) -> str:
     if not verified:
         return {"research": "research tool", "review": "review tool"}.get(cls, "official CLI (not integrated)")
     kinds = sorted({"separately billed API" if routes[r]["billing_basis"] == "metered"
-                    else "local model · $0" if routes[r]["route_type"] == "local_model" else "official CLI · plan quota"
+                    else "official CLI · plan quota"
                     for r in verified})
     return " + ".join(kinds)

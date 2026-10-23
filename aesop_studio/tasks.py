@@ -121,8 +121,17 @@ def _remove_chat_dir(cwd: str | None) -> None:
         return
     p = Path(cwd).resolve()
     tmp = Path(tempfile.gettempdir()).resolve()
-    if p.parent == tmp and p.name.startswith(CHAT_DIR_PREFIX):
+    if not p.name.startswith(CHAT_DIR_PREFIX):
+        return
+    try:
+        p.relative_to(tmp)
+    except ValueError:
+        return
+    for attempt in range(6):
         shutil.rmtree(p, ignore_errors=True)
+        if not p.exists():
+            return
+        time.sleep(0.04 * (attempt + 1))
 
 
 class _RedactingLog:
@@ -348,6 +357,8 @@ class Supervisor:
             try:
                 argv = providers.build_argv(route_id, mode, cwd, last_file, model, prompt=prompt)
             except RuntimeError as e:
+                if mode != "agent":
+                    _remove_chat_dir(cwd)
                 return self._end(tid, "FAILED", lid, 0, error=str(e))
             meta = {"executable": Path(argv[0]).name,  # never record the prompt (argv-prompt routes) or the cwd
                     "args": ["-p=<prompt>" if a.startswith("-p=") else a for a in argv[1:] if not a.startswith(cwd)][:20]}
@@ -357,6 +368,8 @@ class Supervisor:
                 proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, creationflags=NEW_GROUP, env=env)
             except OSError as e:
+                if mode != "agent":
+                    _remove_chat_dir(cwd)
                 return self._end(tid, "FAILED", lid, 0, error=f"launch failed: {e}")
             job = winjob.contain(proc.pid)  # whole-tree containment, including detached descendants
             with self.lock:
@@ -447,6 +460,8 @@ class Supervisor:
                 state, err = "FAILED", f"exit code {code}"
             cp = json.loads(self.get(tid)["checkpoint"] or "{}")
             cp["result"] = result[:MAX_OUTPUT_BYTES]
+            if mode != "agent":
+                _remove_chat_dir(cwd)
             self._end(tid, state, lid, 0, exit_code=code, changed_files=changed, error=err, checkpoint=json.dumps(cp))
             if state == "EFFECT_UNKNOWN":
                 self.open_repair(tid, f"RUNNING->{state}", "task supervision / descendant cleanup")
@@ -465,6 +480,8 @@ class Supervisor:
                 t = self.get(tid)
                 if t and t["state"] not in TERMINAL:
                     started = proc is not None
+                    if mode != "agent":
+                        _remove_chat_dir(cwd)
                     self._end(tid, "EFFECT_UNKNOWN" if started else "FAILED", lid, None if started else 0,
                               error=f"supervisor error: {type(e).__name__}: {str(e)[:200]}")
                     if started:

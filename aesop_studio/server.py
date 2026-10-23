@@ -15,7 +15,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backup, derive, evidence, lanes, ledger, providers, roundtable
+from . import backup, deletion, derive, evidence, lanes, ledger, providers, roundtable, roundtable_compare
 from .security import MAX_UPLOAD_BYTES, ScopeError, redact
 from .services import Conflict, Services
 from .store import Store
@@ -249,6 +249,15 @@ class Handler(BaseHTTPRequestHandler):
     def rt_preflight(self, sess, rid):
         self.json(roundtable.preflight(self.app.store, self._rt(rid)))
 
+    @route("POST", r"/api/roundtables/(\w+)/compare")
+    def rt_compare(self, sess, rid):
+        rec = self._rt(rid)
+        b = self.body()
+        out = roundtable_compare.start(self.app.store, self.app.sup, self.app.svc, rec,
+                                       confirm=bool(b.get("confirm")))
+        code = 202 if out.get("status") == "RUNNING" else (409 if out.get("status") == "BLOCKED" else 200)
+        self.json(out, code)
+
     @route("POST", r"/api/roundtable/live-authorization")
     def rt_live_auth(self, sess):
         lanes.set_live_authorized(self.app.store, bool(self.body().get("enabled")))
@@ -277,6 +286,18 @@ class Handler(BaseHTTPRequestHandler):
         for r in rows:
             r["coverage"] = json.loads(r["coverage"]) if r["coverage"] else None
         self.json(rows)
+
+    @route("POST", r"/api/projects/(\w+)/conversations/(\w+)/delete")
+    def conv_delete(self, sess, pid, cid):
+        self.json(deletion.delete_conversation(self.app.store, self.app.svc, pid, cid))
+
+    @route("POST", r"/api/roundtables/(\w+)/delete")
+    def rt_delete(self, sess, rid):
+        rec = self._rt(rid)
+        live = self.app.broker.sessions.get(rid)
+        if (rec.get("live_status") in ("RUNNING", "PAUSED")) or (live and live["thread"].is_alive()):
+            raise Conflict("stop this session before deleting it")
+        self.json(deletion.delete_roundtable(self.app.store, rid))
 
     @route("GET", r"/api/roundtables/(\w+)/live")
     def rt_live(self, sess, rid):
@@ -610,6 +631,21 @@ def main(argv=None):
     link_file.write_text(url, encoding="utf-8")
     print(f"Aesop Studio listening on http://127.0.0.1:{a.port} (loopback only)")
     print(f"One-time launch link written to {link_file}")
+
+    def relogin_watch():
+        req = Path(a.data) / "relogin.request"
+        while True:
+            time.sleep(0.5)
+            if req.exists():
+                try:
+                    req.unlink()
+                except OSError:
+                    continue
+                srv.app.login_code = secrets.token_urlsafe(24)  # previous unused code is invalidated
+                link_file.write_text(f"http://127.0.0.1:{a.port}/login?code={srv.app.login_code}", encoding="utf-8")
+
+    import threading as _threading
+    _threading.Thread(target=relogin_watch, daemon=True).start()
     if srv.app.reconciled:
         print(f"Reconciled {len(srv.app.reconciled)} unfinished task(s) from the previous run.")
     try:
