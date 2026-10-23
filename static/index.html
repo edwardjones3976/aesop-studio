@@ -2,46 +2,103 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
 <title>Aesop Studio</title>
 <link rel="stylesheet" href="/app.css">
 <script src="/app.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="shell">
-  <aside class="side" aria-label="Projects">
-    <div class="brand">Aesop <span>Studio</span></div>
-    <button id="newProjectBtn" class="btn primary wide">New project</button>
-    <nav id="projectList" class="plist" aria-label="Project list"></nav>
-    <div class="side-foot">
-      <button class="linkish" data-global="providers">Providers</button>
-      <button class="linkish" data-global="evidence">Evidence</button>
+<div id="app" class="app exp-docked">
+  <header class="topbar">
+    <button id="explorerBtn" class="iconbtn" type="button" aria-label="Open projects" aria-controls="explorer" aria-expanded="false" data-icon="menu"></button>
+    <div class="brand" aria-label="Aesop Studio">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+        <rect x="1" y="1" width="30" height="30" rx="9" class="mark-bg"/>
+        <path d="M9.5 22.5 16 8.5l6.5 14" class="mark-stroke"/>
+        <path d="M12.2 17h7.6" class="mark-stroke"/>
+        <circle cx="16" cy="8.5" r="1.7" class="mark-dot"/>
+      </svg>
+      <span class="brand-name">Aesop Studio</span>
     </div>
+    <nav class="crumbs" aria-label="Breadcrumb"><ol id="crumbs"></ol></nav>
+    <div class="top-actions">
+      <button id="paletteBtn" class="cmdk" type="button" aria-label="Open command palette (Ctrl+K)" aria-haspopup="dialog" data-icon="search"><span class="cmdk-t">Search or jump to…</span><span class="keys" aria-hidden="true"><kbd>Ctrl</kbd><kbd>K</kbd></span></button>
+      <div id="routeInd" class="routeind" hidden></div>
+      <button id="helpBtn" class="iconbtn" type="button" aria-label="Keyboard shortcuts" aria-haspopup="dialog" data-icon="help"></button>
+      <button id="inspectorBtn" class="iconbtn" type="button" aria-label="Toggle inspector" aria-controls="inspector" aria-expanded="false" data-icon="panel"></button>
+    </div>
+  </header>
+
+  <nav class="rail" aria-label="Workspaces">
+    <div id="tabs" class="rail-tabs" role="tablist" aria-orientation="vertical" aria-label="Workspace" hidden>
+      <button role="tab" data-tab="chat" data-icon="chat" aria-selected="true"><span class="rl">Chat</span></button>
+      <button role="tab" data-tab="agent" data-icon="terminal"><span class="rl">Build</span></button>
+      <button role="tab" data-tab="research" data-icon="search"><span class="rl">Research</span></button>
+      <button role="tab" data-tab="memory" data-icon="layers"><span class="rl">Memory</span></button>
+      <button role="tab" data-tab="artifacts" data-icon="bookmark"><span class="rl">Saved</span></button>
+    </div>
+    <div class="rail-global">
+      <button class="railbtn" data-global="providers" data-icon="providers"><span class="rl">Providers</span></button>
+      <button class="railbtn" data-global="evidence" data-icon="evidence"><span class="rl">Evidence</span></button>
+    </div>
+  </nav>
+
+  <aside id="explorer" class="explorer pane" aria-label="Projects" tabindex="-1">
+    <div class="pane-head">
+      <h2>Projects</h2>
+      <button id="explorerClose" class="iconbtn ov-only" type="button" aria-label="Close projects" data-icon="x"></button>
+    </div>
+    <div class="explorer-new"><button id="newProjectBtn" class="btn primary wide" data-icon="plus">New project</button></div>
+    <nav id="projectList" class="plist" aria-label="Project list"></nav>
+    <div class="explorer-global">
+      <button class="navbtn" data-global="providers" data-icon="providers">Providers</button>
+      <button class="navbtn" data-global="evidence" data-icon="evidence">Evidence</button>
+    </div>
+    <div id="explorerSep" class="sep" role="separator" aria-orientation="vertical" aria-label="Resize projects panel" aria-controls="explorer" tabindex="0"></div>
   </aside>
-  <main id="main" tabindex="-1">
-    <header class="top">
-      <div>
+
+  <main id="main" class="canvas pane" tabindex="-1">
+    <header class="canvas-head">
+      <div class="top-title">
         <h1 id="projTitle">No project open</h1>
-        <p id="projMeta" class="muted"></p>
+        <p id="projMeta" class="meta"></p>
       </div>
       <div id="projControls" class="controls" hidden>
-        <label>Provider <select id="providerSel"></select></label>
-        <button id="settingsBtn" class="btn">Settings</button>
+        <label class="provider-pick"><span>Provider</span><select id="providerSel"></select></label>
+        <button id="settingsBtn" class="btn" data-icon="settings">Settings</button>
       </div>
     </header>
-    <nav id="tabs" class="tabs" role="tablist" hidden>
-      <button role="tab" data-tab="chat" aria-selected="true">Chat</button>
-      <button role="tab" data-tab="files">Files</button>
-      <button role="tab" data-tab="agent">Agent tasks</button>
-      <button role="tab" data-tab="research">Research</button>
-      <button role="tab" data-tab="memory">Memory</button>
-      <button role="tab" data-tab="artifacts">Saved</button>
-    </nav>
-    <div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
     <section id="view" class="view"></section>
   </main>
+
+  <aside id="inspector" class="inspector pane" aria-label="Inspector" tabindex="-1">
+    <div id="inspectorSep" class="sep" role="separator" aria-orientation="vertical" aria-label="Resize inspector" aria-controls="inspector" tabindex="0"></div>
+    <div class="insp-head">
+      <div id="itabs" class="itabs" role="tablist" aria-label="Inspector views">
+        <button role="tab" data-itab="preview" aria-selected="true" aria-controls="inspBody">Preview</button>
+        <button role="tab" data-itab="files" aria-selected="false" aria-controls="inspBody">Files</button>
+        <button role="tab" data-itab="changes" aria-selected="false" aria-controls="inspBody">Changes</button>
+        <button role="tab" data-itab="terminal" aria-selected="false" aria-controls="inspBody">Terminal</button>
+        <button role="tab" data-itab="logs" aria-selected="false" aria-controls="inspBody">Logs</button>
+      </div>
+      <button id="inspectorClose" class="iconbtn" type="button" aria-label="Close inspector" data-icon="x"></button>
+    </div>
+    <div id="inspBody" class="insp-body" role="tabpanel" tabindex="0"></div>
+  </aside>
 </div>
+<div id="scrim" class="scrim" hidden></div>
+<div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
 <dialog id="dlg"><form method="dialog" id="dlgForm"></form></dialog>
+<dialog id="palette" class="palette" aria-label="Command palette">
+  <div class="pal-in">
+    <div class="pal-search">
+      <input id="palInput" type="text" role="combobox" aria-expanded="true" aria-controls="palList" aria-autocomplete="list" aria-label="Type a command or project name" placeholder="Type a command or project…" autocomplete="off" spellcheck="false">
+    </div>
+    <ul id="palList" class="pal-list" role="listbox" aria-label="Commands"></ul>
+    <div class="pal-foot"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> run</span><span><kbd>Esc</kbd> close</span><span><kbd>Ctrl</kbd><kbd>1</kbd>–<kbd>3</kbd> Chat / Build / Research</span><span><kbd>Ctrl</kbd><kbd>Enter</kbd> send</span></div>
+  </div>
+</dialog>
 </body>
 </html>

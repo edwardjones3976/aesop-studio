@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import ledger, providers, winjob
+from . import ledger, openai_api, providers, winjob
 from .security import redact
 from .store import Store, new_id
 
@@ -74,11 +74,45 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+class _RedactingLog:
+    """Streams API deltas to the task log with redaction over whole spans.
+
+    Deltas are a few tokens long, so a secret can arrive split across several of them. The buffer is
+    redacted as a whole and only its settled prefix (up to whitespace at least HOLD characters before
+    the end) is written; the tail stays buffered until more text arrives or the stream ends.
+    """
+    HOLD = 160
+
+    def __init__(self, path: str):
+        self.f = open(path, "w", encoding="utf-8")
+        self.buf = ""
+
+    def write(self, delta: str) -> None:
+        self.buf += delta
+        if len(self.buf) < 2 * self.HOLD:
+            return
+        red = redact(self.buf)
+        limit = len(red) - self.HOLD
+        cut = max(red.rfind(" ", 0, limit), red.rfind("\n", 0, limit))
+        if cut <= 0:
+            return  # no safe boundary yet (e.g. one long token): keep buffering
+        self.f.write(red[:cut])
+        self.f.flush()
+        self.buf = red[cut:]
+
+    def close(self) -> None:
+        if self.buf:
+            self.f.write(redact(self.buf))
+            self.buf = ""
+        self.f.close()
+
+
 class Supervisor:
     def __init__(self, store: Store):
         self.store = store
         self.procs: dict[str, subprocess.Popen] = {}
         self.jobs: dict[str, object] = {}
+        self.api_cancel: dict[str, threading.Event] = {}
         self.cancel_flags: set[str] = set()
         self.lock = threading.Lock()
 
@@ -119,6 +153,8 @@ class Supervisor:
             state = route["state"] if route else "UNKNOWN_ROUTE"
             self._set(tid, "BLOCKED_OWNER", error=f"route {route_id} not usable for {mode}: {state}", ended=time.time())
             return tid
+        if route["billing_basis"] == "metered":
+            return self._start_api(tid, project, route_id, route, prompt, out_path, timeout)
         try:
             lid = ledger.reserve(self.store, route["provider"], route_id, route["billing_basis"], None, task_ref=tid)
         except ledger.BudgetError as e:
@@ -131,6 +167,72 @@ class Supervisor:
         threading.Thread(target=self._run, args=(tid, route_id, mode, cwd, prompt, out_path, timeout, lid,
                                                  project.get("model")), daemon=True).start()
         return tid
+
+    # ---- metered API route (no subprocess; streamed, reserved, settled from real usage) ----
+    def _start_api(self, tid, project, route_id, route, prompt, out_path, timeout) -> str:
+        model = project.get("model") if project.get("model") in openai_api.PRICES else openai_api.DEFAULT_MODEL
+        max_out = openai_api.DEFAULT_MAX_OUTPUT
+        try:
+            cap = openai_api.max_cost(model, len(prompt.encode("utf-8")), max_out)
+            lid = ledger.reserve(self.store, route["provider"], route_id, "metered", cap, task_ref=tid,
+                                 price_source=f"{model}: {openai_api.PRICE_SOURCE}")
+        except (ledger.BudgetError, openai_api.ApiError) as e:
+            self._set(tid, "BLOCKED_OWNER", error=str(e), ended=time.time())
+            return tid
+        cp = {"mode": "chat", "timeout": timeout, "ledger_id": lid, "model": model, "max_output_tokens": max_out,
+              "reservation_usd": cap}
+        self._set(tid, "RESERVED", checkpoint=json.dumps(cp), reservation_usd=cap)
+        ev = threading.Event()
+        with self.lock:
+            self.api_cancel[tid] = ev
+        threading.Thread(target=self._run_api, args=(tid, prompt, out_path, timeout, lid, model, max_out, ev),
+                         daemon=True).start()
+        return tid
+
+    def _run_api(self, tid, prompt, out_path, timeout, lid, model, max_out, ev):
+        self._set(tid, "RUNNING", started=time.time(),
+                  argv_meta=json.dumps({"endpoint": "POST /v1/responses", "model": model, "max_output_tokens": max_out}))
+
+        def finish_failed(msg: str, billed):
+            ledger.settle(self.store, lid, billed)
+            self._set(tid, "FAILED", error=redact(msg)[:500], ended=time.time())
+            with self.lock:
+                self.api_cancel.pop(tid, None)
+
+        try:  # pre-send: nothing can have been billed if this fails
+            key = openai_api.resolve_key()
+        except Exception as e:  # noqa: BLE001 - any failure here is pre-dispatch
+            return finish_failed(str(e) if isinstance(e, openai_api.ApiError) else "OpenAI key could not be resolved", 0)
+        log = _RedactingLog(out_path)
+        try:
+            r = openai_api.stream(prompt, model, max_out, log.write, ev, timeout, key=key)
+        except openai_api.ApiError as e:
+            log.close()
+            msg = str(e)
+            return finish_failed(msg, 0 if msg.startswith("HTTP 4") else None)  # unknown outcome keeps exposure
+        except Exception as e:  # noqa: BLE001 - never leave a task RUNNING with a live reservation
+            log.close()
+            return finish_failed(f"unexpected stream error: {type(e).__name__}", None)
+        finally:
+            key = None
+        log.close()
+        with self.lock:
+            self.api_cancel.pop(tid, None)
+        cp = json.loads(self.get(tid)["checkpoint"] or "{}")
+        cp["result"] = redact(r["text"])[:MAX_OUTPUT_BYTES]
+        if r["status"] == "cancelled" or not r["usage"]:
+            ledger.settle(self.store, lid, None)  # tokens may have been generated: keep reserved exposure
+            state = "CANCELLED" if r["status"] == "cancelled" else "EFFECT_UNKNOWN"
+            err, cost = "stream stopped before usage was reported; reservation kept as unresolved exposure", None
+        else:
+            cost = openai_api.actual_cost(model, r["usage"])
+            ledger.settle(self.store, lid, cost)
+            cp["usage"] = r["usage"]
+            state = "COMPLETED"
+            err = None if r["status"] == "completed" else f"response {r['status']} (output cap {max_out} tokens)"
+        cp["cost_usd"] = cost
+        self._set(tid, state, exit_code=0 if state == "COMPLETED" else None, ended=time.time(), error=err,
+                  checkpoint=json.dumps(cp))
 
     def _run(self, tid, route_id, mode, cwd, prompt, out_path, timeout, lid, model):
         last_file = out_path + ".last.txt"
@@ -259,6 +361,10 @@ class Supervisor:
     def cancel(self, tid: str) -> bool:
         with self.lock:
             proc = self.procs.get(tid)
+            api_ev = self.api_cancel.get(tid)
+        if api_ev:
+            api_ev.set()
+            return True
         if not proc:
             return False
         self.cancel_flags.add(tid)
@@ -289,7 +395,9 @@ class Supervisor:
             self._set(t["id"], new_state, error=note, ended=time.time())
             cp = json.loads(t["checkpoint"] or "{}")
             if cp.get("ledger_id"):
-                ledger.settle(self.store, cp["ledger_id"], None if new_state == "EFFECT_UNKNOWN" else 0)
+                metered_started = cp.get("reservation_usd") and t["state"] in ("STARTING", "RUNNING")
+                ledger.settle(self.store, cp["ledger_id"],
+                              None if new_state == "EFFECT_UNKNOWN" or metered_started else 0)
             if t["state"] in ("STARTING", "RUNNING"):
                 self.open_repair(t["id"], f"{t['state']}->{new_state}", "task supervision / restart reconciliation")
             outcomes.append({"task_id": t["id"], "from": t["state"], "to": new_state, "note": note})

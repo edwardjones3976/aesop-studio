@@ -323,6 +323,20 @@ class TestHttp(unittest.TestCase):
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_build_list_excludes_chat_tasks(self):
+        cookie, csrf = self.login()
+        app = self.srv.app
+        root = self.tmp / "buildlist"
+        root.mkdir(exist_ok=True)
+        p = app.svc.create_project("B", str(root), "simulated")
+        now = time.time()
+        for tid, mode in (("task_chatx", "chat"), ("task_agentx", "agent")):
+            app.store.x("INSERT INTO tasks(id,project_id,provider,prompt,state,created,checkpoint) VALUES(?,?,?,?,?,?,?)",
+                        (tid, p["id"], "simulated", "x", "COMPLETED", now, json.dumps({"mode": mode})))
+        st, _, body = self.req("GET", f"/api/projects/{p['id']}/tasks", headers={"Cookie": cookie})
+        self.assertEqual(st, 200)
+        self.assertEqual([t["id"] for t in json.loads(body)], ["task_agentx"])
+
     def test_static_and_no_secrets_in_bundle(self):
         st, _, body = self.req("GET", "/app.js")
         self.assertEqual(st, 200)

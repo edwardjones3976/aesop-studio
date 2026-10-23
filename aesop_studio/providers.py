@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .store import Store
 
-STATES = ("UNVERIFIED", "AUTH_REQUIRED", "READY_INCLUDED", "READY_METERED_DISABLED",
+STATES = ("UNVERIFIED", "AUTH_REQUIRED", "READY_INCLUDED", "READY_METERED", "READY_METERED_DISABLED",
           "HANDOFF_ONLY", "UNAVAILABLE", "BLOCKED_POLICY", "SIMULATED")
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # Variables that would redirect a CLI from subscription sign-in to a separately billed route.
@@ -121,11 +121,17 @@ def probe() -> dict[str, dict]:
     r["last_verified_at"] = now
     routes["claude"] = r
 
-    r = _base("openai", "api", "api.openai.com", ["chat"], "API key", "metered",
-              "Separately metered everyday route; disabled until the owner sets operating limits.")
-    r.update(state="READY_METERED_DISABLED" if os.environ.get("OPENAI_API_KEY") else "UNAVAILABLE",
-             evidence="OPENAI_API_KEY presence only (value never read)", last_verified_at=now,
-             incremental_cost_status="metered; runtime budget not configured")
+    from . import openai_api
+    r = _base("openai", "api", "api.openai.com /v1/responses (streaming)", ["chat"], "API key (OPENAI_API_KEY)",
+              "metered", "Metered per token. Every call has a pre-reserved maximum cost; enabled only by the "
+              "mission permit or an owner-set monthly operating limit.")
+    r.update(state="READY_METERED_DISABLED" if openai_api.key_present() else "UNAVAILABLE",
+             evidence=(f"Key source: {openai_api.key_source()} (presence only; value never shown)"
+                       if openai_api.key_present() else "No OPENAI_API_KEY and no DPAPI provider secret found"),
+             last_verified_at=now, version=f"models: {', '.join(openai_api.PRICES)}",
+             incremental_cost_status=f"metered; prices: {openai_api.PRICE_SOURCE}",
+             filesystem_scope="none (no file access; only the previewed context is sent)",
+             cancellation_behavior="stream closed locally; tokens already generated may still bill (kept as exposure)")
     routes["openai-api"] = r
 
     for rid, prov, note in (("cursor", "cursor", "cursor-agent CLI not installed; open Cursor manually"),
@@ -152,11 +158,21 @@ def refresh(store: Store) -> dict[str, dict]:
 
 def cached(store: Store) -> dict[str, dict]:
     row = store.one("SELECT v FROM kv WHERE k='routes'")
-    return json.loads(row["v"]) if row else refresh(store)
+    routes = json.loads(row["v"]) if row else refresh(store)
+    api = routes.get("openai-api")
+    if api and api["state"] == "READY_METERED_DISABLED":
+        from . import ledger
+        purpose = ledger.active_purpose(store)
+        if purpose:  # overlay live spend controls on the probed state
+            api = dict(api, state="READY_METERED", incremental_cost_status=f"metered; billing the {purpose} "
+                       f"envelope; {api['incremental_cost_status'].split('; ', 1)[-1]}")
+            routes["openai-api"] = api
+    return routes
 
 
 def usable(route: dict, mode: str) -> bool:
-    return route["state"] in ("READY_INCLUDED", "SIMULATED") and mode in route["supported_modes"]
+    return (route["state"] in ("READY_INCLUDED", "READY_METERED", "SIMULATED")
+            and mode in route["supported_modes"])
 
 
 def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | None = None) -> list[str]:

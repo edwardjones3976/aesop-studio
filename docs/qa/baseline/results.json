@@ -1,0 +1,231 @@
+[
+ {
+  "viewport": "1920x1080",
+  "view": "chat",
+  "scrollWidth": 1920,
+  "clientWidth": 1920,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1920x1080-chat.png"
+ },
+ {
+  "viewport": "1920x1080",
+  "view": "agent",
+  "scrollWidth": 1920,
+  "clientWidth": 1920,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1920x1080-agent.png"
+ },
+ {
+  "viewport": "1920x1080",
+  "view": "research",
+  "scrollWidth": 1920,
+  "clientWidth": 1920,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1920x1080-research.png"
+ },
+ {
+  "viewport": "1920x1080",
+  "view": "evidence",
+  "scrollWidth": 1920,
+  "clientWidth": 1920,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1920x1080-evidence.png"
+ },
+ {
+  "viewport": "1440x900",
+  "view": "chat",
+  "scrollWidth": 1440,
+  "clientWidth": 1440,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1440x900-chat.png"
+ },
+ {
+  "viewport": "1440x900",
+  "view": "agent",
+  "scrollWidth": 1440,
+  "clientWidth": 1440,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1440x900-agent.png"
+ },
+ {
+  "viewport": "1440x900",
+  "view": "research",
+  "scrollWidth": 1440,
+  "clientWidth": 1440,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1440x900-research.png"
+ },
+ {
+  "viewport": "1440x900",
+  "view": "evidence",
+  "scrollWidth": 1440,
+  "clientWidth": 1440,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1440x900-evidence.png"
+ },
+ {
+  "viewport": "1366x768",
+  "view": "chat",
+  "scrollWidth": 1366,
+  "clientWidth": 1366,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1366x768-chat.png"
+ },
+ {
+  "viewport": "1366x768",
+  "view": "agent",
+  "scrollWidth": 1366,
+  "clientWidth": 1366,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1366x768-agent.png"
+ },
+ {
+  "viewport": "1366x768",
+  "view": "research",
+  "scrollWidth": 1366,
+  "clientWidth": 1366,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1366x768-research.png"
+ },
+ {
+  "viewport": "1366x768",
+  "view": "evidence",
+  "scrollWidth": 1366,
+  "clientWidth": 1366,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1366x768-evidence.png"
+ },
+ {
+  "viewport": "1024x768",
+  "view": "chat",
+  "scrollWidth": 1024,
+  "clientWidth": 1024,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1024x768-chat.png"
+ },
+ {
+  "viewport": "1024x768",
+  "view": "agent",
+  "scrollWidth": 1024,
+  "clientWidth": 1024,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1024x768-agent.png"
+ },
+ {
+  "viewport": "1024x768",
+  "view": "research",
+  "scrollWidth": 1024,
+  "clientWidth": 1024,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1024x768-research.png"
+ },
+ {
+  "viewport": "1024x768",
+  "view": "evidence",
+  "scrollWidth": 1024,
+  "clientWidth": 1024,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\1024x768-evidence.png"
+ },
+ {
+  "viewport": "768x1024",
+  "view": "chat",
+  "scrollWidth": 768,
+  "clientWidth": 768,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\768x1024-chat.png"
+ },
+ {
+  "viewport": "768x1024",
+  "view": "agent",
+  "scrollWidth": 768,
+  "clientWidth": 768,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\768x1024-agent.png"
+ },
+ {
+  "viewport": "768x1024",
+  "view": "research",
+  "scrollWidth": 768,
+  "clientWidth": 768,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\768x1024-research.png"
+ },
+ {
+  "viewport": "768x1024",
+  "view": "evidence",
+  "scrollWidth": 768,
+  "clientWidth": 768,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\768x1024-evidence.png"
+ },
+ {
+  "viewport": "390x844",
+  "view": "chat",
+  "scrollWidth": 390,
+  "clientWidth": 390,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\390x844-chat.png"
+ },
+ {
+  "viewport": "390x844",
+  "view": "agent",
+  "scrollWidth": 390,
+  "clientWidth": 390,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\390x844-agent.png"
+ },
+ {
+  "viewport": "390x844",
+  "view": "research",
+  "scrollWidth": 390,
+  "clientWidth": 390,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\390x844-research.png"
+ },
+ {
+  "viewport": "390x844",
+  "view": "evidence",
+  "scrollWidth": 390,
+  "clientWidth": 390,
+  "overflow": false,
+  "screenshot": "docs\\qa\\baseline\\390x844-evidence.png"
+ },
+ {
+  "viewport": "360x780",
+  "view": "chat",
+  "scrollWidth": 388,
+  "clientWidth": 360,
+  "overflow": true,
+  "screenshot": "docs\\qa\\baseline\\360x780-chat.png"
+ },
+ {
+  "viewport": "360x780",
+  "view": "agent",
+  "scrollWidth": 388,
+  "clientWidth": 360,
+  "overflow": true,
+  "screenshot": "docs\\qa\\baseline\\360x780-agent.png"
+ },
+ {
+  "viewport": "360x780",
+  "view": "research",
+  "scrollWidth": 388,
+  "clientWidth": 360,
+  "overflow": true,
+  "screenshot": "docs\\qa\\baseline\\360x780-research.png"
+ },
+ {
+  "viewport": "360x780",
+  "view": "evidence",
+  "scrollWidth": 388,
+  "clientWidth": 360,
+  "overflow": true,
+  "screenshot": "docs\\qa\\baseline\\360x780-evidence.png"
+ },
+ {
+  "page_errors": [
+   "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ]
+ }
+]

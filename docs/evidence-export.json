@@ -1,13 +1,18 @@
 {
  "budget": {
   "ceiling": 165.0,
-  "settled": 0,
+  "settled": 9.8e-05,
   "outstanding": 0,
   "ambiguous": 0,
-  "committed": 0,
-  "remaining": 165.0,
-  "included_uses": 1,
+  "committed": 9.8e-05,
+  "remaining": 164.999902,
+  "included_uses": 3,
+  "metered_calls": 2,
   "permit": false,
+  "runtime_limit": 0.0,
+  "runtime_month_settled": 0,
+  "runtime_month_outstanding": 0,
+  "runtime_month_remaining": 0.0,
   "phase": "normal"
  },
  "acceptance": [
@@ -17,7 +22,7 @@
    "implementation": "services.py send/messages/save_artifact; store.py SQLite",
    "test": "tests TestWorkflow.test_ac01 (simulated) + live codex/claude chat with synthetic file",
    "status": "PASS_LIVE",
-   "evidence": "Live: codex 9.65s and claude 6.41s returned correct answer from attached synthetic file; restart re-read messages/artifacts from disk."
+   "evidence": "Live UI journey (tools/ui_journey.py, docs/qa/journey): create project \u2192 transfer permission \u2192 upload synthetic file \u2192 codex answer (9.14s provider wait) \u2192 saved artifact \u2192 server restart \u2192 resumed with all messages and artifact. Earlier CLI-level runs on codex 9.65s and claude 6.41s."
   },
   {
    "id": "AC02",
@@ -25,7 +30,7 @@
    "implementation": "providers.py probe; services.send Conflict on unconfirmed switch",
    "test": "test_ac02 + live run on codex (default) and claude (confirm_switch)",
    "status": "PASS_LIVE",
-   "evidence": "codex-cli 0.163.0 (ChatGPT sign-in) and Claude Code 2.1.309 (claude.ai sign-in) both READY_INCLUDED and returned real outputs. Cursor/Perplexity/Firecrawl are handoff only and not counted."
+   "evidence": "Three real routes returned inspectable answers: codex (official CLI, ChatGPT plan), claude (official CLI, claude.ai plan), openai-api (separately billed Responses API, streamed). Explicit owner switch is required; there is no automatic fallback. Cursor/Perplexity/Firecrawl are handoff only and not counted."
   },
   {
    "id": "AC03",
@@ -64,8 +69,8 @@
    "requirement": "Billing limits under concurrency; prohibited billers blocked",
    "implementation": "ledger.py BEGIN IMMEDIATE reservation; OpenAI-only; permit off at start",
    "test": "test_ac07_ceiling_and_billers (30 concurrent $10 reservations)",
-   "status": "PASS_OFFLINE",
-   "evidence": "Exactly 16 accepted ($160); ambiguous timeout exposure retained; non-OpenAI metered blocked."
+   "status": "PASS_LIVE",
+   "evidence": "Offline: 30 concurrent reservations, exactly $160 accepted; runtime vs mission envelopes; limit-too-small blocks before any request is sent; 401 settles $0; cancel keeps exposure; non-OpenAI metered blocked (tests/test_openai_route.py). Live: 3 gpt-6-luna calls, each reserved $0.0012 and settled from reported usage (total $0.000126). Permit off at restart and at completion."
   },
   {
    "id": "AC08",
@@ -81,7 +86,7 @@
    "implementation": "redact() on output/exports; API-key env vars stripped from child env; no credential file reads",
    "test": "test_ac09_redaction + simulated output redaction in AC01",
    "status": "PASS_OFFLINE",
-   "evidence": "Secrets never sent to browser; HttpOnly session cookie; launch code one-time."
+   "evidence": "Redaction tests; the API key is resolved at call time (env or the owner's DPAPI store), never logged, stored or returned (test asserts it is absent from tasks, events and output); billing env vars are stripped from CLI children; CLI log no longer shown as chat text."
   },
   {
    "id": "AC10",
@@ -97,7 +102,7 @@
    "implementation": "static/ vanilla JS, keyboard tabs, focus rings, responsive grid",
    "test": "Real Chrome journey on Windows",
    "status": "PASS_LIVE",
-   "evidence": "Real Chrome on Windows: create project, attach, chat (codex 10.1s end-to-end), server restart, resume. No horizontal overflow on all 8 views at 1295px and at 488px (Chrome's minimum popup width, phone layout active). CSP blocked eval during testing, as designed."
+   "evidence": "Coal/Ember UI contract: 49 screenshots at 7 target viewports with 0 overflow and 0 page errors; Ctrl+K palette with focus restore; Ctrl+1/2/3 (not while typing); composer 98\u2013240px; persisted keyboard-resizable panes; 200% zoom clean; reduced motion; 0 unnamed controls; controls \u226540px. Real UI journey on live routes. Gaps: no screen-reader or real-touch test (docs/qa/after/README.md)."
   },
   {
    "id": "AC12",
@@ -113,7 +118,7 @@
    "implementation": "Subordinate session 2: non-contributing reviewer",
    "test": "Review findings dispositioned",
    "status": "PASS",
-   "evidence": "Independent non-contributing reviewer: 10 findings, 8 fixed and re-verified RESOLVED by the same reviewer, 2 documented/accepted. Re-review raised 2 new low issues: handle-reuse race fixed; post-launch Job Object window documented. No PR/merge: local repo, no remote."
+   "evidence": "Independent non-contributing reviewer (session 2), 3 rounds: (1) 10 findings, 8 fixed and confirmed, 2 documented; (2) re-review raised 2 new low issues, 1 fixed and 1 documented; (3) review of the paid route and redesign: no key leak, no XSS/CSRF; 2 medium (byte-based reservation bound; redaction over split stream spans) and 3 low fixed with tests; 1 low accepted (the mission permit bills dev-test chat by design). No PR/merge: local repo, no remote."
   }
  ],
  "routes": [
@@ -140,12 +145,12 @@
   {
    "id": "openai-api",
    "provider": "openai",
-   "state": "UNAVAILABLE",
-   "version": null,
+   "state": "READY_METERED_DISABLED",
+   "version": "models: gpt-6-luna, gpt-6.1-sol, gpt-6-astra",
    "billing_basis": "metered",
-   "incremental_cost_status": "metered; runtime budget not configured",
-   "evidence": "OPENAI_API_KEY presence only (value never read)",
-   "limitations": "Separately metered everyday route; disabled until the owner sets operating limits."
+   "incremental_cost_status": "metered; prices: developers.openai.com/api/docs/pricing (Standard tier), verified 2026-10-23",
+   "evidence": "Key source: DPAPI-protected file openai.dpapi (owner provider secret store) (presence only; value never shown)",
+   "limitations": "Metered per token. Every call has a pre-reserved maximum cost; enabled only by the mission permit or an owner-set monthly operating limit."
   },
   {
    "id": "cursor",
@@ -179,26 +184,39 @@
   }
  ],
  "tasks": {
-  "total": 1,
+  "total": 5,
   "by_state": {
-   "COMPLETED": 1
+   "COMPLETED": 5
   },
   "reconciliations": 0,
   "period": {
    "a": 1792744320.9420145,
-   "b": 1792744320.9420145
+   "b": 1792748128.5187466
   },
   "repairs": []
  },
  "latency": [
   {
    "route": "codex/chat",
-   "n": 1,
-   "median_s": 9.22,
-   "min_s": 9.22,
+   "n": 3,
+   "median_s": 9.14,
+   "min_s": 8.96,
    "max_s": 9.22,
    "samples": [
-    9.22
+    9.22,
+    8.96,
+    9.14
+   ]
+  },
+  {
+   "route": "openai-api/chat",
+   "n": 2,
+   "median_s": 2.4,
+   "min_s": 1.69,
+   "max_s": 3.12,
+   "samples": [
+    3.12,
+    1.69
    ]
   }
  ]

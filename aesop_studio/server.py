@@ -153,6 +153,8 @@ class Handler(BaseHTTPRequestHandler):
             "Location": "/", "Set-Cookie": f"aesop_session={sess}; HttpOnly; SameSite=Strict; Path=/"})
 
     def _static(self, path: str):
+        if path == "/favicon.ico":  # the page declares its own icon; answer quietly instead of 404 noise
+            return self._send(204, b"", "image/x-icon")
         if path == "/":
             path = "/index.html"
         f = (STATIC / path.lstrip("/")).resolve()
@@ -268,8 +270,8 @@ class Handler(BaseHTTPRequestHandler):
     def tasks(self, sess, pid):
         self.app.svc.project(pid)
         self.json(self.app.store.q("SELECT id,provider,state,prompt,error,exit_code,created,started,ended,"
-                                   "changed_files,checkpoint FROM tasks WHERE project_id=? ORDER BY created DESC "
-                                   "LIMIT 50", (pid,)))
+                                   "changed_files,checkpoint FROM tasks WHERE project_id=? AND checkpoint LIKE '%\"mode\": \"agent\"%' "
+                                   "ORDER BY created DESC LIMIT 50", (pid,)))
 
     @route("POST", r"/api/projects/(\w+)/tasks")
     def task_new(self, sess, pid):
@@ -295,7 +297,10 @@ class Handler(BaseHTTPRequestHandler):
         t = self._task(tid)
         off = int((self.query.get("offset") or ["0"])[0])
         out, new_off = self.app.sup.output(tid, off)
-        self.json({"task": t, "output": out, "offset": new_off})
+        cp = json.loads(t["checkpoint"] or "{}")
+        # Metered API tasks stream answer text; CLI task logs echo prompts and banners and are not the answer.
+        self.json({"task": t, "output": out, "offset": new_off,
+                   "stream_is_answer": bool(cp.get("model") and "reservation_usd" in cp)})
 
     @route("POST", r"/api/tasks/(\w+)/cancel")
     def task_cancel(self, sess, tid):
@@ -371,6 +376,24 @@ class Handler(BaseHTTPRequestHandler):
     @route("GET", r"/api/evidence")
     def evidence_get(self, sess):
         self.json(evidence.collect(self.app.store))
+
+    @route("POST", r"/api/budget")
+    def budget_set(self, sess):
+        """Owner spend controls. The mission permit is forced off again at every server start."""
+        b = self.body()
+        if "runtime_limit_usd" in b:
+            ledger.set_runtime_limit(self.app.store, float(b["runtime_limit_usd"] or 0))
+        if "mission_permit" in b:
+            ledger.set_permit(self.app.store, bool(b["mission_permit"]))
+        self.app.store.event("budget_change", None, **{k: b[k] for k in ("runtime_limit_usd", "mission_permit")
+                                                        if k in b})
+        self.json({"budget": ledger.totals(self.app.store), "routes": providers.cached(self.app.store)})
+
+    @route("POST", r"/api/ledger/(\w+)/resolve")
+    def ledger_resolve(self, sess, lid):
+        b = self.body()
+        ledger.resolve(self.app.store, lid, float(b.get("actual_usd", "nan")), str(b.get("note", "")))
+        self.json({"budget": ledger.totals(self.app.store)})
 
     @route("POST", r"/api/workflow-measure")
     def workflow_measure(self, sess):

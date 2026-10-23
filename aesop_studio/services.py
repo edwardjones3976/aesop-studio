@@ -152,6 +152,8 @@ class Services:
         status = "generated" if t["state"] == "COMPLETED" and result else "failed"
         content = result if status == "generated" else f"Request {t['state'].lower()}: {t['error'] or 'no output'}"
         meta.update(state=t["state"], duration_s=round((t["ended"] or 0) - (t["started"] or t["created"]), 2))
+        if "cost_usd" in cp:
+            meta.update(cost_usd=cp["cost_usd"], usage=cp.get("usage"), model=cp.get("model"))
         self.s.x("UPDATE messages SET content=?, status=?, meta=? WHERE id=?",
                  (content, status, json.dumps(meta), m["id"]))
         self.s.event("chat_result", None, task_id=t["id"], provider=t["provider"], state=t["state"],

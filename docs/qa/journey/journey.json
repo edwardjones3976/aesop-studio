@@ -1,0 +1,37 @@
+{
+ "steps": [
+  {
+   "step": "project_created",
+   "title": "Live journey (QA, synthetic)"
+  },
+  {
+   "step": "file_attached"
+  },
+  {
+   "step": "codex_answer",
+   "end_to_end_s": 9.44
+  },
+  {
+   "step": "artifact_saved"
+  },
+  {
+   "step": "permit_on",
+   "aria": "true"
+  },
+  {
+   "step": "api_answer_with_cost",
+   "end_to_end_s": 3.36
+  },
+  {
+   "step": "permit_off",
+   "aria": "false"
+  },
+  {
+   "step": "resumed",
+   "has_codex_answer": true,
+   "has_cost": true,
+   "artifact_present": true
+  }
+ ],
+ "page_errors": []
+}

@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS memory(
 CREATE TABLE IF NOT EXISTS ledger(
   id TEXT PRIMARY KEY, provider TEXT NOT NULL, route TEXT NOT NULL, billing_basis TEXT NOT NULL,
   task_ref TEXT, reservation_usd REAL NOT NULL, settled_usd REAL, status TEXT NOT NULL,
-  price_source TEXT, created REAL NOT NULL, settled REAL);
+  price_source TEXT, created REAL NOT NULL, settled REAL, purpose TEXT NOT NULL DEFAULT 'mission');
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, project_id TEXT, data TEXT NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS repairs(
@@ -70,6 +70,10 @@ class Store:
         self.write_lock = threading.RLock()
         with self.conn() as c:
             c.executescript(SCHEMA)
+            cols = {r[1] for r in c.execute("PRAGMA table_info(ledger)")}
+            if "purpose" not in cols:  # migrate stores created before the runtime envelope existed
+                c.execute("ALTER TABLE ledger ADD COLUMN purpose TEXT NOT NULL DEFAULT 'mission'")
+                c.execute("UPDATE ledger SET purpose='included' WHERE billing_basis='subscription_included'")
 
     def _connect(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=30, isolation_level=None, check_same_thread=False)

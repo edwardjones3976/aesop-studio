@@ -1,9 +1,74 @@
 [
- {"source": "OpenAI — Codex authentication", "url": "https://developers.openai.com/codex/auth/", "context": "Codex CLI sign-in options", "method": "Official documentation", "result": "Codex supports ChatGPT-plan sign-in or API-key auth; the two bill differently.", "limitations": "Plan quotas change; reverify at use.", "decision": "Use `codex login status` only; ChatGPT sign-in = READY_INCLUDED, API key = metered and disabled."},
- {"source": "Anthropic — Claude Code API key precedence", "url": "https://support.claude.com/en/articles/12304248-manage-api-key-environment-variables-in-claude-code", "context": "Auth precedence", "method": "Official help article", "result": "ANTHROPIC_API_KEY takes precedence over subscription sign-in.", "limitations": "Behaviour may change by version.", "decision": "Strip API-key env vars from child processes; mark route BLOCKED_POLICY if the variable is present."},
- {"source": "SQLite — Online Backup API", "url": "https://www.sqlite.org/backup.html", "context": "Consistent snapshots", "method": "Official documentation", "result": "Backup API copies a consistent snapshot while the DB is in use.", "limitations": "Files outside the DB are copied separately.", "decision": "Backup = backup API snapshot + hashed file manifest; restore only to an empty separate folder."},
- {"source": "Open WebUI — license", "url": "https://docs.openwebui.com/license/", "context": "Foundation comparison", "method": "Official documentation", "result": "Recent versions carry a branding-preservation clause on top of BSD-3.", "limitations": "Terms vary by version.", "decision": "Not adopted: large stack, does not supervise official agent CLIs."},
- {"source": "LibreChat documentation", "url": "https://www.librechat.ai/docs", "context": "Foundation comparison", "method": "Official documentation", "result": "Multi-provider chat built on API keys, with MongoDB and Docker-first deployment.", "limitations": "Subscription-signed CLIs are not first-class routes.", "decision": "Not adopted: it would push routes onto metered APIs, which the $0 non-OpenAI rule forbids."},
- {"source": "Anthropic — multi-agent research system (2025-06-13)", "url": "https://www.anthropic.com/research/multi-agent-research-system", "context": "Delegation cost", "method": "Engineering case study", "result": "Multi-agent runs used about 15× the tokens of chat; they gain on breadth-first tasks.", "limitations": "Anthropic's internal workloads only.", "decision": "Cap at two subordinate sessions; do not spawn agent swarms."},
- {"source": "METR — early-2025 AI developer study (2025-07-10) and update (2026-02-24)", "url": "https://metr.org/blog/2025-07-10-early-2025-ai-experienced-os-dev-study/", "context": "Productivity claims", "method": "Randomized controlled trial with experienced OSS developers", "result": "Developers were 19% slower with AI tools while believing they were faster; the later update discusses limitations.", "limitations": "Small sample in a specific setting.", "decision": "Make no time-saving claim without measured owner trials (AC12 stays UNVERIFIED)."}
+ {
+  "source": "OpenAI API pricing (Standard tier)",
+  "url": "https://developers.openai.com/api/docs/pricing",
+  "context": "Bounding metered reservations",
+  "method": "Official price table, fetched 2026-10-23 with Studio's own SSRF-safe fetcher",
+  "result": "gpt-6-luna $0.10/$0.50, gpt-6.1-sol $2/$10, gpt-6-astra $10/$50 per 1M input/output tokens; reasoning tokens bill as output.",
+  "limitations": "Prices change; cached-input discounts are ignored (conservative). Data-residency endpoints add 10%, not used.",
+  "decision": "Price table pinned in openai_api.py with source and date; unknown models are refused; default gpt-6-luna with a 2,000-token output cap."
+ },
+ {
+  "source": "OpenAI — Codex authentication",
+  "url": "https://developers.openai.com/codex/auth/",
+  "context": "Codex CLI sign-in options",
+  "method": "Official documentation",
+  "result": "Codex supports ChatGPT-plan sign-in or API-key auth; the two bill differently.",
+  "limitations": "Plan quotas change; reverify at use.",
+  "decision": "Use `codex login status` only; ChatGPT sign-in = READY_INCLUDED, API key = metered and disabled."
+ },
+ {
+  "source": "Anthropic — Claude Code API key precedence",
+  "url": "https://support.claude.com/en/articles/12304248-manage-api-key-environment-variables-in-claude-code",
+  "context": "Auth precedence",
+  "method": "Official help article",
+  "result": "ANTHROPIC_API_KEY takes precedence over subscription sign-in.",
+  "limitations": "Behaviour may change by version.",
+  "decision": "Strip API-key env vars from child processes; mark route BLOCKED_POLICY if the variable is present."
+ },
+ {
+  "source": "SQLite — Online Backup API",
+  "url": "https://www.sqlite.org/backup.html",
+  "context": "Consistent snapshots",
+  "method": "Official documentation",
+  "result": "Backup API copies a consistent snapshot while the DB is in use.",
+  "limitations": "Files outside the DB are copied separately.",
+  "decision": "Backup = backup API snapshot + hashed file manifest; restore only to an empty separate folder."
+ },
+ {
+  "source": "Open WebUI — license",
+  "url": "https://docs.openwebui.com/license/",
+  "context": "Foundation comparison",
+  "method": "Official documentation",
+  "result": "Recent versions carry a branding-preservation clause on top of BSD-3.",
+  "limitations": "Terms vary by version.",
+  "decision": "Not adopted: large stack, does not supervise official agent CLIs."
+ },
+ {
+  "source": "LibreChat documentation",
+  "url": "https://www.librechat.ai/docs",
+  "context": "Foundation comparison",
+  "method": "Official documentation",
+  "result": "Multi-provider chat built on API keys, with MongoDB and Docker-first deployment.",
+  "limitations": "Subscription-signed CLIs are not first-class routes.",
+  "decision": "Not adopted: it would push routes onto metered APIs, which the $0 non-OpenAI rule forbids."
+ },
+ {
+  "source": "Anthropic — multi-agent research system (2025-06-13)",
+  "url": "https://www.anthropic.com/research/multi-agent-research-system",
+  "context": "Delegation cost",
+  "method": "Engineering case study",
+  "result": "Multi-agent runs used about 15× the tokens of chat; they gain on breadth-first tasks.",
+  "limitations": "Anthropic's internal workloads only.",
+  "decision": "Cap at two subordinate sessions; do not spawn agent swarms."
+ },
+ {
+  "source": "METR — early-2025 AI developer study (2025-07-10) and update (2026-02-24)",
+  "url": "https://metr.org/blog/2025-07-10-early-2025-ai-experienced-os-dev-study/",
+  "context": "Productivity claims",
+  "method": "Randomized controlled trial with experienced OSS developers",
+  "result": "Developers were 19% slower with AI tools while believing they were faster; the later update discusses limitations.",
+  "limitations": "Small sample in a specific setting.",
+  "decision": "Make no time-saving claim without measured owner trials (AC12 stays UNVERIFIED)."
+ }
 ]

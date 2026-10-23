@@ -25,10 +25,21 @@ Data lives in `%LOCALAPPDATA%\AesopStudio` (override with `-Data` or `AESOP_DATA
 |---|---|---|
 | `codex` | `codex login status` → "Logged in using ChatGPT" | ChatGPT plan quota, $0 incremental |
 | `claude` | `claude auth status` → `authMethod: claude.ai` | Claude plan quota, $0 incremental |
-| `openai-api` | `OPENAI_API_KEY` present | Metered, **disabled** until the owner sets operating limits |
+| `openai-api` | `OPENAI_API_KEY` present (value never read into logs/UI) | Metered per token, streamed. Off until you set a monthly limit or turn on the mission permit |
 | cursor / perplexity / firecrawl | not integrated | Handoff only, not counted as integrations |
 
 Studio never reads credential files. `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are removed from child-process environments so the CLIs use subscription sign-in. To sign in: `codex login`, `claude auth login`. After that, choose **Providers → Re-verify** in the app.
+
+## Paid OpenAI API route (optional)
+
+This is the only route that costs money. It calls the OpenAI Responses API directly, streams the answer into the chat, and records the exact cost of each request.
+
+1. Create a key at platform.openai.com. **Do not paste it into chat.** Store it yourself:
+   `setx OPENAI_API_KEY "sk-..."` in a new terminal, then `.\stop.ps1; .\start.ps1`.
+2. In **Evidence → Spend controls**, set a **monthly operating limit**. Or turn on the **mission development permit** to bill the one-time $165 development envelope; it switches off at every restart.
+3. In project **Settings**, choose `openai-api` as the provider and, optionally, a model: `gpt-6-luna` (default, $0.10/$0.50 per 1M tokens), `gpt-6.1-sol` ($2/$10) or `gpt-6-astra` ($10/$50). Prices were verified 2026-10-23 from developers.openai.com/api/docs/pricing.
+
+Each request is capped at 2,000 output tokens. Its worst-case cost (input estimate + full output allowance + 10%) is reserved **before** sending, and the request is refused if that would exceed the limit. The actual cost from the API's usage report then replaces the reservation. A request that is cancelled or cut off keeps its reservation as unresolved exposure, because generated tokens may still be billed. Requests use `store: false`. The key is removed from every CLI child process.
 
 ## Permissions model
 

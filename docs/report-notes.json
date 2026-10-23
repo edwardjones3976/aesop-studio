@@ -1,6 +1,6 @@
 {
  "status": "COMPLETE_WITH_DOCUMENTED_LIMITS",
- "summary_html": "<p><strong>Implemented, tested, independently reviewed and re-reviewed, and running locally</strong> at http://127.0.0.1:8765. Not merged: there is no remote repository.</p><p>Incremental spend: <strong>$0.00</strong>. Both live routes use the existing ChatGPT and Claude plan sign-ins, no OpenAI API calls were made, and the billable permit is off. Remaining limits: owner usability trial not done (AC12 benefit unverified); Codex chat sandbox can read outside its folder (documented); a brief post-launch window before Job Object assignment (documented, with taskkill fallback); no read-only status links to other projects (no grant given).</p>",
+ "summary_html": "<p><strong>Implemented, tested (36 automated tests plus Playwright UI suites), independently reviewed in 3 rounds, and running locally</strong> at http://127.0.0.1:8765. Not merged: there is no remote repository.</p><p><strong>Mission spend: $0.000126 of $165</strong> (3 bounded gpt-6-luna calls via the OpenAI API, each reserved at $0.0012 and settled from reported usage). The permit is off; there is no outstanding or ambiguous exposure. Non-OpenAI: one early Firecrawl search used 2 credits, and whether those were free is unverified. Remaining limits: owner usability trial not done (AC12); Codex chat sandbox can read outside its folder; no screen-reader or real-touch test of the UI.</p>",
  "live": [
   [
    "Route probe",
@@ -57,8 +57,28 @@
   [
    "Re-review",
    "8 of 8 changed findings RESOLVED; new handle-reuse race fixed"
+  ],
+  [
+   "Paid OpenAI route (Responses API, streamed)",
+   "gpt-6-luna answered correctly; first text at 4.1s; reserved $0.0012, actual $0.000028–$0.00005 per call"
+  ],
+  [
+   "Coal/Ember UI, 7 viewports × 7 views",
+   "49 screenshots, 0 horizontal overflow, 0 page errors (baseline: overflow on every view at 360px)"
+  ],
+  [
+   "Keyboard/a11y",
+   "Ctrl+K palette with focus restore, Ctrl+1/2/3 (not while typing), composer 98–240px, panes persist, 200% zoom clean, 0 unnamed controls, all controls ≥40px"
+  ],
+  [
+   "Real UI journey (live)",
+   "codex 9.14s provider wait → saved artifact → permit on → openai-api streamed answer with cost → permit off → restart → full resume"
+  ],
+  [
+   "Owner resolve of unresolved exposure",
+   "Resolve dialog settled a seeded ambiguous reservation at $0.00004 (throwaway server)"
   ]
  ],
- "review_html": "<p>Reviewer: an independent subordinate session that wrote no code and had read-only access. It found 10 issues. Disposition:</p><ul><li>Fixed: cross-project preview read (+test)</li><li>Fixed: SSRF via DNS rebinding and CGNAT (pinned vetted IP; <code>is_global</code>) (+test)</li><li>Fixed: redaction gaps for Bearer, JSON password, Google keys and PEM (+test)</li><li>Fixed: stuck-pipe task. The reader is joined with a timeout, and an orphaned descendant now gives EFFECT_UNKNOWN instead of hanging RUNNING</li><li>Fixed: non-atomic one-writer check (now inside BEGIN IMMEDIATE)</li><li>Fixed: extra billing env vars (CODEX_API_KEY, ANTHROPIC_AUTH_TOKEN, Bedrock/Vertex, base URLs) are stripped, and the route is held if present</li><li>Fixed: Windows zip-slip on restore</li><li>Fixed: negative Content-Length</li><li><strong>Documented, not fully fixed:</strong> Codex chat <code>-s read-only</code> can still read files outside the working folder, and Codex's workspace-write enforcement on Windows is not independently verified. Use Claude for chat on sensitive machines.</li><li><strong>Accepted risk:</strong> the session cookie is visible to other servers on 127.0.0.1. Same-user local processes are inside the trust boundary, since they could read the SQLite file directly.</li></ul><p><strong>Re-review:</strong> the same reviewer confirmed all 8 fixes RESOLVED and found 2 new low-severity issues. A stale job-handle race between cancel and close is fixed: close and terminate now run under one lock. A short window after launch, before the process joins its Job Object, is documented; taskkill /T and EFFECT_UNKNOWN cover it. Also noted as low: quoted secrets containing spaces aren't redacted, and an <code>env</code>/<code>apiKeyHelper</code> in Claude's own settings.json would bypass env stripping (auth status is the guard).</p>",
- "next_html": "Use Studio for one real task, and record it with the same task done your old way under Evidence → Workflow measurements. That is the only way to verify the time saving. Optional hardening: launch tasks suspended so they join the Job Object before they run, and restrict Codex chat reads to its working folder."
+ "review_html": "<p>Reviewer: an independent subordinate session that wrote no code and had read-only access. It found 10 issues. Disposition:</p><ul><li>Fixed: cross-project preview read (+test)</li><li>Fixed: SSRF via DNS rebinding and CGNAT (pinned vetted IP; <code>is_global</code>) (+test)</li><li>Fixed: redaction gaps for Bearer, JSON password, Google keys and PEM (+test)</li><li>Fixed: stuck-pipe task. The reader is joined with a timeout, and an orphaned descendant now gives EFFECT_UNKNOWN instead of hanging RUNNING</li><li>Fixed: non-atomic one-writer check (now inside BEGIN IMMEDIATE)</li><li>Fixed: extra billing env vars (CODEX_API_KEY, ANTHROPIC_AUTH_TOKEN, Bedrock/Vertex, base URLs) are stripped, and the route is held if present</li><li>Fixed: Windows zip-slip on restore</li><li>Fixed: negative Content-Length</li><li><strong>Documented, not fully fixed:</strong> Codex chat <code>-s read-only</code> can still read files outside the working folder, and Codex's workspace-write enforcement on Windows is not independently verified. Use Claude for chat on sensitive machines.</li><li><strong>Accepted risk:</strong> the session cookie is visible to other servers on 127.0.0.1. Same-user local processes are inside the trust boundary, since they could read the SQLite file directly.</li></ul><p><strong>Re-review:</strong> the same reviewer confirmed all 8 fixes RESOLVED and found 2 new low-severity issues. A stale job-handle race between cancel and close is fixed: close and terminate now run under one lock. A short window after launch, before the process joins its Job Object, is documented; taskkill /T and EFFECT_UNKNOWN cover it. Also noted as low: quoted secrets containing spaces aren't redacted, and an <code>env</code>/<code>apiKeyHelper</code> in Claude's own settings.json would bypass env stripping (auth status is the guard).</p><p><strong>Round 3 (paid route + redesign):</strong> no way to leak the key and no XSS/CSRF regressions found. Fixed: input reservation bounded by UTF-8 bytes with a 400 KB cap, and overshoot flagged; streaming redaction over whole spans; the thread never dies holding a reservation; non-object stream events ignored; the test override refuses real keys; owner Resolve action for unresolved exposure. Accepted: chat bills the mission envelope only while the owner's auto-expiring development permit is on, as its copy states.</p>",
+ "next_html": "Use Studio for one real task you'd otherwise do in ChatGPT or a terminal, and record both runs under Evidence → Workflow measurements. That is the only remaining way to verify the usability claim. Optional: set a small monthly limit (e.g. $5) to use the paid route day to day."
 }

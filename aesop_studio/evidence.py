@@ -40,7 +40,7 @@ def collect(store: Store) -> dict:
     return {
         "generated_at": time.time(),
         "budget": ledger.totals(store),
-        "ledger": store.q("SELECT provider,route,billing_basis,reservation_usd,settled_usd,status,created "
+        "ledger": store.q("SELECT id,provider,route,billing_basis,purpose,reservation_usd,settled_usd,status,created "
                           "FROM ledger ORDER BY created DESC LIMIT 50"),
         "allocation": [
             {"envelope": "Audit, research, foundation, visual direction", "cap": 18},

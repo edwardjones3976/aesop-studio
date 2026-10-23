@@ -1,0 +1,47 @@
+{
+ "palette": {
+  "opened_with_focus_inside": true,
+  "filtered_options": [
+   "Open EvidenceStudio"
+  ],
+  "closed_on_escape": true,
+  "focus_restored": true,
+  "focus_before": "paletteBtn",
+  "focus_after": "paletteBtn"
+ },
+ "shortcuts": {
+  "ctrl1_chat": "true",
+  "ctrl2_build": "true",
+  "ctrl3_research": "true",
+  "ignored_while_typing": true
+ },
+ "composer": {
+  "min_px": 98,
+  "max_after_60_lines_px": 240,
+  "ok": true
+ },
+ "focus_visible": {
+  "stops": 15,
+  "visible": 14,
+  "none": 0
+ },
+ "unnamed_controls": [],
+ "controls_under_40px_desktop": [],
+ "separators": 2,
+ "pane_resize": {
+  "before": "220",
+  "after_keys": "196",
+  "after_reload": "196",
+  "persisted": true
+ },
+ "zoom200_no_overflow": {
+  "960x540-chat": true,
+  "960x540-agent": true,
+  "960x540-research": true,
+  "683x384-chat": true,
+  "683x384-agent": true,
+  "683x384-research": true
+ },
+ "reduced_motion_max_transition_ms": 1,
+ "page_errors": []
+}
