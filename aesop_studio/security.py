@@ -31,13 +31,71 @@ _SECRET_PATTERNS = [
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/\-]{8,}=*"),
     re.compile(r"(?i)(api[_-]?key|access[_-]?token|token|secret|password|passwd|authorization)[\"']?\s*[:=]\s*"
                r"[\"']?(?!\[REDACTED)[^\s\"',}]{6,}"),
+    # Orphaned PEM body: base64 lines ending in an END marker whose BEGIN line was redacted separately
+    # (e.g. by an earlier line-by-line pass). Newlines may be real or JSON-escaped ("\n").
+    re.compile(r"(?<![A-Za-z0-9+/=])(?:[A-Za-z0-9+/=]{16,}(?:\r?\n|(?:\\r)?\\n))+-----END [A-Z ]*PRIVATE KEY-----"),
 ]
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^/\s@?#\"'<>]+@")
+_PEM_BEGIN = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_PEM_END = re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
 
 
 def redact(text: str) -> str:
     for p in _SECRET_PATTERNS:
         text = p.sub("[REDACTED]", text)
-    return text
+    return _URL_USERINFO.sub(r"\1[REDACTED]@", text)
+
+
+class LineRedactor:
+    """Stateful redactor for line-at-a-time streams (subprocess stdout).
+
+    redact() on a single line cannot see a PEM block that spans lines: only the BEGIN line would be
+    replaced. feed() suppresses every line from an unmatched BEGIN marker through its END marker
+    (or the end of the stream), so no key body line is ever returned.
+    """
+
+    def __init__(self):
+        self.in_key = False
+
+    def feed(self, line: str) -> str:
+        nl = "\n" if line.endswith("\n") else ""
+        if self.in_key:
+            m = _PEM_END.search(line)
+            if not m:
+                return ""
+            self.in_key = False
+            rest = line[m.end():]
+            return "[REDACTED]" + (self.feed(rest) if rest.strip() else nl)
+        b = _PEM_BEGIN.search(line)
+        if b and not _PEM_END.search(line, b.end()):
+            self.in_key = True
+            return redact(line[:b.start()]) + "[REDACTED]" + nl
+        return redact(line)
+
+
+_SECRET_QUERY_KEY = re.compile(r"(?i)(token|secret|passw|pwd|api[_-]?key|apikey|^key$|auth|credential|"
+                               r"signature|^sig$|session|^code$|x-amz-)")
+
+
+def sanitize_url(url: str) -> str:
+    """Drop userinfo and blank out secret-looking query values so a URL can be stored or exported."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return redact(url)
+    netloc = parts.netloc
+    if host and (parts.username is not None or parts.password is not None or "@" in netloc):
+        h = f"[{host}]" if ":" in host else host
+        netloc = h + (f":{port}" if port else "")
+    query = parts.query
+    if query:
+        pairs = urllib.parse.parse_qsl(query, keep_blank_values=True)
+        if any(_SECRET_QUERY_KEY.search(k) or redact(v) != v for k, v in pairs):
+            query = urllib.parse.urlencode([(k, "REDACTED" if _SECRET_QUERY_KEY.search(k) else redact(v))
+                                            for k, v in pairs])
+    return urllib.parse.urlunsplit((parts.scheme, netloc, redact(parts.path), query, redact(parts.fragment)))
 
 
 class ScopeError(ValueError):
@@ -83,17 +141,40 @@ def validate_root(root: str) -> Path:
     if _is_link(p):
         raise ScopeError("project root may not be a symlink or junction")
     resolved = p.resolve()
-    forbidden = [Path(os.environ.get("SystemRoot", r"C:\Windows")), Path.home() / ".ssh",
-                 Path.home() / ".codex", Path.home() / ".claude", Path.home()]
-    for f in forbidden:
-        try:
-            if resolved == f.resolve():
-                raise ScopeError(f"refusing broad or credential directory as project root: {resolved}")
-        except OSError:
-            pass
     if resolved.parent == resolved:
         raise ScopeError("drive roots are not allowed as project roots")
+    rkey = _norm(resolved)
+    home = Path.home()
+    # Broad roots: refused only as exact matches, so ordinary project folders below home stay allowed.
+    for f in (home,):
+        if rkey == _norm(_resolve_quiet(f)):
+            raise ScopeError(f"refusing broad or credential directory as project root: {resolved}")
+    # Sensitive trees: refused as the tree itself, anything inside it, or any ancestor that would expose it.
+    sensitive = [Path(os.environ.get("SystemRoot", r"C:\Windows"))] + [home / d for d in _CREDENTIAL_DIRS]
+    for f in sensitive:
+        skey = _norm(_resolve_quiet(f))
+        if rkey == skey or _is_under(rkey, skey) or _is_under(skey, rkey):
+            raise ScopeError(f"refusing broad or credential directory as project root: {resolved}")
     return resolved
+
+
+_CREDENTIAL_DIRS = (".ssh", ".codex", ".claude", ".aws", ".azure", ".gnupg", ".kube", ".docker")
+
+
+def _resolve_quiet(p: Path) -> Path:
+    try:
+        return p.resolve()
+    except OSError:
+        return p.absolute()
+
+
+def _norm(p: Path) -> str:
+    return os.path.normcase(os.path.normpath(str(p)))
+
+
+def _is_under(child: str, parent: str) -> bool:
+    """True when child is strictly inside parent (both already normalized)."""
+    return child != parent and child.startswith(parent.rstrip("\\/") + os.sep)
 
 
 # ---------- extraction ----------
@@ -229,7 +310,10 @@ def safe_fetch(url: str, allow_hosts: set[str] | None = None, max_redirects: int
         if parts.username or parts.password:
             raise FetchError("credentials in URLs are not allowed")
         ip = _check_host(parts.hostname, allow_hosts)
-        opener = urllib.request.build_opener(_NoRedirect, _PinnedHTTP(ip), _PinnedHTTPS(ip))
+        # ProxyHandler({}): never route a pinned connection through env/registry proxies (it would connect
+        # to the vetted IP on the proxy port and send Proxy-Authorization to the fetched site).
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect,
+                                             _PinnedHTTP(ip), _PinnedHTTPS(ip))
         req = urllib.request.Request(url, headers={"User-Agent": "AesopStudio/0.1 (local research notebook)"})
         try:
             resp = opener.open(req, timeout=15)

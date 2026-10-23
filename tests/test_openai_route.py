@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 os.environ["AESOP_SIMULATED_ROUTE"] = "1"
+os.environ["AESOP_PROBE_OFFLINE"] = "1"  # never launch real provider CLIs in tests
 
 from aesop_studio import ledger, openai_api, providers  # noqa: E402
 from aesop_studio.services import Services  # noqa: E402

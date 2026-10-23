@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 os.environ["AESOP_SIMULATED_ROUTE"] = "1"
+os.environ["AESOP_PROBE_OFFLINE"] = "1"  # never launch real provider CLIs in tests
 
 from aesop_studio import backup, ledger  # noqa: E402
 from aesop_studio.security import ScopeError, contained_path, extract, redact, safe_fetch, FetchError  # noqa: E402
@@ -41,6 +42,7 @@ class Base(unittest.TestCase):
         from aesop_studio import providers
         providers.refresh(self.store)
         self.p = self.svc.create_project("Demo", str(self.root), "simulated")
+        self.store.x("INSERT INTO kv(k,v) VALUES(?, 'on')", (f"agent_ack:{self.p['id']}",))
 
     def tearDown(self):
         self.store.close()
@@ -278,6 +280,8 @@ class TestHttp(unittest.TestCase):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         h = {"Host": f"127.0.0.1:{self.port}"}
         h.update(headers or {})
+        if "|KEY|" in h.get("Cookie", ""):  # test helper: cookie + origin key travel together
+            h["Cookie"], h["X-Aesop-Key"] = h["Cookie"].split("|KEY|")
         c.request(method, path, body=json.dumps(body) if body is not None else None, headers=h)
         r = c.getresponse()
         data = r.read()
@@ -289,7 +293,7 @@ class TestHttp(unittest.TestCase):
             return self.__class__._cookie, self.__class__._csrf
         st, hd, _ = self.req("GET", f"/login?code={code}")
         self.assertEqual(st, 303)
-        cookie = hd["Set-Cookie"].split(";")[0]
+        cookie = hd["Set-Cookie"].split(";")[0] + "|KEY|" + hd["Location"].split("#k=")[1]
         self.assertIn("HttpOnly", hd["Set-Cookie"])
         _, _, d = self.req("GET", "/api/session", headers={"Cookie": cookie})
         self.__class__._cookie, self.__class__._csrf = cookie, json.loads(d)["csrf"]

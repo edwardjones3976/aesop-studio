@@ -35,7 +35,7 @@ def free_port() -> int:
 
 
 def start_server(repo: Path, data: Path, port: int):
-    env = dict(os.environ, AESOP_SIMULATED_ROUTE="1")
+    env = dict(os.environ, AESOP_SIMULATED_ROUTE="1", AESOP_PROBE_OFFLINE="1")
     env.pop("OPENAI_API_KEY", None)
     env["AESOP_OPENAI_KEY_FILE"] = str(data / "no-key")  # QA never sees a real key
     proc = subprocess.Popen([sys.executable if not (repo / ".venv").exists() else "python", "-m", "aesop_studio",
@@ -52,16 +52,18 @@ def start_server(repo: Path, data: Path, port: int):
 
 def seed(page, base: str, proj_root: Path) -> None:
     js = """async ([root]) => {
-      const s = await (await fetch('/api/session')).json();
-      const H = {'Content-Type': 'application/json', 'X-CSRF-Token': s.csrf};
+      const K = sessionStorage.getItem('aesop.key') || '';
+      const s = await (await fetch('/api/session', {headers: {'X-Aesop-Key': K}})).json();
+      const H = {'Content-Type': 'application/json', 'X-CSRF-Token': s.csrf, 'X-Aesop-Key': K};
       const post = async (u, b) => (await fetch(u, {method: 'POST', headers: H, body: JSON.stringify(b)})).json();
       await post('/api/projects', {name: 'Second project', root});
       const p = await post('/api/projects', {name: 'Ripple CLI', root, provider_default: 'simulated'});
       await fetch('/api/projects/' + p.id, {method: 'PATCH', headers: H, body: JSON.stringify({transfer_policy: {simulated: true}})});
-      await fetch('/api/projects/' + p.id + '/attachments', {method: 'POST', headers: {'X-CSRF-Token': s.csrf, 'X-Filename': 'brief.md'},
+      await fetch('/api/projects/' + p.id + '/attachments', {method: 'POST', headers: {'X-CSRF-Token': s.csrf, 'X-Aesop-Key': K, 'X-Filename': 'brief.md'},
         body: '# Synthetic brief\\nThe demo project ships a tiny CLI named ripple. Deadline: Friday.'});
       const c = await post('/api/projects/' + p.id + '/conversations', {});
       await post('/api/projects/' + p.id + '/conversations/' + c.id + '/messages', {text: 'What is the CLI called?', attachment_ids: []});
+      await post('/api/projects/' + p.id + '/agent-ack', {ack: true});
       await post('/api/projects/' + p.id + '/tasks', {prompt: 'WRITE a file (simulated task)'});
       await post('/api/projects/' + p.id + '/notebook/findings', {claim: 'Synthetic finding without a source', locator: ''});
       await post('/api/projects/' + p.id + '/memory', {layer: 'authoritative', kind: 'note', content: 'Owner prefers short answers.'});

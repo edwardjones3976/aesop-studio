@@ -60,8 +60,8 @@ def build(ev: dict, notes: dict) -> str:
                  [[esc(a["id"]), esc(a["requirement"]), esc(a["implementation"]), esc(a["test"]), pill(a["status"]),
                    esc(a["evidence"])] for a in ev["acceptance"]]))
     parts.append("<h2>Provider routes</h2>" + table("Verified through each official CLI's own status command",
-                 ["Route", "Provider", "State", "Version", "Billing", "Incremental", "Evidence"],
-                 [[esc(r["id"]), esc(r["provider"]), pill(r["state"]), esc(r["version"]), esc(r["billing_basis"]),
+                 ["Route", "Family", "State", "Version", "Billing", "Incremental", "Evidence"],
+                 [[esc(r.get("display_name") or r["id"]), esc(r.get("family") or r["provider"]), pill(r["state"]), esc(r["version"]), esc(r["billing_basis"]),
                    esc(r["incremental_cost_status"]), esc(r["evidence"])] for r in ev["routes"]]))
     t = ev["tasks"]
     parts.append("<h2>Task success and recovery</h2>" + table(

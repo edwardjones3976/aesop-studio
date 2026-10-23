@@ -2,12 +2,21 @@
 
 CREATED -> RESERVED -> STARTING -> RUNNING -> COMPLETED | FAILED | CANCELLED | INTERRUPTED
 | BLOCKED_OWNER | EFFECT_UNKNOWN
+
+Crash-safety rules used throughout:
+- a ledger reservation is always settled *before* its task is marked terminal, so a crash leaves the task
+  non-terminal and the next reconcile() settles it (settling is idempotent);
+- reconcile() also sweeps reservations whose task is terminal or missing, so no reservation is orphaned;
+- every worker thread ends in a terminal state, even on unexpected exceptions.
 """
 from __future__ import annotations
 
+import codecs
 import hashlib
 import json
 import os
+import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -20,18 +29,37 @@ from .store import Store, new_id
 
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED", "BLOCKED_OWNER", "EFFECT_UNKNOWN"}
 MAX_OUTPUT_BYTES = 512 * 1024
+READ_CHUNK = 64 * 1024
 DEFAULT_TIMEOUT = 15 * 60
 SNAPSHOT_LIMIT = 5000
+SNAPSHOT_SECONDS = 20
 SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".aesop"}
 NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+CHAT_DIR_PREFIX = "aesop-chat-"
+OPEN_REPAIR_STATES = ("OPEN_FOREMAN", "EXPORTED_FOR_FOREMAN")
+AGENT_ACK_STATEMENT = ("Agent tasks run the provider's official CLI as your Windows user. The project folder is its "
+                       "working directory, not a sandbox: it can read files outside the folder that you can read. "
+                       "Studio records the files it changed inside the folder.")
 
 
-def snapshot(root: str) -> dict[str, str]:
-    """Bounded mtime+size fingerprint of a project root (no symlink/junction following)."""
+def _is_link(path: str) -> bool:
+    """Symlinks and Windows junctions/reparse points are never followed."""
+    try:
+        if os.path.islink(path) or (hasattr(os.path, "isjunction") and os.path.isjunction(path)):
+            return True
+        st = os.lstat(path)
+        return bool(getattr(st, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    except OSError:
+        return True
+
+
+def snapshot(root: str) -> tuple[dict[str, str], bool]:
+    """Bounded, deterministic mtime+size fingerprint of a project root. Returns (entries, truncated)."""
     out: dict[str, str] = {}
+    deadline = time.monotonic() + SNAPSHOT_SECONDS
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not os.path.islink(os.path.join(dirpath, d))]
-        for f in filenames:
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not _is_link(os.path.join(dirpath, d)))
+        for f in sorted(filenames):
             p = os.path.join(dirpath, f)
             try:
                 st = os.stat(p, follow_symlinks=False)
@@ -39,11 +67,18 @@ def snapshot(root: str) -> dict[str, str]:
                 continue
             out[os.path.relpath(p, root)] = f"{st.st_mtime_ns}:{st.st_size}"
             if len(out) >= SNAPSHOT_LIMIT:
-                return out
-    return out
+                return out, True
+        if time.monotonic() > deadline:
+            return out, True
+    return out, False
 
 
-def diff_snapshots(before: dict, after: dict) -> dict:
+def diff_snapshots(before: dict, after: dict, truncated: bool = False) -> dict:
+    """When either snapshot was truncated, only files both sides saw are compared (no false adds/removes)."""
+    if truncated:
+        shared = set(before) & set(after)
+        return {"added": [], "removed": [], "modified": sorted(k for k in shared if before[k] != after[k]),
+                "incomplete": True}
     return {"added": sorted(set(after) - set(before)),
             "removed": sorted(set(before) - set(after)),
             "modified": sorted(k for k in set(before) & set(after) if before[k] != after[k])}
@@ -52,9 +87,12 @@ def diff_snapshots(before: dict, after: dict) -> dict:
 def kill_tree(pid: int) -> bool:
     """Terminate only the owned process tree by PID (never by image name)."""
     if os.name == "nt":
-        r = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        return r.returncode == 0
+        try:
+            r = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=30,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            return r.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
     try:
         os.killpg(pid, 9)
         return True
@@ -64,8 +102,11 @@ def kill_tree(pid: int) -> bool:
 
 def pid_alive(pid: int) -> bool:
     if os.name == "nt":
-        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"], capture_output=True, text=True,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"], capture_output=True,
+                               text=True, timeout=30, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.TimeoutExpired):
+            return True  # cannot prove it is gone: treat as alive (conservative)
         return f'"{pid}"' in r.stdout
     try:
         os.kill(pid, 0)
@@ -74,20 +115,49 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
-class _RedactingLog:
-    """Streams API deltas to the task log with redaction over whole spans.
+def _remove_chat_dir(cwd: str | None) -> None:
+    """Delete a per-request chat sandbox — only ever a directory we created under the temp dir."""
+    if not cwd:
+        return
+    p = Path(cwd).resolve()
+    tmp = Path(tempfile.gettempdir()).resolve()
+    if p.parent == tmp and p.name.startswith(CHAT_DIR_PREFIX):
+        shutil.rmtree(p, ignore_errors=True)
 
-    Deltas are a few tokens long, so a secret can arrive split across several of them. The buffer is
-    redacted as a whole and only its settled prefix (up to whitespace at least HOLD characters before
-    the end) is written; the tail stays buffered until more text arrives or the stream ends.
+
+class _RedactingLog:
+    """Streams text to the task log with redaction over whole spans and a hard byte cap.
+
+    Text arrives in fragments (API deltas, pipe chunks), so a secret can be split across several of them. The
+    buffer is redacted as a whole and only its settled prefix (up to whitespace at least HOLD characters before
+    the end) is written; the tail stays buffered until more text arrives or the stream ends. A buffer that
+    grows past MAX_BUF without a safe boundary is redacted and flushed anyway (bounded memory).
     """
     HOLD = 160
+    MAX_BUF = 64 * 1024
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, max_bytes: int = MAX_OUTPUT_BYTES):
         self.f = open(path, "w", encoding="utf-8")
         self.buf = ""
+        self.left = max_bytes
+        self.truncated = False
+
+    def _emit(self, text: str) -> None:
+        if self.left <= 0:
+            self.truncated = True
+            return
+        data = text.encode("utf-8")
+        if len(data) > self.left:
+            text = data[:self.left].decode("utf-8", errors="ignore")
+            self.truncated = True
+        self.f.write(text)
+        self.f.flush()
+        self.left -= len(text.encode("utf-8"))
 
     def write(self, delta: str) -> None:
+        if self.left <= 0:
+            self.truncated = True
+            return
         self.buf += delta
         if len(self.buf) < 2 * self.HOLD:
             return
@@ -95,15 +165,18 @@ class _RedactingLog:
         limit = len(red) - self.HOLD
         cut = max(red.rfind(" ", 0, limit), red.rfind("\n", 0, limit))
         if cut <= 0:
-            return  # no safe boundary yet (e.g. one long token): keep buffering
-        self.f.write(red[:cut])
-        self.f.flush()
+            if len(self.buf) < self.MAX_BUF:
+                return  # no safe boundary yet (e.g. one long token): keep buffering, bounded
+            cut = limit
+        self._emit(red[:cut])
         self.buf = red[cut:]
 
     def close(self) -> None:
         if self.buf:
-            self.f.write(redact(self.buf))
+            self._emit(redact(self.buf))
             self.buf = ""
+        if self.truncated:
+            self.f.write("\n[output truncated at limit]\n")
         self.f.close()
 
 
@@ -124,8 +197,23 @@ class Supervisor:
         t = self.store.one("SELECT project_id FROM tasks WHERE id=?", (task_id,))
         self.store.event("task_state", t and t["project_id"], task_id=task_id, state=state)
 
+    def _end(self, tid: str, state: str, lid: str | None, billed, **fields) -> None:
+        """Settle first, then go terminal: a crash between the two is repaired by reconcile()."""
+        if lid:
+            ledger.settle(self.store, lid, billed)
+        self._set(tid, state, ended=time.time(), **fields)
+
     def get(self, task_id: str) -> dict | None:
         return self.store.one("SELECT * FROM tasks WHERE id=?", (task_id,))
+
+    def _busy(self, c, project_id: str):
+        """One agent writer per project. An EFFECT_UNKNOWN agent task with an unresolved repair still blocks:
+        its process may survive, so a second writer could collide with it until the owner resolves the repair."""
+        return c.execute(
+            "SELECT id FROM tasks WHERE project_id=? AND checkpoint LIKE '%\"mode\": \"agent\"%' AND ("
+            "state IN ('CREATED','RESERVED','STARTING','RUNNING') OR (state='EFFECT_UNKNOWN' AND id IN ("
+            f"SELECT task_id FROM repairs WHERE status IN ({','.join('?' * len(OPEN_REPAIR_STATES))}))))",
+            (project_id, *OPEN_REPAIR_STATES)).fetchone()
 
     # ---- lifecycle ----
     def create(self, project: dict, route_id: str, prompt: str, mode: str = "agent",
@@ -134,36 +222,49 @@ class Supervisor:
         route = routes.get(route_id)
         tid = new_id("task")
         now = time.time()
-        cwd = project["root"] if mode == "agent" else tempfile.mkdtemp(prefix="aesop-chat-")
         out_path = str(self.store.data_dir / "task-output" / f"{tid}.log")
-        with self.store.tx() as c:  # busy check + insert are atomic: one agent writer per project
-            busy = mode == "agent" and c.execute(
-                "SELECT id FROM tasks WHERE project_id=? AND checkpoint LIKE '%\"mode\": \"agent\"%' AND state IN "
-                "('CREATED','RESERVED','STARTING','RUNNING')", (project["id"],)).fetchone()
+        with self.store.tx() as c:  # busy check + insert are atomic
+            busy = mode == "agent" and self._busy(c, project["id"])
             c.execute("INSERT INTO tasks(id,project_id,provider,prompt,state,cwd,output_path,created,checkpoint) "
                       "VALUES(?,?,?,?,?,?,?,?,?)",
-                      (tid, project["id"], route_id, prompt, "CREATED", cwd, out_path, now,
-                       json.dumps({"mode": mode, "timeout": timeout})))
+                      (tid, project["id"], route_id, prompt, "CREATED", project["root"] if mode == "agent" else None,
+                       out_path, now, json.dumps({"mode": mode, "timeout": timeout})))
         self.store.event("task_state", project["id"], task_id=tid, state="CREATED", mode=mode)
         if busy:
-            self._set(tid, "BLOCKED_OWNER", error=f"one agent writer per project: {busy[0]} is still active",
-                      ended=time.time())
+            self._end(tid, "BLOCKED_OWNER", None, None,
+                      error=f"one agent writer per project: {busy[0]} is still active or awaiting repair review")
             return tid
         if not route or not providers.usable(route, mode):
             state = route["state"] if route else "UNKNOWN_ROUTE"
-            self._set(tid, "BLOCKED_OWNER", error=f"route {route_id} not usable for {mode}: {state}", ended=time.time())
+            self._end(tid, "BLOCKED_OWNER", None, None, error=f"route {route_id} not usable for {mode}: {state}")
             return tid
+        if mode == "agent":
+            ack = self.store.one("SELECT v FROM kv WHERE k=?", (f"agent_ack:{project['id']}",))
+            if not (ack and ack["v"] == "on"):
+                self._end(tid, "BLOCKED_OWNER", None, None,
+                          error="acknowledge how agent tasks run before starting one: " + AGENT_ACK_STATEMENT)
+                return tid
         if route["billing_basis"] == "metered":
             return self._start_api(tid, project, route_id, route, prompt, out_path, timeout)
         try:
             lid = ledger.reserve(self.store, route["provider"], route_id, route["billing_basis"], None, task_ref=tid)
         except ledger.BudgetError as e:
-            self._set(tid, "BLOCKED_OWNER", error=str(e), ended=time.time())
+            self._end(tid, "BLOCKED_OWNER", None, None, error=str(e))
             return tid
-        before = snapshot(cwd) if mode == "agent" else {}
-        cp = {"mode": mode, "timeout": timeout, "ledger_id": lid, "before_count": len(before)}
-        Path(out_path + ".before.json").write_text(json.dumps(before), encoding="utf-8")
-        self._set(tid, "RESERVED", checkpoint=json.dumps(cp))
+        try:
+            if mode == "agent":
+                cwd = project["root"]
+                before, truncated = snapshot(cwd)
+                Path(out_path + ".before.json").write_text(json.dumps({"entries": before, "truncated": truncated}),
+                                                           encoding="utf-8")
+            else:  # created lazily: only requests that will really launch a CLI get a sandbox directory
+                cwd, before, truncated = tempfile.mkdtemp(prefix=CHAT_DIR_PREFIX), {}, False
+            cp = {"mode": mode, "timeout": timeout, "ledger_id": lid, "before_count": len(before),
+                  "snapshot_truncated": truncated}
+            self._set(tid, "RESERVED", checkpoint=json.dumps(cp), cwd=cwd)
+        except Exception as e:  # noqa: BLE001 - nothing was dispatched: release the reservation
+            self._end(tid, "FAILED", lid, 0, error=f"could not prepare the task: {type(e).__name__}: {str(e)[:200]}")
+            return tid
         threading.Thread(target=self._run, args=(tid, route_id, mode, cwd, prompt, out_path, timeout, lid,
                                                  project.get("model")), daemon=True).start()
         return tid
@@ -177,7 +278,7 @@ class Supervisor:
             lid = ledger.reserve(self.store, route["provider"], route_id, "metered", cap, task_ref=tid,
                                  price_source=f"{model}: {openai_api.PRICE_SOURCE}")
         except (ledger.BudgetError, openai_api.ApiError) as e:
-            self._set(tid, "BLOCKED_OWNER", error=str(e), ended=time.time())
+            self._end(tid, "BLOCKED_OWNER", None, None, error=str(e))
             return tid
         cp = {"mode": "chat", "timeout": timeout, "ledger_id": lid, "model": model, "max_output_tokens": max_out,
               "reservation_usd": cap}
@@ -190,137 +291,189 @@ class Supervisor:
         return tid
 
     def _run_api(self, tid, prompt, out_path, timeout, lid, model, max_out, ev):
-        self._set(tid, "RUNNING", started=time.time(),
-                  argv_meta=json.dumps({"endpoint": "POST /v1/responses", "model": model, "max_output_tokens": max_out}))
-
-        def finish_failed(msg: str, billed):
-            ledger.settle(self.store, lid, billed)
-            self._set(tid, "FAILED", error=redact(msg)[:500], ended=time.time())
+        def release():
             with self.lock:
                 self.api_cancel.pop(tid, None)
 
-        try:  # pre-send: nothing can have been billed if this fails
+        try:  # pre-send: nothing can have been billed if anything here fails or the owner already cancelled
+            if ev.is_set():
+                release()
+                return self._end(tid, "CANCELLED", lid, 0, error="cancelled before the request was sent")
+            self._set(tid, "RUNNING", started=time.time(), argv_meta=json.dumps(
+                {"endpoint": "POST /v1/responses", "model": model, "max_output_tokens": max_out}))
             key = openai_api.resolve_key()
-        except Exception as e:  # noqa: BLE001 - any failure here is pre-dispatch
-            return finish_failed(str(e) if isinstance(e, openai_api.ApiError) else "OpenAI key could not be resolved", 0)
-        log = _RedactingLog(out_path)
+            log = _RedactingLog(out_path)
+        except Exception as e:  # noqa: BLE001
+            release()
+            msg = str(e) if isinstance(e, openai_api.ApiError) else f"could not start: {type(e).__name__}"
+            return self._end(tid, "FAILED", lid, 0, error=redact(msg)[:500])
         try:
-            r = openai_api.stream(prompt, model, max_out, log.write, ev, timeout, key=key)
+            try:
+                r = openai_api.stream(prompt, model, max_out, log.write, ev, timeout, key=key)
+            finally:
+                key = None
+                log.close()
         except openai_api.ApiError as e:
-            log.close()
+            release()
             msg = str(e)
-            return finish_failed(msg, 0 if msg.startswith("HTTP 4") else None)  # unknown outcome keeps exposure
+            return self._end(tid, "FAILED", lid, 0 if msg.startswith("HTTP 4") else None, error=redact(msg)[:500])
         except Exception as e:  # noqa: BLE001 - never leave a task RUNNING with a live reservation
-            log.close()
-            return finish_failed(f"unexpected stream error: {type(e).__name__}", None)
-        finally:
-            key = None
-        log.close()
-        with self.lock:
-            self.api_cancel.pop(tid, None)
-        cp = json.loads(self.get(tid)["checkpoint"] or "{}")
-        cp["result"] = redact(r["text"])[:MAX_OUTPUT_BYTES]
-        if r["status"] == "cancelled" or not r["usage"]:
-            ledger.settle(self.store, lid, None)  # tokens may have been generated: keep reserved exposure
-            state = "CANCELLED" if r["status"] == "cancelled" else "EFFECT_UNKNOWN"
-            err, cost = "stream stopped before usage was reported; reservation kept as unresolved exposure", None
-        else:
+            release()
+            return self._end(tid, "EFFECT_UNKNOWN", lid, None, error=f"unexpected stream error: {type(e).__name__}")
+        release()
+        try:
+            cp = json.loads(self.get(tid)["checkpoint"] or "{}")
+            cp["result"] = redact(r["text"])[:MAX_OUTPUT_BYTES]
+            if r["status"] == "cancelled_presend":
+                return self._end(tid, "CANCELLED", lid, 0, error="cancelled before the request was sent",
+                                 checkpoint=json.dumps(cp))
+            if r["status"] in ("cancelled", "deadline") or not r["usage"]:
+                state = "CANCELLED" if r["status"] == "cancelled" else "EFFECT_UNKNOWN"
+                note = ("timed out" if r["status"] == "deadline" else "stream stopped") + \
+                       " before usage was reported; reservation kept as unresolved exposure"
+                cp["cost_usd"] = None
+                return self._end(tid, state, lid, None, error=note, checkpoint=json.dumps(cp))
             cost = openai_api.actual_cost(model, r["usage"])
-            ledger.settle(self.store, lid, cost)
-            cp["usage"] = r["usage"]
-            state = "COMPLETED"
+            cp.update(usage=r["usage"], cost_usd=cost)
             err = None if r["status"] == "completed" else f"response {r['status']} (output cap {max_out} tokens)"
-        cp["cost_usd"] = cost
-        self._set(tid, state, exit_code=0 if state == "COMPLETED" else None, ended=time.time(), error=err,
-                  checkpoint=json.dumps(cp))
+            self._end(tid, "COMPLETED", lid, cost, exit_code=0, error=err, checkpoint=json.dumps(cp))
+        except Exception as e:  # noqa: BLE001 - bookkeeping failed after a billed call: keep exposure
+            self._end(tid, "EFFECT_UNKNOWN", lid, None, error=f"bookkeeping failed: {type(e).__name__}")
 
+    # ---- CLI routes ----
     def _run(self, tid, route_id, mode, cwd, prompt, out_path, timeout, lid, model):
         last_file = out_path + ".last.txt"
+        proc = job = timer = None
         try:
-            argv = providers.build_argv(route_id, mode, cwd, last_file, model)
-        except RuntimeError as e:
-            self._set(tid, "FAILED", error=str(e), ended=time.time())
-            ledger.settle(self.store, lid, 0)
-            return
-        meta = {"executable": Path(argv[0]).name, "args": [a for a in argv[1:] if not a.startswith(cwd)][:20]}
-        self._set(tid, "STARTING", argv_meta=json.dumps(meta), started=time.time())
-        env = {k: v for k, v in os.environ.items() if k.upper() not in providers.BILLING_ENV}
-        try:
-            proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT, creationflags=NEW_GROUP, env=env)
-        except OSError as e:
-            self._set(tid, "FAILED", error=f"launch failed: {e}", ended=time.time())
-            ledger.settle(self.store, lid, 0)
-            return
-        job = winjob.contain(proc.pid)  # whole-tree containment, including detached descendants
-        with self.lock:
-            self.procs[tid] = proc
-            self.jobs[tid] = job
-        self._set(tid, "RUNNING", pid=proc.pid)
-        try:
-            proc.stdin.write(prompt.encode("utf-8"))
-            proc.stdin.close()
-        except OSError:
-            pass
-        timer = threading.Timer(timeout, lambda: (self.cancel_flags.add(tid + ":timeout"), winjob.terminate(job),
-                                                  kill_tree(proc.pid)))
-        timer.start()
-        orphaned = threading.Event()
-
-        def reader():
-            written = 0
-            with open(out_path, "w", encoding="utf-8") as log:
-                for raw in iter(proc.stdout.readline, b""):
-                    line = redact(raw.decode("utf-8", errors="replace"))
-                    if written < MAX_OUTPUT_BYTES:
-                        log.write(line)
-                        log.flush()
-                        written += len(line)
-                if written >= MAX_OUTPUT_BYTES:
-                    log.write("\n[output truncated at limit]\n")
-        rt = threading.Thread(target=reader, daemon=True)
-        rt.start()
-        code = proc.wait()
-        timer.cancel()
-        rt.join(10)
-        descendants_killed = False
-        if rt.is_alive():  # a detached descendant still holds the output pipe: end the whole job
-            descendants_killed = winjob.terminate(job)
-            rt.join(5)
-            if rt.is_alive():
-                orphaned.set()
-        with self.lock:  # unregister and close atomically so cancel() never uses a recycled handle
-            self.procs.pop(tid, None)
-            self.jobs.pop(tid, None)
-            winjob.close(job)
-        changed = None
-        if mode == "agent":
             try:
-                before = json.loads(Path(out_path + ".before.json").read_text(encoding="utf-8"))
-                changed = json.dumps(diff_snapshots(before, snapshot(cwd)))
+                argv = providers.build_argv(route_id, mode, cwd, last_file, model, prompt=prompt)
+            except RuntimeError as e:
+                return self._end(tid, "FAILED", lid, 0, error=str(e))
+            meta = {"executable": Path(argv[0]).name,  # never record the prompt (argv-prompt routes) or the cwd
+                    "args": ["-p=<prompt>" if a.startswith("-p=") else a for a in argv[1:] if not a.startswith(cwd)][:20]}
+            self._set(tid, "STARTING", argv_meta=json.dumps(meta), started=time.time())
+            env = {k: v for k, v in os.environ.items() if k.upper() not in providers.BILLING_ENV}
+            try:
+                proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, creationflags=NEW_GROUP, env=env)
+            except OSError as e:
+                return self._end(tid, "FAILED", lid, 0, error=f"launch failed: {e}")
+            job = winjob.contain(proc.pid)  # whole-tree containment, including detached descendants
+            with self.lock:
+                self.procs[tid] = proc
+                self.jobs[tid] = job
+            # watchdog and output drain start BEFORE the prompt is written: a child that never reads stdin or that
+            # fills stdout first can no longer deadlock the supervisor outside the timeout
+            timer = threading.Timer(timeout, lambda: (self.cancel_flags.add(tid + ":timeout"),
+                                                      winjob.terminate(job), kill_tree(proc.pid)))
+            timer.daemon = True
+            timer.start()
+            log = _RedactingLog(out_path)
+
+            def reader():
+                dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                try:
+                    while True:
+                        chunk = proc.stdout.read1(READ_CHUNK) if hasattr(proc.stdout, "read1") else \
+                            proc.stdout.read(READ_CHUNK)
+                        if not chunk:
+                            break
+                        if log.left > 0:
+                            log.write(dec.decode(chunk))
+                        # past the cap: keep draining so the child never blocks on a full pipe
+                    log.write(dec.decode(b"", final=True))
+                finally:
+                    log.close()
+
+            rt = threading.Thread(target=reader, daemon=True)
+            rt.start()
+
+            def writer():
+                try:
+                    if route_id not in providers.ARGV_PROMPT_ROUTES:
+                        proc.stdin.write(prompt.encode("utf-8"))
+                    proc.stdin.close()
+                except (OSError, ValueError):
+                    pass  # child exited or was killed; the pipe is gone
+
+            wt = threading.Thread(target=writer, daemon=True)
+            wt.start()
+            self._set(tid, "RUNNING", pid=proc.pid)
+            code = proc.wait()
+            timer.cancel()
+            wt.join(5)
+            rt.join(10)
+            descendants_killed, orphaned = False, False
+            if rt.is_alive():  # a detached descendant still holds the output pipe: end the whole job
+                descendants_killed = winjob.terminate(job)
+                rt.join(5)
+                orphaned = rt.is_alive()
+            with self.lock:  # unregister and close atomically so cancel() never uses a recycled handle
+                self.procs.pop(tid, None)
+                self.jobs.pop(tid, None)
+                winjob.close(job)
+                job = None
+            changed = None
+            if mode == "agent":
+                try:
+                    saved = json.loads(Path(out_path + ".before.json").read_text(encoding="utf-8"))
+                    after, trunc_after = snapshot(cwd)
+                    changed = json.dumps(diff_snapshots(saved.get("entries", {}), after,
+                                                        bool(saved.get("truncated")) or trunc_after))
+                except (OSError, ValueError):
+                    changed = json.dumps({"added": [], "removed": [], "modified": [], "incomplete": True,
+                                          "note": "change snapshot unavailable"})
+            result = ""
+            try:
+                with open(last_file, "rb") as f:  # bounded read, then the raw (unredacted) file is removed
+                    result = redact(f.read(MAX_OUTPUT_BYTES).decode("utf-8", errors="replace"))
             except OSError:
-                changed = None
-        result = ""
-        if os.path.exists(last_file):
-            result = redact(Path(last_file).read_text(encoding="utf-8", errors="replace"))
-        if tid in self.cancel_flags:
-            state, err = "CANCELLED", "cancelled by owner (local process tree terminated)"
-        elif tid + ":timeout" in self.cancel_flags:
-            state, err = "FAILED", f"timed out after {timeout}s"
-        elif orphaned.is_set():
-            state, err = "EFFECT_UNKNOWN", "main process exited but a descendant kept running; review before reuse"
-        elif code == 0:
-            state, err = "COMPLETED", ("left-over descendant processes were terminated via the task's job object"
-                                       if descendants_killed else None)
-        else:
-            state, err = "FAILED", f"exit code {code}"
-        cp = json.loads(self.get(tid)["checkpoint"] or "{}")
-        cp["result"] = result[:MAX_OUTPUT_BYTES]
-        self._set(tid, state, exit_code=code, ended=time.time(), changed_files=changed, error=err,
-                  checkpoint=json.dumps(cp))
-        ledger.settle(self.store, lid, 0)
-        if state == "EFFECT_UNKNOWN":
-            self.open_repair(tid, f"RUNNING->{state}", "task supervision / descendant cleanup")
+                pass
+            finally:
+                try:
+                    os.remove(last_file)
+                except OSError:
+                    pass
+            if tid in self.cancel_flags:
+                state, err = "CANCELLED", "cancelled by owner (local process tree terminated)"
+            elif tid + ":timeout" in self.cancel_flags:
+                state, err = "FAILED", f"timed out after {timeout}s"
+            elif orphaned:
+                state, err = "EFFECT_UNKNOWN", "main process exited but a descendant kept running; review before reuse"
+            elif code == 0:
+                state, err = "COMPLETED", ("left-over descendant processes were terminated via the task's job object"
+                                           if descendants_killed else None)
+            else:
+                state, err = "FAILED", f"exit code {code}"
+            cp = json.loads(self.get(tid)["checkpoint"] or "{}")
+            cp["result"] = result[:MAX_OUTPUT_BYTES]
+            self._end(tid, state, lid, 0, exit_code=code, changed_files=changed, error=err, checkpoint=json.dumps(cp))
+            if state == "EFFECT_UNKNOWN":
+                self.open_repair(tid, f"RUNNING->{state}", "task supervision / descendant cleanup")
+        except BaseException as e:  # noqa: BLE001 - supervision must always reach a terminal state
+            try:
+                if timer:
+                    timer.cancel()
+                if proc is not None:
+                    winjob.terminate(job)
+                    kill_tree(proc.pid)
+                with self.lock:
+                    self.procs.pop(tid, None)
+                    self.jobs.pop(tid, None)
+                    if job:
+                        winjob.close(job)
+                t = self.get(tid)
+                if t and t["state"] not in TERMINAL:
+                    started = proc is not None
+                    self._end(tid, "EFFECT_UNKNOWN" if started else "FAILED", lid, None if started else 0,
+                              error=f"supervisor error: {type(e).__name__}: {str(e)[:200]}")
+                    if started:
+                        self.open_repair(tid, "RUNNING->EFFECT_UNKNOWN", "task supervision / supervisor exception")
+            except Exception:  # noqa: BLE001 - last resort; reconcile() repairs anything left behind
+                pass
+        finally:
+            if mode != "agent":
+                _remove_chat_dir(cwd)
 
     def open_repair(self, tid: str, signature: str, contract: str) -> str:
         t = self.get(tid)
@@ -331,6 +484,17 @@ class Supervisor:
                       f"{hashlib.sha256(t['prompt'].encode()).hexdigest()[:16]}",
                       contract, "OPEN_FOREMAN", time.time()))
         return rid
+
+    def resolve_repair(self, rid: str, note: str = "") -> dict:
+        """Owner action: the uncertain effects were reviewed. Releases the project's agent-writer lock."""
+        r = self.store.one("SELECT * FROM repairs WHERE id=?", (rid,))
+        if not r:
+            raise KeyError("repair not found")
+        if r["status"] not in OPEN_REPAIR_STATES:
+            raise ValueError("this repair is already resolved")
+        self.store.x("UPDATE repairs SET status='RESOLVED_BY_OWNER' WHERE id=?", (rid,))
+        self.store.event("repair_resolved", None, repair_id=rid, task_id=r["task_id"], note=note[:200])
+        return self.store.one("SELECT * FROM repairs WHERE id=?", (rid,))
 
     def export_repair(self, rid: str) -> Path:
         """Write a formal, sanitized repair packet for the Foreman. Studio never dispatches it itself."""
@@ -355,7 +519,8 @@ class Supervisor:
         out_dir.mkdir(exist_ok=True)
         out = out_dir / f"{rid}.json"
         out.write_text(redact(json.dumps(packet, indent=2, default=str)), encoding="utf-8")
-        self.store.x("UPDATE repairs SET status='EXPORTED_FOR_FOREMAN' WHERE id=?", (rid,))
+        if r["status"] == "OPEN_FOREMAN":
+            self.store.x("UPDATE repairs SET status='EXPORTED_FOR_FOREMAN' WHERE id=?", (rid,))
         return out
 
     def cancel(self, tid: str) -> bool:
@@ -382,7 +547,8 @@ class Supervisor:
             return data, f.tell()
 
     def reconcile(self) -> list[dict]:
-        """On restart: any non-terminal task from a previous process is never replayed."""
+        """On restart: any non-terminal task from a previous process is never replayed; orphaned reservations
+        (crash between reserve/link or settle/terminal) are settled conservatively."""
         outcomes = []
         for t in self.store.q("SELECT * FROM tasks WHERE state NOT IN (%s)" % ",".join("?" * len(TERMINAL)),
                               tuple(TERMINAL)):
@@ -392,13 +558,23 @@ class Supervisor:
                 new_state, note = "EFFECT_UNKNOWN", "a process with the recorded PID is alive but ownership is unproven"
             else:
                 new_state, note = "INTERRUPTED", "process ended while Studio was down; effects need review"
-            self._set(t["id"], new_state, error=note, ended=time.time())
             cp = json.loads(t["checkpoint"] or "{}")
-            if cp.get("ledger_id"):
-                metered_started = cp.get("reservation_usd") and t["state"] in ("STARTING", "RUNNING")
-                ledger.settle(self.store, cp["ledger_id"],
-                              None if new_state == "EFFECT_UNKNOWN" or metered_started else 0)
+            metered_started = bool(cp.get("reservation_usd")) and t["state"] in ("STARTING", "RUNNING")
+            billed = None if (metered_started or new_state == "EFFECT_UNKNOWN") else 0
+            self._end(t["id"], new_state, cp.get("ledger_id"), billed, error=note)
             if t["state"] in ("STARTING", "RUNNING"):
                 self.open_repair(t["id"], f"{t['state']}->{new_state}", "task supervision / restart reconciliation")
+            if cp.get("mode") != "agent":
+                _remove_chat_dir(t["cwd"])
             outcomes.append({"task_id": t["id"], "from": t["state"], "to": new_state, "note": note})
+        # sweep: reservations still open whose task is terminal or unknown (crash between the two writes)
+        for row in self.store.q("SELECT l.id, l.billing_basis, l.task_ref, t.state, t.started FROM ledger l "
+                                "LEFT JOIN tasks t ON t.id = l.task_ref WHERE l.status='reserved' AND "
+                                "l.task_ref LIKE 'task_%'"):
+            if row["state"] is not None and row["state"] not in TERMINAL:
+                continue
+            metered_maybe_sent = row["billing_basis"] == "metered" and row["started"]
+            ledger.settle(self.store, row["id"], None if metered_maybe_sent else 0)
+            outcomes.append({"ledger_id": row["id"], "to": "ambiguous" if metered_maybe_sent else "settled_0",
+                             "note": "orphaned reservation reconciled"})
         return outcomes

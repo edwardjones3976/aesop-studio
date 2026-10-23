@@ -90,7 +90,8 @@
 </div>
 <div id="scrim" class="scrim" hidden></div>
 <div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
-<dialog id="dlg"><form method="dialog" id="dlgForm"></form></dialog>
+<dialog id="dlg" aria-labelledby="dlgTitle" aria-modal="true"><form method="dialog" id="dlgForm"></form></dialog>
+<dialog id="rtDlg" class="rt" aria-labelledby="rtTitle" aria-modal="true"><div id="rtIn" class="rt-in"></div></dialog>
 <dialog id="palette" class="palette" aria-label="Command palette">
   <div class="pal-in">
     <div class="pal-search">

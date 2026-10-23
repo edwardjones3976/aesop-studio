@@ -55,7 +55,7 @@ def collect(store: Store) -> dict:
                   "period": period, "repairs": store.q("SELECT * FROM repairs ORDER BY created DESC")},
         "latency": latency,
         "workflow": [dict(json.loads(w["data"]), at=w["created"]) for w in workflow],
-        "routes": [{"id": k, **{f: v.get(f) for f in ("provider", "state", "version", "billing_basis",
+        "routes": [{"id": k, **{f: v.get(f) for f in ("display_name", "family", "provider", "state", "version", "billing_basis",
                                                        "incremental_cost_status", "evidence", "limitations")}}
                    for k, v in routes.items()],
         "research": json.loads((Path(__file__).resolve().parent.parent / "docs" / "research.json")

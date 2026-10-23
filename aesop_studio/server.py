@@ -15,10 +15,11 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backup, evidence, ledger, providers
+from . import backup, derive, evidence, lanes, ledger, providers, roundtable
 from .security import MAX_UPLOAD_BYTES, ScopeError, redact
 from .services import Conflict, Services
 from .store import Store
+from . import tasks as tasks_mod
 from .tasks import Supervisor
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
@@ -27,13 +28,42 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' 
        "frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 
 
+class InstanceLockError(RuntimeError):
+    pass
+
+
+def _lock_data_dir(data_dir: str):
+    """Exclusive, process-lifetime lock on the data directory: a second server must never reconcile (and so
+    mislabel) the first server's live tasks. The OS releases the lock when the process exits."""
+    d = Path(data_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    fh = open(d / "server.lock", "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        fh.close()
+        raise InstanceLockError(f"another Aesop Studio instance owns the data directory {d}") from e
+    return fh
+
+
 class App:
     def __init__(self, data_dir: str, port: int):
         self.port = port
+        self._instance_lock = _lock_data_dir(data_dir)
         self.store = Store(data_dir)
         self.sup = Supervisor(self.store)
         self.svc = Services(self.store, self.sup)
         self.sessions: dict[str, str] = {}  # session -> csrf
+        # session -> origin key. Cookies are not port-scoped, so another service on 127.0.0.1 could receive the
+        # session cookie; the key is delivered only in the login redirect's URL fragment (never sent to servers)
+        # and kept in this origin's sessionStorage, which other ports cannot read. Every /api call must carry it.
+        self.keys: dict[str, str] = {}
         self.login_code = secrets.token_urlsafe(24)
         self.reconciled = self.sup.reconcile()
         providers.refresh(self.store)
@@ -120,6 +150,8 @@ class Handler(BaseHTTPRequestHandler):
         sess = self._session()
         if not sess:
             return self.err(401, "not signed in to this Studio session; use the launch link printed at startup")
+        if not hmac.compare_digest(self.headers.get("X-Aesop-Key", ""), self.app.keys.get(sess, "-")):
+            return self.err(401, "missing or invalid Studio key; reopen Studio from its launch link")
         if method != "GET":
             origin = self.headers.get("Origin")
             if origin not in {f"http://{h}" for h in self.app.allowed_hosts()}:
@@ -149,8 +181,9 @@ class Handler(BaseHTTPRequestHandler):
         self.app.login_code = ""  # one-time
         sess = secrets.token_urlsafe(32)
         self.app.sessions[sess] = secrets.token_urlsafe(32)
+        self.app.keys[sess] = key = secrets.token_urlsafe(32)
         self._send(303, b"", "text/plain", {
-            "Location": "/", "Set-Cookie": f"aesop_session={sess}; HttpOnly; SameSite=Strict; Path=/"})
+            "Location": f"/#k={key}", "Set-Cookie": f"aesop_session={sess}; HttpOnly; SameSite=Strict; Path=/"})
 
     def _static(self, path: str):
         if path == "/favicon.ico":  # the page declares its own icon; answer quietly instead of 404 noise
@@ -177,6 +210,54 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/routes/refresh")
     def routes_refresh(self, sess):
         self.json(providers.refresh(self.app.store))
+
+    @route("POST", r"/api/routes/([\w-]+)/verify")
+    def route_verify(self, sess, rid):
+        """Owner-triggered: one minimal read-only call to a single CLI route proves sign-in and remaining quota."""
+        rec = providers.verify_live(self.app.store, rid)
+        self.json({"verification": rec, "routes": providers.refresh(self.app.store)})
+
+    # ---------- roundtables: planning only (no provider is contacted; Start is always refused) ----------
+    @route("GET", r"/api/roundtable/lanes")
+    def rt_lanes(self, sess):
+        self.json(lanes.discover(self.app.store))
+
+    @route("GET", r"/api/projects/(\w+)/roundtables")
+    def rt_list(self, sess, pid):
+        self.app.svc.project(pid)
+        self.json(roundtable.list_for(self.app.store, pid))
+
+    @route("POST", r"/api/projects/(\w+)/roundtables")
+    def rt_save(self, sess, pid):
+        self.app.svc.project(pid)
+        self.json(roundtable.save(self.app.store, pid, self.body()), 201)
+
+    def _rt(self, rid):
+        rec = roundtable.get(self.app.store, rid)
+        if not rec:
+            raise KeyError("roundtable not found")
+        return rec
+
+    @route("GET", r"/api/roundtables/(\w+)")
+    def rt_get(self, sess, rid):
+        self.json(self._rt(rid))
+
+    @route("POST", r"/api/roundtables/(\w+)/preflight")
+    def rt_preflight(self, sess, rid):
+        self.json(roundtable.preflight(self.app.store, self._rt(rid)))
+
+    @route("POST", r"/api/roundtables/(\w+)/start")
+    def rt_start(self, sess, rid):
+        pf = roundtable.preflight(self.app.store, self._rt(rid))
+        self.json({"error": "Live roundtables are not enabled in this release.", "block_reasons": pf["block_reasons"]},
+                  409)
+
+    @route("GET", r"/api/roundtables/(\w+)/export")
+    def rt_export(self, sess, rid):
+        rec = self._rt(rid)
+        packet = roundtable.export_packet(self.app.store, rec, self.app.svc.project(rec["project_id"]))
+        self._send(200, redact(json.dumps(packet, indent=1, default=str)).encode(), "application/json",
+                   {"Content-Disposition": f'attachment; filename="roundtable-{rid}.json"'})
 
     @route("GET", r"/api/projects")
     def projects(self, sess):
@@ -334,6 +415,31 @@ class Handler(BaseHTTPRequestHandler):
         self.json(self.app.svc.add_finding(pid, b.get("claim", ""), b.get("source_id"), b.get("locator", ""),
                                            b.get("limitation", "")), 201)
 
+    # ---------- model-assisted proposals (one provider: the project's route; owner accepts or rejects) ----------
+    @route("POST", r"/api/projects/(\w+)/notebook/draft-findings")
+    def draft_findings(self, sess, pid):
+        b = self.body()
+        self.json(derive.draft_findings(self.app.store, self.app.svc, self.app.sup, pid, b.get("source_ids") or [],
+                                        b.get("provider"), bool(b.get("confirm_switch"))), 202)
+
+    @route("POST", r"/api/projects/(\w+)/conversations/(\w+)/summarize")
+    def summarize(self, sess, pid, cid):
+        b = self.body()
+        self.json(derive.summarize_conversation(self.app.store, self.app.svc, self.app.sup, pid, cid,
+                                                b.get("provider"), bool(b.get("confirm_switch"))), 202)
+
+    @route("GET", r"/api/derivations/(\w+)")
+    def derivation(self, sess, did):
+        self.json(derive.get(self.app.store, self.app.svc, self.app.sup, did))
+
+    @route("POST", r"/api/projects/(\w+)/notebook/findings/(\w+)/(accept|reject)")
+    def finding_decide(self, sess, pid, fid, op):
+        self.json(derive.decide_finding(self.app.store, pid, fid, op == "accept"))
+
+    @route("POST", r"/api/projects/(\w+)/memory/(\w+)/(accept|reject)")
+    def memory_decide(self, sess, pid, mid, op):
+        self.json(derive.decide_memory(self.app.store, pid, mid, op == "accept"))
+
     @route("GET", r"/api/projects/(\w+)/notebook/export")
     def notebook_export(self, sess, pid):
         md = self.app.svc.export_notebook(pid, (self.query.get("private") or ["0"])[0] == "1")
@@ -367,6 +473,28 @@ class Handler(BaseHTTPRequestHandler):
     @route("GET", r"/api/projects/(\w+)/context-packet")
     def packet(self, sess, pid):
         self.json(self.app.svc.context_packet(pid))
+
+    @route("POST", r"/api/repairs/(\w+)/resolve")
+    def repair_resolve(self, sess, rid):
+        """Owner: uncertain effects were reviewed; releases the project's agent-writer lock held by that task."""
+        self.json(self.app.sup.resolve_repair(rid, str(self.body().get("note", ""))))
+
+    @route("POST", r"/api/projects/(\w+)/agent-ack")
+    def agent_ack(self, sess, pid):
+        """Owner acknowledgement required before agent tasks run in this project (see filesystem_scope)."""
+        self.app.svc.project(pid)
+        on = bool(self.body().get("ack"))
+        self.app.store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                         (f"agent_ack:{pid}", "on" if on else "off"))
+        self.app.store.event("agent_ack", pid, ack=on)
+        self.json({"project_id": pid, "agent_ack": on})
+
+    @route("GET", r"/api/projects/(\w+)/agent-ack")
+    def agent_ack_get(self, sess, pid):
+        self.app.svc.project(pid)
+        row = self.app.store.one("SELECT v FROM kv WHERE k=?", (f"agent_ack:{pid}",))
+        self.json({"project_id": pid, "agent_ack": bool(row and row["v"] == "on"),
+                   "statement": tasks_mod.AGENT_ACK_STATEMENT})
 
     @route("POST", r"/api/repairs/(\w+)/export")
     def repair_export(self, sess, rid):
@@ -434,7 +562,11 @@ def main(argv=None):
     ap.add_argument("--data", default=os.environ.get("AESOP_DATA",
                                                      str(Path(os.environ.get("LOCALAPPDATA", ".")) / "AesopStudio")))
     a = ap.parse_args(argv)
-    srv = make_server(a.data, a.port)
+    try:
+        srv = make_server(a.data, a.port)
+    except InstanceLockError as e:
+        print(f"Aesop Studio not started: {e}", file=sys.stderr)
+        raise SystemExit(2)
     url = f"http://127.0.0.1:{a.port}/login?code={srv.app.login_code}"
     link_file = Path(a.data) / "launch-link.txt"
     link_file.write_text(url, encoding="utf-8")

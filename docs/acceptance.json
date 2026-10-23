@@ -13,7 +13,7 @@
   "implementation": "providers.py probe; services.send Conflict on unconfirmed switch",
   "test": "test_ac02 + live run on codex (default) and claude (confirm_switch)",
   "status": "PASS_LIVE",
-  "evidence": "Three real routes returned inspectable answers: codex (official CLI, ChatGPT plan), claude (official CLI, claude.ai plan), openai-api (separately billed Responses API, streamed). Explicit owner switch is required; there is no automatic fallback. Cursor/Perplexity/Firecrawl are handoff only and not counted."
+  "evidence": "Five verified in-app routes: Codex (official CLI, ChatGPT plan), Claude Code (claude.ai plan), Cursor (cursor-agent ask mode, verified 12.3s), Antigravity (agy plan mode, verified 29.5s) and Codex API (metered, streamed, off until a limit or the permit is set). Copilot CLI: monthly quota exhausted (unverified). Grok CLI: blocked because its billing basis can't be verified. Explicit switch only; no automatic fallback."
  },
  {
   "id": "AC03",
@@ -101,6 +101,6 @@
   "implementation": "Subordinate session 2: non-contributing reviewer",
   "test": "Review findings dispositioned",
   "status": "PASS",
-  "evidence": "Independent non-contributing reviewer (session 2), 3 rounds: (1) 10 findings, 8 fixed and confirmed, 2 documented; (2) re-review raised 2 new low issues, 1 fixed and 1 documented; (3) review of the paid route and redesign: no key leak, no XSS/CSRF; 2 medium (byte-based reservation bound; redaction over split stream spans) and 3 low fixed with tests; 1 low accepted (the mission permit bills dev-test chat by design). No PR/merge: local repo, no remote."
+  "evidence": "Four review rounds. (1-3) An independent Claude reviewer session. (4) A paid cross-family review: gpt-6-astra via the Codex API, $2.02, four lenses (stability, security, frontend, visual with real screenshots). Each of its 68 findings was then checked by 3 independent refute-by-default verifier agents (208 agents): 54 confirmed, 14 refuted. All 54 confirmed findings were fixed with regression tests (tests/test_supervision.py, tests/test_hardening.py), except security-01 (OS-level sandboxing; mitigated by honest scope text plus a per-project agent acknowledgement). No PR/merge: local repo."
  }
 ]

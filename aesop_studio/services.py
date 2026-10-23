@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 import time
+import urllib.parse
 from pathlib import Path
 
 from . import providers
-from .security import ScopeError, extract, html_to_text, redact, safe_fetch, validate_root
+from .security import (ScopeError, extract, html_to_text, redact, safe_fetch, sanitize_url,  # noqa: F401
+                       validate_root)
 from .store import Store, new_id
 from .tasks import TERMINAL, Supervisor
 
@@ -18,6 +22,55 @@ CONTEXT_ATTACHMENT_CHARS = 20_000
 
 class Conflict(ValueError):
     pass
+
+
+DISPATCH_GRACE_S = 120  # a placeholder with no task after this long was never dispatched
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _strip_userinfo(url: str) -> str:
+    try:
+        parts = urllib.parse.urlsplit(url)
+        if parts.hostname and "@" in parts.netloc:
+            host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+            return urllib.parse.urlunsplit(parts._replace(netloc=host + (f":{parts.port}" if parts.port else "")))
+    except ValueError:
+        pass
+    return url
+
+
+def _stored_matches(path: Path, data: bytes, sha: str) -> bool:
+    """An existing stored copy is reused only when it is complete: same size and same sha256."""
+    try:
+        if path.stat().st_size != len(data):
+            return False
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest() == sha
+    except OSError:
+        return False
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Write to a temp file in the same folder, fsync, then os.replace: readers see no file or the whole file."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".upload-", suffix=".partial")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 class Services:
@@ -92,8 +145,8 @@ class Services:
             dest = self.s.data_dir / "files" / pid
             dest.mkdir(parents=True, exist_ok=True)
             stored_p = dest / f"{sha[:16]}_{re.sub(r'[^A-Za-z0-9._-]', '_', name)}"
-            if not stored_p.exists():
-                stored_p.write_bytes(data)
+            if not _stored_matches(stored_p, data, sha):
+                _atomic_write(stored_p, data)
             stored = str(stored_p.relative_to(self.s.data_dir))
         aid = new_id("att")
         self.s.x("INSERT INTO attachments(id,project_id,name,sha256,size,stored_path,extract_status,extract_text,"
@@ -141,6 +194,11 @@ class Services:
 
     def _resolve(self, m: dict) -> None:
         meta = json.loads(m["meta"])
+        if not meta.get("task_id"):
+            tid = self._recover_link(m, meta)
+            if not tid:
+                return
+            meta["task_id"] = tid
         t = self.sup.get(meta.get("task_id", ""))
         if not t or t["state"] not in TERMINAL:
             return
@@ -199,17 +257,60 @@ class Services:
             raise Conflict(f"this project uses {p['provider_default']}; confirm switching to {route} explicitly")
         context = self.build_context(pid, cid, text, attachment_ids, route)
         now = time.time()
-        self.s.x("INSERT INTO messages(id,conversation_id,role,content,status,provider,created,meta) VALUES(?,?,?,?,?,?,?,?)",
-                 (new_id("msg"), cid, "user", text, "saved", None, now, json.dumps({"attachments": attachment_ids})))
-        tid = self.sup.create(p, route, context, mode="chat", timeout=300)
         mid = new_id("msg")
-        self.s.x("INSERT INTO messages(id,conversation_id,role,content,status,provider,created,meta) VALUES(?,?,?,?,?,?,?,?)",
-                 (mid, cid, "assistant", "", "submitted", route, now + 0.001,
-                  json.dumps({"task_id": tid, "context_chars": len(context)})))
+        # The user message and the durable assistant placeholder commit together BEFORE dispatch, so a
+        # provider task can never run without a message that will receive its result. The placeholder
+        # carries the context hash: if the task-id link below is lost (crash, write error), _resolve
+        # re-finds the task by (project, prompt hash) instead of orphaning it.
+        with self.s.tx() as c:
+            c.execute("INSERT INTO messages(id,conversation_id,role,content,status,provider,created,meta) "
+                      "VALUES(?,?,?,?,?,?,?,?)", (new_id("msg"), cid, "user", text, "saved", None, now,
+                                                  json.dumps({"attachments": attachment_ids})))
+            c.execute("INSERT INTO messages(id,conversation_id,role,content,status,provider,created,meta) "
+                      "VALUES(?,?,?,?,?,?,?,?)",
+                      (mid, cid, "assistant", "", "submitted", route, now + 0.001,
+                       json.dumps({"context_chars": len(context), "context_sha256": _sha(context)})))
+        try:
+            tid = self.sup.create(p, route, context, mode="chat", timeout=300)
+        except Exception as e:
+            self.s.x("UPDATE messages SET content=?, status='failed' WHERE id=?",
+                     (f"Request not dispatched: {redact(str(e))[:300]}", mid))
+            raise
+        try:
+            self._link_task(mid, tid)
+        except Exception:  # placeholder is durable; _resolve recovers the link by prompt hash
+            pass
         if self.s.one("SELECT count(*) n FROM messages WHERE conversation_id=?", (cid,))["n"] == 2:
             self.s.x("UPDATE conversations SET title=? WHERE id=?", (text[:60], cid))
         self.s.x("UPDATE projects SET updated=? WHERE id=?", (now, pid))
         return {"message_id": mid, "task_id": tid}
+
+    def _link_task(self, mid: str, tid: str) -> None:
+        with self.s.tx() as c:
+            row = c.execute("SELECT meta FROM messages WHERE id=?", (mid,)).fetchone()
+            meta = json.loads(row["meta"]) if row else {}
+            meta["task_id"] = tid
+            c.execute("UPDATE messages SET meta=? WHERE id=?", (json.dumps(meta), mid))
+
+    def _recover_link(self, m: dict, meta: dict) -> str | None:
+        """Find the task for a placeholder whose task-id link was never written; fail it if none exists."""
+        want = meta.get("context_sha256")
+        conv = self.s.one("SELECT project_id FROM conversations WHERE id=?", (m["conversation_id"],))
+        if want and conv:
+            for t in self.s.q("SELECT id,prompt FROM tasks WHERE project_id=? AND created>=? ORDER BY created "
+                              "LIMIT 50", (conv["project_id"], m["created"] - 1)):
+                if _sha(t["prompt"]) != want:
+                    continue
+                if self.s.one("SELECT id FROM messages WHERE id<>? AND meta LIKE ?",
+                              (m["id"], f'%"task_id": "{t["id"]}"%')):
+                    continue  # already answers another message
+                self._link_task(m["id"], t["id"])
+                return t["id"]
+        if time.time() - m["created"] > DISPATCH_GRACE_S:
+            self.s.x("UPDATE messages SET content=?, status='failed' WHERE id=? AND status='submitted'",
+                     ("Request not dispatched (interrupted before the provider task started); safe to resubmit.",
+                      m["id"]))
+        return None
 
     # ---------- artifacts ----------
     def save_artifact(self, pid: str, kind: str, title: str, content: str, source_ref: str | None) -> dict:
@@ -227,13 +328,16 @@ class Services:
     def add_public_source(self, pid: str, url: str) -> dict:
         self.project(pid)
         sid = new_id("src")
+        url = _strip_userinfo((url or "").strip())  # credentials are never sent, stored or exported
         try:
             final, ctype, body = safe_fetch(url)
             title, text = html_to_text(body) if "html" in ctype else ("", body)
             status, excerpt, version = "read", text[:1500], None
         except Exception as e:  # recorded honestly as unavailable
-            final, title, status, excerpt, version = url, "", "unavailable", f"Fetch failed: {e}", None
-        publisher = re.sub(r"^www\.", "", re.sub(r"^https?://([^/]+).*$", r"\1", final))
+            final, title, status, excerpt, version = url, "", "unavailable", f"Fetch failed: {redact(str(e))}", None
+        final = sanitize_url(final)  # secret-looking query values are blanked before storage
+        title = redact(title) if title else ""
+        publisher = re.sub(r"^www\.", "", re.sub(r"^https?://([^/?#]+).*$", r"\1", final))
         self.s.x("INSERT INTO sources(id,project_id,kind,title,publisher,locator,retrieved_at,version,status,excerpt,"
                  "private,created) VALUES(?,?,?,?,?,?,?,?,?,?,0,?)",
                  (sid, pid, "public", (title or final)[:300], publisher, final, time.time(), version, status,
@@ -280,6 +384,8 @@ class Services:
                  f"Exported {time.strftime('%Y-%m-%d %H:%M')}. Private local sources "
                  f"{'included' if include_private else 'excluded'}.", "", "## Findings", ""]
         for f in nb["findings"]:
+            if f["status"] in ("proposed", "rejected"):
+                continue  # proposals are not findings until the owner accepts them
             if f["source_id"] and f["source_id"] not in srcs:
                 continue
             ref = f" [{list(srcs).index(f['source_id']) + 1}]" if f["source_id"] in srcs else " [no source]"
@@ -288,7 +394,11 @@ class Services:
         lines += ["", "## Sources", ""]
         for i, s in enumerate(srcs.values(), 1):
             when = time.strftime("%Y-%m-%d", time.localtime(s["retrieved_at"] or s["created"]))
-            lines.append(f"{i}. {s['title']} — {s['publisher'] or ''}. {s['locator']}. Retrieved {when}. "
+            loc = s["locator"]
+            if loc.lower().startswith(("http://", "https://")):
+                loc = sanitize_url(loc)  # also covers rows stored before credentials were stripped
+            pub = redact(re.sub(r"^[^@/]*@", "", s["publisher"] or ""))  # drop any stored userinfo
+            lines.append(f"{i}. {redact(s['title'])} — {pub}. {loc}. Retrieved {when}. "
                          f"Status: {s['status']}" + (f". Version: {s['version']}" if s["version"] else ""))
         return "\n".join(lines) + "\n"
 
@@ -336,12 +446,25 @@ class Services:
 
     def correct_memory(self, pid: str, mid: str, content: str) -> dict:
         """Owner correction supersedes the old record (kept for provenance)."""
-        old = self.s.one("SELECT * FROM memory WHERE id=? AND project_id=?", (mid, pid))
-        if not old:
-            raise KeyError("memory not in this project")
-        new = self.add_memory(pid, "authoritative", old["kind"], content, json.loads(old["source_ids"]) + [mid])
-        self.s.x("UPDATE memory SET status='superseded', superseded_by=? WHERE id=?", (new["id"], mid))
-        return new
+        self.project(pid)
+        nid = new_id("mem")
+        # Check, insert and supersede in ONE write transaction: two concurrent corrections (or a repeat
+        # correction of an already superseded record) can never leave two "current" replacements.
+        with self.s.tx() as c:
+            old = c.execute("SELECT * FROM memory WHERE id=? AND project_id=?", (mid, pid)).fetchone()
+            if not old:
+                raise KeyError("memory not in this project")
+            if old["status"] != "current":
+                raise Conflict(f"memory already {old['status']}; correct the current record instead")
+            c.execute("INSERT INTO memory(id,project_id,layer,kind,content,source_ids,status,created) "
+                      "VALUES(?,?,?,?,?,?,?,?)",
+                      (nid, pid, "authoritative", old["kind"][:40], content[:4000],
+                       json.dumps(json.loads(old["source_ids"]) + [mid]), "current", time.time()))
+            cur = c.execute("UPDATE memory SET status='superseded', superseded_by=? WHERE id=? "
+                            "AND status='current'", (nid, mid))
+            if cur.rowcount != 1:
+                raise Conflict("memory already superseded")
+        return self.s.one("SELECT * FROM memory WHERE id=?", (nid,))
 
     def mark_memory(self, pid: str, mid: str, status: str) -> None:
         if status not in ("stale", "conflict", "current"):

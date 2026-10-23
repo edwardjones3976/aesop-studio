@@ -23,10 +23,12 @@ Data lives in `%LOCALAPPDATA%\AesopStudio` (override with `-Data` or `AESOP_DATA
 
 | Route | How it is verified | Billing |
 |---|---|---|
-| `codex` | `codex login status` → "Logged in using ChatGPT" | ChatGPT plan quota, $0 incremental |
-| `claude` | `claude auth status` → `authMethod: claude.ai` | Claude plan quota, $0 incremental |
-| `openai-api` | `OPENAI_API_KEY` present (value never read into logs/UI) | Metered per token, streamed. Off until you set a monthly limit or turn on the mission permit |
-| cursor / perplexity / firecrawl | not integrated | Handoff only, not counted as integrations |
+| `codex` (Codex) | `codex login status` → "Logged in using ChatGPT" | ChatGPT plan quota, $0 incremental |
+| `claude` (Claude Code) | `claude auth status` → `authMethod: claude.ai` | Claude plan quota, $0 incremental |
+| `openai-api` (Codex API) | `OPENAI_API_KEY` present (value never read into logs/UI) | Metered per token, streamed. Off until you set a monthly limit or turn on the mission permit |
+| `cursor` (Cursor) / `antigravity` (Antigravity) / `copilot` (Copilot CLI) | Providers → **Verify** (one tiny live call) | Their own plan quota; read-only ask/plan mode, chat only |
+| `grok` (Grok CLI) | installed | Blocked: billing basis not verifiable |
+| perplexity / firecrawl | not integrated | Handoff/research only |
 
 Studio never reads credential files. `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are removed from child-process environments so the CLIs use subscription sign-in. To sign in: `codex login`, `claude auth login`. After that, choose **Providers → Re-verify** in the app.
 
@@ -59,6 +61,18 @@ Offline tests use a `SIMULATED` adapter (enabled only with `AESOP_SIMULATED_ROUT
 ## Backup / restore
 
 Use **Evidence → Create backup**, or call `aesop_studio.backup.create_backup`. This takes a consistent SQLite snapshot plus the stored files, with a SHA-256 manifest. **Test restore** unpacks the latest backup into `restore-tests/<timestamp>` and verifies hashes, `PRAGMA integrity_check`, and row counts. It never restores over live data. Credentials are not included: run `codex login` / `claude auth login` again on a new machine.
+
+## Model-assisted proposals
+
+Research → **Draft findings** and Chat → **Summarize to memory** ask the project's own provider (one request) to propose cited findings or a derived summary. Proposals stay out of exports and context packets until you **Accept** them.
+
+## Roundtables (planning only)
+
+Chat → **Roundtable** configures a multi-provider session from live lane discovery and exports a planning packet. Start stays disabled in this release.
+
+## Paid review tool
+
+`python tools/paid_review.py --lens stability|security|frontend|visual` runs a bounded, ledgered Codex API review (results in `docs/reviews/`).
 
 ## Known limits
 

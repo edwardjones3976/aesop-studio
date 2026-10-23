@@ -36,18 +36,123 @@ def _claude_cmd() -> list[str] | None:
     return [exe] if exe and exe.lower().endswith(".exe") else None
 
 
+def _cursor_cmd() -> list[str] | None:
+    """cursor-agent's own launcher is a .ps1; call its bundled node + index.js directly (no shell)."""
+    import re
+    base = Path(os.environ.get("LOCALAPPDATA", "")) / "cursor-agent" / "versions"
+    try:
+        dirs = [d for d in base.iterdir() if d.is_dir() and re.match(r"^\d{4}\.\d{1,2}\.\d{1,2}(-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$", d.name)]
+    except OSError:
+        return None
+    if not dirs:
+        return None
+    key = lambda d: tuple(int(x) for x in d.name.split("-")[0].split("."))
+    d = max(dirs, key=key)
+    node, js = d / "node.exe", d / "index.js"
+    return [str(node), str(js)] if node.is_file() and js.is_file() else None
+
+
+def _agy_cmd() -> list[str] | None:
+    exe = shutil.which("agy.exe") or str(Path(os.environ.get("LOCALAPPDATA", "")) / "agy" / "bin" / "agy.exe")
+    return [exe] if exe and Path(exe).is_file() else None
+
+
+def _copilot_cmd() -> list[str] | None:
+    exe = shutil.which("copilot.exe")
+    return [exe] if exe else None
+
+
+def _grok_cmd() -> list[str] | None:
+    exe = shutil.which("grok.exe") or str(Path.home() / ".grok" / "bin" / "grok.exe")
+    return [exe] if exe and Path(exe).is_file() else None
+
+
+# Routes whose CLI only accepts the prompt as an argument (never via a shell; Windows caps a command line at
+# 32,767 characters, so longer prompts are refused rather than truncated).
+ARGV_PROMPT_ROUTES = {"antigravity"}
+MAX_ARGV_PROMPT = 24_000
+# Live-verified CLI routes: an owner-triggered minimal call is the only proof of usable access + quota.
+LIVE_VERIFY_ROUTES = {"cursor", "antigravity", "copilot"}
+VERIFY_MAX_AGE_S = 7 * 24 * 3600
+
+
+def _live_verification(store, rid: str) -> dict | None:
+    if store is None:
+        return None
+    row = store.one("SELECT v FROM kv WHERE k=?", (f"verify:{rid}",))
+    return json.loads(row["v"]) if row else None
+
+
+VERIFY_TOKEN = "AESOP_VERIFY_OK"
+
+
+def verify_live(store, rid: str) -> dict:
+    """Owner-triggered: one minimal read-only chat call proves sign-in + remaining quota for a CLI lane."""
+    import tempfile
+    from .security import redact
+    if rid not in LIVE_VERIFY_ROUTES:
+        raise ValueError(f"{rid} is not a live-verifiable CLI route")
+    prompt = f"Reply with exactly: {VERIFY_TOKEN}"
+    import shutil
+    cwd = tempfile.mkdtemp(prefix="aesop-verify-")
+    t0 = time.time()
+    try:
+        argv = build_argv(rid, "chat", cwd, str(Path(cwd) / "last.txt"), None, prompt=prompt)
+        code, out = _contained(argv, 180, cwd=cwd, input_text=None if rid in ARGV_PROMPT_ROUTES else prompt)
+        ok = VERIFY_TOKEN in out
+        detail = "reply matched" if ok else redact(out.strip().splitlines()[-1] if out.strip() else f"exit {code}")
+    except (OSError, RuntimeError) as e:
+        ok, detail = False, f"{type(e).__name__}: {str(e)[:160]}"
+    finally:
+        shutil.rmtree(cwd, ignore_errors=True)
+    rec = {"at": time.time(), "ok": ok, "detail": detail[:200], "latency_s": round(time.time() - t0, 1)}
+    store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (f"verify:{rid}", json.dumps(rec)))
+    store.event("route_live_verification", None, route=rid, ok=ok, latency_s=rec["latency_s"])
+    return rec
+
+
 def _sim_cmd() -> list[str]:
     return [sys.executable, "-I", str(Path(__file__).with_name("simulated_provider.py"))]
 
 
-def _run(argv: list[str], timeout: int = 30) -> tuple[int, str]:
+MAX_PROBE_OUTPUT = 64 * 1024
+
+
+def _contained(argv: list[str], timeout: int, cwd: str | None = None, input_text: str | None = None) -> tuple[int, str]:
+    """Run a short provider command inside a kill-on-close Job Object with a bounded timeout and bounded cleanup,
+    so a hung CLI (or a descendant holding its pipes) can never hang or leak past the timeout."""
+    from . import winjob
     env = {k: v for k, v in os.environ.items() if k.upper() not in BILLING_ENV}
     try:
-        p = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=timeout, encoding="utf-8",
-                           errors="replace", creationflags=NO_WINDOW, stdin=subprocess.DEVNULL)
-        return p.returncode, (p.stdout or "") + (p.stderr or "")
-    except (OSError, subprocess.TimeoutExpired) as e:
+        p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+    except OSError as e:
         return -1, str(e)
+    job = winjob.contain(p.pid)
+    try:
+        try:
+            out, _ = p.communicate(input_text.encode("utf-8") if input_text is not None else None, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if not winjob.terminate(job):
+                p.kill()
+            try:
+                out, _ = p.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                for f in (p.stdout, p.stdin):
+                    try:
+                        f and f.close()
+                    except OSError:
+                        pass
+                out = b""
+            return -1, f"timed out after {timeout}s " + (out or b"")[:MAX_PROBE_OUTPUT].decode("utf-8", "replace")
+        return p.returncode, (out or b"")[:MAX_PROBE_OUTPUT].decode("utf-8", "replace")
+    finally:
+        winjob.close(job)
+
+
+def _run(argv: list[str], timeout: int = 30) -> tuple[int, str]:
+    return _contained(argv, timeout)
 
 
 def _base(provider, route_type, endpoint, modes, auth_method, billing_basis, limitations):
@@ -55,13 +160,14 @@ def _base(provider, route_type, endpoint, modes, auth_method, billing_basis, lim
             "supported_modes": modes, "auth_method": auth_method, "auth_status": "UNVERIFIED",
             "billing_basis": billing_basis, "incremental_cost_status": "unknown",
             "permitted_data_classes": ["synthetic", "project_approved"],
-            "filesystem_scope": "chat: empty sandbox dir; agent: selected project root only",
+            "filesystem_scope": ("working directory only, NOT an isolation boundary: the CLI runs as your Windows "
+                                 "user and can read any file you can (chat: empty temp dir; agent: project root)"),
             "cancellation_behavior": "local process-tree termination; remote job stop not provable",
             "output_format": "text", "last_verified_at": None, "evidence": "", "limitations": limitations,
             "state": "UNVERIFIED"}
 
 
-def probe() -> dict[str, dict]:
+def probe(store=None) -> dict[str, dict]:
     now = time.time()
     routes: dict[str, dict] = {}
 
@@ -134,8 +240,67 @@ def probe() -> dict[str, dict]:
              cancellation_behavior="stream closed locally; tokens already generated may still bill (kept as exposure)")
     routes["openai-api"] = r
 
-    for rid, prov, note in (("cursor", "cursor", "cursor-agent CLI not installed; open Cursor manually"),
-                            ("perplexity", "perplexity", "Web app handoff; no verified no-charge API route"),
+    # ---- CLI lanes verified by an explicit owner-triggered live call (stored), plus local status where offered
+    for rid, prov, cmdf, auth, billing_note in (
+            ("cursor", "cursor", _cursor_cmd, "Cursor sign-in (cursor-agent login)",
+             "Cursor plan usage; overage depends on account settings (not observable here)"),
+            ("antigravity", "google", _agy_cmd, "Google sign-in (Antigravity)",
+             "Antigravity/Gemini account quota; billing not observable here"),
+            ("copilot", "github", _copilot_cmd, "GitHub sign-in (Copilot CLI)",
+             "GitHub Copilot premium-request quota; paid overage only if enabled on the account")):
+        r = _base(prov, "official_cli", None, ["chat"], auth, "subscription_included", billing_note)
+        r["filesystem_scope"] = ("chat only, read-only/ask/plan mode in an empty temp dir; not an isolation "
+                                 "boundary — the CLI runs as your Windows user")
+        cmd = cmdf()
+        if not cmd:
+            r.update(state="UNAVAILABLE", evidence=f"{rid} CLI not found on this PC", last_verified_at=now)
+            routes[rid] = r
+            continue
+        if os.environ.get("AESOP_PROBE_OFFLINE") == "1":  # offline test runs never launch real CLIs
+            r.update(state="UNVERIFIED", evidence="probe skipped (offline test mode)", last_verified_at=now)
+            routes[rid] = r
+            continue
+        r["executable"] = Path(cmd[-1]).name if rid == "cursor" else Path(cmd[0]).name
+        code, out = _run(cmd + ["--version"], timeout=30)
+        first = (out.strip().splitlines() or [""])[0][:80]
+        r["version"] = first if code == 0 and first else None
+        signed_in = None
+        if rid == "cursor":
+            code, out = _run(cmd + ["status"], timeout=40)
+            signed_in = code == 0 and "logged in" in out.lower()  # account identity is never stored
+            r["auth_status"] = "signed_in" if signed_in else "not_signed_in"
+        ver = _live_verification(store, rid)
+        fresh = ver and now - ver.get("at", 0) < VERIFY_MAX_AGE_S
+        if signed_in is False:
+            r.update(state="AUTH_REQUIRED", evidence="cursor-agent status: not signed in; run `cursor-agent login`")
+        elif fresh and ver.get("ok"):
+            r.update(state="READY_INCLUDED", incremental_cost_status="plan quota (no $ visibility)",
+                     evidence=f"live verification {time.strftime('%Y-%m-%d %H:%M', time.localtime(ver['at']))}: "
+                              f"{ver.get('detail', 'ok')}")
+        elif fresh:
+            r.update(state="UNAVAILABLE", evidence=f"last live verification failed: {ver.get('detail', '')}"[:300])
+        else:
+            r.update(state="UNVERIFIED", evidence=("installed" + (" and signed in" if signed_in else "")
+                                                   + "; run Verify (one minimal live call) to enable"))
+        r["last_verified_at"] = (ver or {}).get("at") or now
+        routes[rid] = r
+
+    r = _base("xai", "official_cli", None, ["chat"], "xAI sign-in (grok CLI)", "unknown",
+              "Billing basis not verifiable (subscription vs API key); not enabled to avoid unbounded charges.")
+    cmd = _grok_cmd()
+    if cmd and os.environ.get("AESOP_PROBE_OFFLINE") == "1":
+        r.update(executable="grok.exe", state="BLOCKED_POLICY", evidence="probe skipped (offline test mode)")
+    elif cmd:
+        code, out = _run(cmd + ["--version"], timeout=30)
+        r.update(executable="grok.exe", version=(out.strip().splitlines() or [None])[0] if code == 0 else None,
+                 state="BLOCKED_POLICY", evidence="grok CLI installed; billing basis unverified, so no calls are made",
+                 incremental_cost_status="unknown (not enabled)")
+    else:
+        r.update(state="UNAVAILABLE", evidence="grok CLI not found")
+    r["last_verified_at"] = now
+    routes["grok"] = r
+
+    for rid, prov, note in (("perplexity", "perplexity", "Web app handoff; no verified no-charge API route"),
                             ("firecrawl", "firecrawl", "Handoff only inside Studio; built-in fetcher used instead")):
         r = _base(prov, "handoff", None, ["handoff"], "native app", "n/a", note)
         r.update(state="HANDOFF_ONLY", evidence=note, last_verified_at=now, incremental_cost_status="$0 (no call)")
@@ -150,15 +315,36 @@ def probe() -> dict[str, dict]:
 
 
 def refresh(store: Store) -> dict[str, dict]:
-    routes = probe()
+    routes = _named(probe(store))
     store.x("INSERT INTO kv(k,v) VALUES('routes',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (json.dumps(routes),))
     store.event("routes_probed", None, states={k: v["state"] for k, v in routes.items()})
     return routes
 
 
+# Owner naming rule (2026-10-23): each family is titled by its code-based product. OpenAI / ChatGPT / Codex all
+# appear as "Codex"; route ids stay stable internally.
+DISPLAY = {
+    "codex": ("Codex", "Codex"), "openai-api": ("Codex API", "Codex"), "claude": ("Claude Code", "Claude Code"),
+    "cursor": ("Cursor", "Cursor"), "antigravity": ("Antigravity", "Antigravity"),
+    "copilot": ("Copilot CLI", "Copilot CLI"), "grok": ("Grok CLI", "Grok CLI"),
+    "perplexity": ("Perplexity", "Perplexity"), "firecrawl": ("Firecrawl", "Firecrawl"),
+    "simulated": ("Simulated (test only)", "Simulated"),
+}
+
+
+def display_name(route_id: str) -> str:
+    return DISPLAY.get(route_id, (route_id, route_id))[0]
+
+
+def _named(routes: dict) -> dict:
+    for rid, r in routes.items():
+        r["display_name"], r["family"] = DISPLAY.get(rid, (rid, rid))
+    return routes
+
+
 def cached(store: Store) -> dict[str, dict]:
     row = store.one("SELECT v FROM kv WHERE k='routes'")
-    routes = json.loads(row["v"]) if row else refresh(store)
+    routes = _named(json.loads(row["v"]) if row else refresh(store))
     api = routes.get("openai-api")
     if api and api["state"] == "READY_METERED_DISABLED":
         from . import ledger
@@ -175,7 +361,8 @@ def usable(route: dict, mode: str) -> bool:
             and mode in route["supported_modes"])
 
 
-def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | None = None) -> list[str]:
+def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | None = None,
+               prompt: str | None = None) -> list[str]:
     """argv list (no shell). The prompt is always passed on stdin, never concatenated into a command."""
     if route_id == "codex":
         cmd = _codex_cmd()
@@ -202,6 +389,26 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         if model:
             argv += ["--model", model]
         return argv
+    if route_id == "cursor" and mode == "chat":
+        cmd = _cursor_cmd()
+        if not cmd:
+            raise RuntimeError("cursor-agent unavailable")
+        argv = cmd + ["-p", "--output-format", "text", "--mode", "ask", "--trust", "--workspace", cwd]
+        return argv + (["--model", model] if model else [])
+    if route_id == "antigravity" and mode == "chat":
+        cmd = _agy_cmd()
+        if not cmd:
+            raise RuntimeError("agy unavailable")
+        if prompt is None or len(prompt) > MAX_ARGV_PROMPT:
+            raise RuntimeError(f"Antigravity takes the prompt as an argument; context over {MAX_ARGV_PROMPT:,} "
+                               "characters is refused")
+        return cmd + ["--mode", "plan", "--print-timeout", "280s"] + (["--model", model] if model else []) + [
+            "-p=" + prompt]
+    if route_id == "copilot" and mode == "chat":
+        cmd = _copilot_cmd()
+        if not cmd:
+            raise RuntimeError("copilot unavailable")
+        return cmd + ["-s", "--no-color"] + (["--model", model] if model else [])  # prompt via stdin
     if route_id == "simulated":
         return _sim_cmd() + [mode, out_file]
-    raise RuntimeError(f"route {route_id} has no in-app execution path")
+    raise RuntimeError(f"route {route_id} has no in-app execution path for {mode}")

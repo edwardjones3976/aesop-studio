@@ -9,7 +9,7 @@
   },
   {
    "step": "codex_answer",
-   "end_to_end_s": 9.44
+   "end_to_end_s": 9.69
   },
   {
    "step": "artifact_saved"
@@ -20,7 +20,7 @@
   },
   {
    "step": "api_answer_with_cost",
-   "end_to_end_s": 3.36
+   "end_to_end_s": 5.75
   },
   {
    "step": "permit_off",

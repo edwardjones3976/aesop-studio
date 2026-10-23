@@ -113,7 +113,7 @@ class Store:
         with self.tx() as c:
             c.execute(sql, args)
 
-    def event(self, kind: str, project_id: str | None, **data) -> None:
+    def event(self, kind: str, project_id: str | None, /, **data) -> None:  # positional-only: data may use "kind"
         self.x("INSERT INTO events(kind,project_id,data,created) VALUES(?,?,?,?)",
                (kind, project_id, json.dumps(data), time.time()))
 
