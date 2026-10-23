@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aesop Studio</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="shell">
+  <aside class="side" aria-label="Projects">
+    <div class="brand">Aesop <span>Studio</span></div>
+    <button id="newProjectBtn" class="btn primary wide">New project</button>
+    <nav id="projectList" class="plist" aria-label="Project list"></nav>
+    <div class="side-foot">
+      <button class="linkish" data-global="providers">Providers</button>
+      <button class="linkish" data-global="evidence">Evidence</button>
+    </div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <header class="top">
+      <div>
+        <h1 id="projTitle">No project open</h1>
+        <p id="projMeta" class="muted"></p>
+      </div>
+      <div id="projControls" class="controls" hidden>
+        <label>Provider <select id="providerSel"></select></label>
+        <button id="settingsBtn" class="btn">Settings</button>
+      </div>
+    </header>
+    <nav id="tabs" class="tabs" role="tablist" hidden>
+      <button role="tab" data-tab="chat" aria-selected="true">Chat</button>
+      <button role="tab" data-tab="files">Files</button>
+      <button role="tab" data-tab="agent">Agent tasks</button>
+      <button role="tab" data-tab="research">Research</button>
+      <button role="tab" data-tab="memory">Memory</button>
+      <button role="tab" data-tab="artifacts">Saved</button>
+    </nav>
+    <div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
+    <section id="view" class="view"></section>
+  </main>
+</div>
+<dialog id="dlg"><form method="dialog" id="dlgForm"></form></dialog>
+</body>
+</html>

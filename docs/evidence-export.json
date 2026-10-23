@@ -1,0 +1,205 @@
+{
+ "budget": {
+  "ceiling": 165.0,
+  "settled": 0,
+  "outstanding": 0,
+  "ambiguous": 0,
+  "committed": 0,
+  "remaining": 165.0,
+  "included_uses": 1,
+  "permit": false,
+  "phase": "normal"
+ },
+ "acceptance": [
+  {
+   "id": "AC01",
+   "requirement": "Project \u2192 file \u2192 provider \u2192 output \u2192 save \u2192 restart \u2192 resume",
+   "implementation": "services.py send/messages/save_artifact; store.py SQLite",
+   "test": "tests TestWorkflow.test_ac01 (simulated) + live codex/claude chat with synthetic file",
+   "status": "PASS_LIVE",
+   "evidence": "Live: codex 9.65s and claude 6.41s returned correct answer from attached synthetic file; restart re-read messages/artifacts from disk."
+  },
+  {
+   "id": "AC02",
+   "requirement": "Two usable providers, project default, explicit fallback",
+   "implementation": "providers.py probe; services.send Conflict on unconfirmed switch",
+   "test": "test_ac02 + live run on codex (default) and claude (confirm_switch)",
+   "status": "PASS_LIVE",
+   "evidence": "codex-cli 0.163.0 (ChatGPT sign-in) and Claude Code 2.1.309 (claude.ai sign-in) both READY_INCLUDED and returned real outputs. Cursor/Perplexity/Firecrawl are handoff only and not counted."
+  },
+  {
+   "id": "AC03",
+   "requirement": "Agent start, status, output, cancel, saved results",
+   "implementation": "tasks.py Supervisor; taskkill /PID /T /F on owned PID only",
+   "test": "test_ac03_* (simulated) + live codex write task + live claude cancel",
+   "status": "PASS_LIVE",
+   "evidence": "codex created hello.txt (changed-files diff recorded); claude task cancelled, owned PID confirmed gone; result saved as artifact."
+  },
+  {
+   "id": "AC04",
+   "requirement": "Interrupt/restart reconciliation and repair cycle",
+   "implementation": "Supervisor.reconcile \u2192 INTERRUPTED / EFFECT_UNKNOWN + repairs table (OPEN_FOREMAN)",
+   "test": "test_ac04_restart_reconciliation_no_replay",
+   "status": "PASS_OFFLINE",
+   "evidence": "Running/reserved tasks never replayed; repair packet recorded. Formal Foreman dispatch through Director-Orchestrator not exercised."
+  },
+  {
+   "id": "AC05",
+   "requirement": "Research notebook: public + local sources, citations, export",
+   "implementation": "services add_public_source (SSRF-safe fetch) / add_local_source / add_finding / export_notebook",
+   "test": "test_ac05 (local) + browser journey (public fetch)",
+   "status": "PASS_LIVE",
+   "evidence": "Private local sources excluded from public export; unsupported/unread claims labelled. Live: sqlite.org page fetched and cited from the browser; fetch to 127.0.0.1 recorded as unavailable (SSRF blocked)."
+  },
+  {
+   "id": "AC06",
+   "requirement": "Project memory separation, stale/conflict, correction",
+   "implementation": "memory table, three layers, supersede-on-correct, explicit promote",
+   "test": "test_ac06_memory_isolation_and_correction",
+   "status": "PASS_OFFLINE",
+   "evidence": "Cross-project memory/search returns nothing; derived summaries require source IDs."
+  },
+  {
+   "id": "AC07",
+   "requirement": "Billing limits under concurrency; prohibited billers blocked",
+   "implementation": "ledger.py BEGIN IMMEDIATE reservation; OpenAI-only; permit off at start",
+   "test": "test_ac07_ceiling_and_billers (30 concurrent $10 reservations)",
+   "status": "PASS_OFFLINE",
+   "evidence": "Exactly 16 accepted ($160); ambiguous timeout exposure retained; non-OpenAI metered blocked."
+  },
+  {
+   "id": "AC08",
+   "requirement": "File, command, preview, network boundaries",
+   "implementation": "security.py contained_path/safe_fetch; server Host/Origin/CSRF/CSP; argv lists, no shell",
+   "test": "test_ac08_* + listener check",
+   "status": "PASS_OFFLINE",
+   "evidence": "Traversal/absolute paths rejected; SSRF to loopback/link-local/private blocked; 127.0.0.1 listener only; Origin/CSRF/Host enforced. Symlink test skipped (no symlink privilege)."
+  },
+  {
+   "id": "AC09",
+   "requirement": "Privacy and credentials",
+   "implementation": "redact() on output/exports; API-key env vars stripped from child env; no credential file reads",
+   "test": "test_ac09_redaction + simulated output redaction in AC01",
+   "status": "PASS_OFFLINE",
+   "evidence": "Secrets never sent to browser; HttpOnly session cookie; launch code one-time."
+  },
+  {
+   "id": "AC10",
+   "requirement": "Backup and restore to a separate location",
+   "implementation": "backup.py SQLite online backup + manifest hashes; restore refuses live dir / non-empty target",
+   "test": "test_ac10_backup_restore_separate_dir",
+   "status": "PASS_LIVE",
+   "evidence": "Hashes, integrity_check and row counts match; reauth path documented. Live: backup + restore test from the running app passed (counts match)."
+  },
+  {
+   "id": "AC11",
+   "requirement": "Responsive browser journey and reporting",
+   "implementation": "static/ vanilla JS, keyboard tabs, focus rings, responsive grid",
+   "test": "Real Chrome journey on Windows",
+   "status": "PARTIAL",
+   "evidence": "Real Chrome on Windows: create project, attach, chat (codex, 10.1s end-to-end), restart server, conversation resumed; Evidence page renders with no horizontal overflow at 1295px. Phone-width layout NOT verified (window resize did not apply). Found and fixed a JS syntax error that blanked the UI."
+  },
+  {
+   "id": "AC12",
+   "requirement": "Measured representative workflow",
+   "implementation": "Evidence \u2192 Workflow measurements (native vs studio)",
+   "test": "Owner trial",
+   "status": "UNVERIFIED",
+   "evidence": "Only provider wait latency measured. No owner trial yet; no time-saving claim made."
+  },
+  {
+   "id": "AC13",
+   "requirement": "Independent review and regressions",
+   "implementation": "Subordinate session 2: non-contributing reviewer",
+   "test": "Review findings dispositioned",
+   "status": "PARTIAL",
+   "evidence": "Independent non-contributing reviewer (subordinate session 2) found 10 issues; 9 fixed with regression tests where feasible, 1 accepted (see report). No PR/merge: local repo, no remote."
+  }
+ ],
+ "routes": [
+  {
+   "id": "codex",
+   "provider": "openai",
+   "state": "READY_INCLUDED",
+   "version": "codex-cli 0.163.0",
+   "billing_basis": "subscription_included",
+   "incremental_cost_status": "$0 (plan quota)",
+   "evidence": "codex login status: Logged in using ChatGPT",
+   "limitations": "Uses ChatGPT plan quota; generic chat runs as a read-only Codex exec."
+  },
+  {
+   "id": "claude",
+   "provider": "anthropic",
+   "state": "READY_INCLUDED",
+   "version": "2.1.309",
+   "billing_basis": "subscription_included",
+   "incremental_cost_status": "$0 (plan quota)",
+   "evidence": "claude auth status: loggedIn=true authMethod=claude.ai",
+   "limitations": "Uses Claude plan quota. Not an authorized biller: metered auth is blocked."
+  },
+  {
+   "id": "openai-api",
+   "provider": "openai",
+   "state": "UNAVAILABLE",
+   "version": null,
+   "billing_basis": "metered",
+   "incremental_cost_status": "metered; runtime budget not configured",
+   "evidence": "OPENAI_API_KEY presence only (value never read)",
+   "limitations": "Separately metered everyday route; disabled until the owner sets operating limits."
+  },
+  {
+   "id": "cursor",
+   "provider": "cursor",
+   "state": "HANDOFF_ONLY",
+   "version": null,
+   "billing_basis": "n/a",
+   "incremental_cost_status": "$0 (no call)",
+   "evidence": "cursor-agent CLI not installed; open Cursor manually",
+   "limitations": "cursor-agent CLI not installed; open Cursor manually"
+  },
+  {
+   "id": "perplexity",
+   "provider": "perplexity",
+   "state": "HANDOFF_ONLY",
+   "version": null,
+   "billing_basis": "n/a",
+   "incremental_cost_status": "$0 (no call)",
+   "evidence": "Web app handoff; no verified no-charge API route",
+   "limitations": "Web app handoff; no verified no-charge API route"
+  },
+  {
+   "id": "firecrawl",
+   "provider": "firecrawl",
+   "state": "HANDOFF_ONLY",
+   "version": null,
+   "billing_basis": "n/a",
+   "incremental_cost_status": "$0 (no call)",
+   "evidence": "Handoff only inside Studio; built-in fetcher used instead",
+   "limitations": "Handoff only inside Studio; built-in fetcher used instead"
+  }
+ ],
+ "tasks": {
+  "total": 1,
+  "by_state": {
+   "COMPLETED": 1
+  },
+  "reconciliations": 0,
+  "period": {
+   "a": 1792744320.9420145,
+   "b": 1792744320.9420145
+  },
+  "repairs": []
+ },
+ "latency": [
+  {
+   "route": "codex/chat",
+   "n": 1,
+   "median_s": 9.22,
+   "min_s": 9.22,
+   "max_s": 9.22,
+   "samples": [
+    9.22
+   ]
+  }
+ ]
+}
