@@ -641,8 +641,19 @@ def main(argv=None):
                 srv.app.login_code = secrets.token_urlsafe(24)  # previous unused code is invalidated
                 link_file.write_text(f"http://127.0.0.1:{a.port}/login?code={srv.app.login_code}", encoding="utf-8")
 
+    def reverify_watch():
+        while True:
+            for rid in providers.due_reverify(srv.app.store):
+                try:
+                    providers.verify_live(srv.app.store, rid)
+                    providers.refresh(srv.app.store)
+                except Exception as e:  # never let a provider hiccup stop the watcher
+                    print(f"background verification of {rid} failed: {type(e).__name__}")
+            time.sleep(600)
+
     import threading as _threading
     _threading.Thread(target=relogin_watch, daemon=True).start()
+    _threading.Thread(target=reverify_watch, daemon=True).start()
     if srv.app.reconciled:
         print(f"Reconciled {len(srv.app.reconciled)} unfinished task(s) from the previous run.")
     try:

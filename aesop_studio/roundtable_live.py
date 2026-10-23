@@ -288,8 +288,8 @@ class Broker:
             t0, flagged = time.time(), False
             window = rec.get("response_window_s") if rec["mode"] == "war_room" else None
             while True:
-                t = self.sup.get(tid)
-                if t["state"] in TERMINAL:
+                t = self.sup.final(tid)  # follows an automatic transient-error retry
+                if t["state"] in TERMINAL and not json.loads(t["checkpoint"] or "{}").get("retried_as"):
                     break
                 if window and not flagged and time.time() - t0 > window:
                     flagged = True
@@ -297,7 +297,7 @@ class Broker:
                 time.sleep(0.25)
             latency = round(time.time() - t0, 2)
             cp = json.loads(t["checkpoint"] or "{}")
-            text = (cp.get("result") or "").strip() or self.sup.output(tid)[0].strip()
+            text = (cp.get("result") or "").strip() or self.sup.output(t["id"])[0].strip()
             cost = cp.get("cost_usd") or 0.0
             st = s["state"][lane["id"]]
             if t["state"] == "COMPLETED" and text.strip().upper().rstrip(".") == "PASS":
@@ -404,11 +404,13 @@ class Broker:
                   "## Conditions for implementation. Attribute every view. No "
                   "false consensus. Votes are advisory and confer no authority.")
         tid = self.sup.create(s["project"], synth["route_id"], prompt, mode="chat", timeout=180)
-        while self.sup.get(tid)["state"] not in TERMINAL:
+        while True:
+            t = self.sup.final(tid)
+            if t["state"] in TERMINAL and not json.loads(t["checkpoint"] or "{}").get("retried_as"):
+                break
             time.sleep(0.5)
-        t = self.sup.get(tid)
         cp = json.loads(t["checkpoint"] or "{}")
-        body = (cp.get("result") or "").strip() or self.sup.output(tid)[0].strip()
+        body = (cp.get("result") or "").strip() or self.sup.output(t["id"])[0].strip()
         if t["state"] != "COMPLETED" or not body:
             body = f"Synthesis failed ({t['state']}: {t['error']}). The transcript is the record."
         memo = (f"# Roundtable decision memo\n\n_Synthesized by {synth['name']} (participant) from the transcript. "

@@ -17,7 +17,11 @@ class ProviderAgentModes(unittest.TestCase):
             with self.subTest(provider=rid), patch.object(providers, f"_{rid}_cmd", return_value=[rid]):
                 chat = providers.build_argv(rid, "chat", "C:/project", "out", prompt="test")
                 agent = providers.build_argv(rid, "agent", "C:/project", "out", prompt="test")
-                self.assertEqual(chat[chat.index("--tools") + 1], "")
+                if rid == "grok":  # grok.exe is called directly, so an empty value survives
+                    self.assertEqual(chat[chat.index("--tools") + 1], "")
+                else:  # zai goes through PowerShell, which drops empty args: no empty argument allowed at all
+                    self.assertNotIn("", chat)
+                    self.assertIn("Bash", chat[chat.index("--disallowedTools") + 1])
                 self.assertEqual(agent[agent.index("--permission-mode") + 1], "acceptEdits")
                 self.assertNotIn("plan", agent)
                 self.assertNotIn("--tools", agent)

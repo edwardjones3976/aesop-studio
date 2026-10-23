@@ -199,7 +199,7 @@ class Services:
             if not tid:
                 return
             meta["task_id"] = tid
-        t = self.sup.get(meta.get("task_id", ""))
+        t = self.sup.final(meta.get("task_id", ""))
         if not t or t["state"] not in TERMINAL:
             return
         cp = json.loads(t["checkpoint"] or "{}")

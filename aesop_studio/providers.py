@@ -85,6 +85,27 @@ def _live_verification(store, rid: str) -> dict | None:
 
 
 VERIFY_TOKEN = "AESOP_VERIFY_OK"
+# Paid-plan CLI lanes the owner uses day to day: keep their verification fresh in the background so they never drop
+# out of the provider list after a quiet week, and re-check a failed verification instead of leaving it failed.
+AUTO_REVERIFY_ROUTES = {"zai", "grok"}
+REVERIFY_BEFORE_S = VERIFY_MAX_AGE_S - 24 * 3600
+RECHECK_FAILED_S = 15 * 60
+
+
+def due_reverify(store, now: float | None = None) -> list[str]:
+    """Routes that were verified before and whose record is about to expire, or failed long enough ago to retry."""
+    now = now or time.time()
+    due = []
+    for rid in sorted(AUTO_REVERIFY_ROUTES):
+        ver = _live_verification(store, rid)
+        if not ver:
+            continue  # never verified: that first call stays an owner action
+        age = now - ver.get("at", 0)
+        if (ver.get("ok") and age > REVERIFY_BEFORE_S) or (not ver.get("ok") and age > RECHECK_FAILED_S):
+            due.append(rid)
+    return due
+
+
 
 
 def verify_live(store, rid: str) -> dict:
@@ -428,8 +449,10 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         cmd = _zai_cmd()
         if not cmd:
             raise RuntimeError("claude-zai launcher unavailable")
-        permissions = (["--tools", ""] if mode == "chat" else
-                       ["--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep"])
+        # Never pass an empty argument here: the launcher is a PowerShell script and Windows PowerShell drops empty
+        # strings, so "--tools ''" arrived as a bare "--tools" and every Z.ai chat failed. Chat uses an explicit deny-list.
+        permissions = (["--disallowedTools", "Bash,Edit,Write,WebFetch,WebSearch,NotebookEdit,Task"] if mode == "chat"
+                       else ["--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep"])
         return cmd + (["-Model", model] if model else []) + [
             "-p", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config"] + permissions
     if route_id == "simulated":

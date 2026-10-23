@@ -104,6 +104,28 @@ class TestSupervision(Base):
         self.assertTrue(any(o.get("ledger_id") == lid for o in out))
         self.assertEqual(self.store.one("SELECT status FROM ledger WHERE id=?", (lid,))["status"], "settled")
 
+    def test_transient_error_retried_once_and_message_answered(self):
+        from unittest import mock
+        import aesop_studio.tasks as tasks_mod
+        os.environ["AESOP_SIM_FLAKY_FILE"] = str(self.tmp / "flaky.marker")
+        try:
+            with mock.patch.object(tasks_mod, "RETRY_ROUTES", {"simulated"}):
+                c = self.svc.new_conversation(self.p["id"])
+                r = self.svc.send(self.p["id"], c["id"], "FLAKY please", [], None)
+                end = time.time() + 30
+                while time.time() < end:
+                    m = self.svc.messages(self.p["id"], c["id"])[-1]
+                    if m["status"] != "submitted":
+                        break
+                    time.sleep(0.2)
+        finally:
+            os.environ.pop("AESOP_SIM_FLAKY_FILE", None)
+        self.assertEqual(m["status"], "generated", m["content"])
+        first = self.sup.get(r["task_id"])
+        self.assertEqual(first["state"], "FAILED")
+        self.assertIn("retried automatically", first["error"])
+        self.assertEqual(self.sup.final(r["task_id"])["state"], "COMPLETED")
+
     def test_interrupted_chat_turns_open_no_repair(self):  # health check: no noise repairs for read-only chat
         now = time.time()
         for tid, mode in (("task_chat_run", "chat"), ("task_agent_run", "agent")):
@@ -221,3 +243,21 @@ class TestInstanceLock(unittest.TestCase):  # stability-03
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAutoReverify(Base):
+    def _set(self, rid, ok, age):
+        import json as _j
+        self.store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                     (f"verify:{rid}", _j.dumps({"at": time.time() - age, "ok": ok})))
+
+    def test_due_only_for_stale_or_failed_known_routes(self):
+        self.assertEqual(providers.due_reverify(self.store), [])  # never verified: owner action
+        self._set("zai", True, 3600)
+        self.assertEqual(providers.due_reverify(self.store), [])  # fresh
+        self._set("zai", True, providers.REVERIFY_BEFORE_S + 60)
+        self.assertEqual(providers.due_reverify(self.store), ["zai"])  # about to expire
+        self._set("zai", False, 60)
+        self.assertEqual(providers.due_reverify(self.store), [])  # just failed: wait before re-checking
+        self._set("zai", False, providers.RECHECK_FAILED_S + 60)
+        self.assertEqual(providers.due_reverify(self.store), ["zai"])

@@ -22,7 +22,7 @@ def _scrub_tasks(store: Store, task_ids: set[str]) -> int:
         t = store.one("SELECT output_path FROM tasks WHERE id=?", (tid,))
         if not t:
             continue
-        for suffix in ("", ".last.txt", ".before.json"):
+        for suffix in ("", ".last.txt", ".before.json", ".err"):
             try:
                 if t["output_path"]:
                     os.remove(t["output_path"] + suffix)

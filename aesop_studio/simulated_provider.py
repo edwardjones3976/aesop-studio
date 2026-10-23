@@ -23,6 +23,12 @@ if "ORPHAN" in prompt:
     print(f"grandchild {gc.pid} holds stdout", flush=True)
 if mode == "agent" and "WRITE" in prompt:
     Path("sim_output.txt").write_text("written by simulated agent\n", encoding="utf-8")
+if "FLAKY" in prompt:  # fixture: first call fails with a transient 503, the next succeeds (retry test)
+    marker = Path(os.environ.get("AESOP_SIM_FLAKY_FILE", "flaky.marker"))
+    if not marker.exists():
+        marker.write_text("1", encoding="utf-8")
+        print("API Error: 503 service unavailable", flush=True)
+        sys.exit(1)
 if "FAIL" in prompt:
     print("simulated failure", file=sys.stderr)
     sys.exit(3)

@@ -37,6 +37,27 @@ SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".aesop"}
 NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
 CHAT_DIR_PREFIX = "aesop-chat-"
 OPEN_REPAIR_STATES = ("OPEN_FOREMAN", "EXPORTED_FOR_FOREMAN")
+# Read-only chat turns on these plan-quota routes are retried once on a transient provider/network error.
+SEPARATE_STDERR_ROUTES = {"zai", "claude"}
+
+
+def _err_tail(out_path: str, n: int = 300) -> str:
+    """Last diagnostic line(s) a CLI wrote to stderr (redacted, bounded)."""
+    try:
+        with open(out_path + ".err", "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 8192))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    return redact(" | ".join(lines[-3:]))[-n:]
+
+
+RETRY_ROUTES = {"zai", "grok", "cursor", "antigravity", "claude", "codex"}
+TRANSIENT_MARKERS = ("429", "rate limit", "rate_limit", "overloaded", "503", "502", "504", "econnreset",
+                     "etimedout", "socket hang up", "fetch failed", "network error", "temporarily unavailable",
+                     "service unavailable", "bad gateway", "connection reset", "try again")
 AGENT_ACK_STATEMENT = ("Agent tasks run the provider's official CLI as your Windows user. The project folder is its "
                        "working directory, not a sandbox: it can read files outside the folder that you can read. "
                        "Studio records the files it changed inside the folder.")
@@ -212,6 +233,34 @@ class Supervisor:
             ledger.settle(self.store, lid, billed)
         self._set(tid, state, ended=time.time(), **fields)
 
+    def final(self, task_id: str) -> dict | None:
+        """The task that finally answers a request: follows an automatic transient-error retry (at most 2 hops)."""
+        t = self.get(task_id)
+        for _ in range(2):
+            nxt = json.loads((t or {}).get("checkpoint") or "{}").get("retried_as") if t else None
+            if not nxt:
+                break
+            t = self.get(nxt) or t
+        return t
+
+    def _maybe_retry(self, tid: str, route_id: str, mode: str, state: str, cp: dict, output_tail: str) -> str | None:
+        if mode != "chat" or state != "FAILED" or route_id not in RETRY_ROUTES or cp.get("retry_of"):
+            return None
+        if tid in self.cancel_flags or tid + ":timeout" in self.cancel_flags:
+            return None
+        low = output_tail.lower()
+        if not any(m in low for m in TRANSIENT_MARKERS):
+            return None
+        t = self.get(tid)
+        proj = self.store.one("SELECT * FROM projects WHERE id=?", (t["project_id"],))
+        if not proj:
+            return None
+        time.sleep(2)  # brief back-off before the single retry
+        new = self.create(dict(proj), route_id, t["prompt"], mode="chat", timeout=cp.get("timeout") or DEFAULT_TIMEOUT)
+        self.store.x("UPDATE tasks SET checkpoint=json_set(COALESCE(checkpoint,'{}'),'$.retry_of',?) WHERE id=?", (tid, new))
+        self.store.event("task_retry", t["project_id"], task_id=tid, retry_task_id=new, route=route_id)
+        return new
+
     def get(self, task_id: str) -> dict | None:
         return self.store.one("SELECT * FROM tasks WHERE id=?", (task_id,))
 
@@ -365,8 +414,12 @@ class Supervisor:
             self._set(tid, "STARTING", argv_meta=json.dumps(meta), started=time.time())
             env = {k: v for k, v in os.environ.items() if k.upper() not in providers.BILLING_ENV}
             try:
+                # Claude Code-based routes write banners/diagnostics to stderr: keep them out of the answer.
+                errf = open(out_path + ".err", "wb") if route_id in SEPARATE_STDERR_ROUTES else None
                 proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, creationflags=NEW_GROUP, env=env)
+                                        stderr=errf if errf else subprocess.STDOUT, creationflags=NEW_GROUP, env=env)
+                if errf:
+                    errf.close()  # the child holds its own handle
             except OSError as e:
                 if mode != "agent":
                     _remove_chat_dir(cwd)
@@ -458,8 +511,24 @@ class Supervisor:
                                            if descendants_killed else None)
             else:
                 state, err = "FAILED", f"exit code {code}"
+                diag = _err_tail(out_path)
+                if diag:
+                    err += f": {diag}"
             cp = json.loads(self.get(tid)["checkpoint"] or "{}")
             cp["result"] = result[:MAX_OUTPUT_BYTES]
+            if state == "COMPLETED" and route_id in providers.LIVE_VERIFY_ROUTES:
+                # every successful real call keeps the route's live verification fresh
+                self.store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                             (f"verify:{route_id}", json.dumps({"at": time.time(), "ok": True,
+                                                                 "detail": "successful request", "latency_s": None})))
+            try:
+                tail = Path(out_path).read_text(encoding="utf-8", errors="replace")[-4000:] + " " + _err_tail(out_path, 2000)
+            except OSError:
+                tail = ""
+            retry = self._maybe_retry(tid, route_id, mode, state, cp, tail + " " + (err or ""))
+            if retry:  # recorded before going terminal, so readers following final() never see a dead end
+                cp["retried_as"] = retry
+                err = f"{err}; transient provider error, retried automatically as {retry}"
             if mode != "agent":
                 _remove_chat_dir(cwd)
             self._end(tid, state, lid, 0, exit_code=code, changed_files=changed, error=err, checkpoint=json.dumps(cp))
