@@ -15,7 +15,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backup, deletion, derive, evidence, lanes, ledger, providers, roundtable, roundtable_compare
+from . import backup, deletion, derive, evidence, lanes, ledger, providers, researcher, roundtable, roundtable_compare
 from .security import MAX_UPLOAD_BYTES, ScopeError, redact
 from .services import Conflict, Services
 from .sessions import SESSION_DAYS, Sessions
@@ -272,6 +272,15 @@ class Handler(BaseHTTPRequestHandler):
     def rt_control(self, sess, rid, op):
         self._rt(rid)
         self.json(getattr(self.app.broker, op)(rid))
+
+    @route("POST", r"/api/roundtables/(\w+)/research")
+    def rt_research(self, sess, rid):
+        self._rt(rid)
+        self.json(self.app.broker.ask_research(rid, self.body().get("query") or ""), 202)
+
+    @route("GET", r"/api/roundtable/researcher")
+    def rt_researcher(self, sess):
+        self.json({**researcher.status(), "used_today": researcher.daily_used(self.app.store)})
 
     @route("GET", r"/api/roundtables")
     def rt_history(self, sess):

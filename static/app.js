@@ -415,7 +415,7 @@ let RT = null;
 
 function rtBlank() {
   return { mode: "general", objective: "", deliverable: "", outcome_type: RT_OUTCOMES[0], time_limit_min: 15, response_window_s: 30,
-    max_turns: "", max_msgs: "", cost_cap: "", ack: false, roster: new Set() };
+    max_turns: "", max_msgs: "", cost_cap: "", research: true, max_research: "", ack: false, roster: new Set() };
 }
 function rtFromRecord(r) {
   const mode = RT_TIME[r.mode] ? r.mode : "general"; const c = r.caps || {};
@@ -423,6 +423,7 @@ function rtFromRecord(r) {
   return { mode, objective: r.objective || "", deliverable: r.deliverable || "", outcome_type: r.outcome_type || RT_OUTCOMES[0],
     time_limit_min: r.time_limit_min || RT_TIME[mode][1], response_window_s: r.response_window_s || 30,
     max_turns: s(c.max_turns), max_msgs: s(c.max_messages_per_speaker), cost_cap: s(c.cost_cap_usd), ack: !!r.sharing_ack,
+    research: c.research !== false, max_research: s(c.max_research),
     roster: new Set((r.roster || []).map((x) => (typeof x === "string" ? x : x.lane))) };
 }
 const rtLane = (id) => RT.lanes.find((l) => l.id === id);
@@ -530,13 +531,15 @@ async function openRoundtable(opener, opts = {}) {
   rtApplyMode(s.f, opts.mode === "war_room" ? "war_room" : "general", opts.roster);
   rtBuild(); $("rtDlg").showModal(); $("rtObjective").focus();
   try {
-    const [lanes, drafts] = await Promise.all([api("GET", "/api/roundtable/lanes"), api("GET", `/api/projects/${s.pid}/roundtables`)]);
+    const [lanes, drafts, rsr] = await Promise.all([api("GET", "/api/roundtable/lanes"), api("GET", `/api/projects/${s.pid}/roundtables`),
+      api("GET", "/api/roundtable/researcher").catch(() => null)]);
     if (RT !== s) return;
+    s.researcher = rsr;
     s.lanes = lanes.lanes || []; s.gates = lanes.mission_gates || []; s.example = lanes.documented_example || [];
     s.discovered = lanes.discovered_at || null; s.live = !!lanes.live_authorized; s.drafts = Array.isArray(drafts) ? drafts : [];
   } catch (e) { if (RT === s) s.err = e.message; }
   if (RT !== s) return;
-  s.loading = false; rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtDraftsRender(); rtStartRender();
+  s.loading = false; rtResearchRender(); rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtDraftsRender(); rtStartRender();
 }
 // Any edit after a preflight makes its pass/fail list out of date until the next check.
 function rtStale() {
@@ -637,6 +640,7 @@ function rtBuild(focusId) {
     h("div", { class: "rt-row3" }, fld("rtTime", f.mode === "war_room" ? "Time limit (War Room)" : "Time limit", time), win ? fld("rtWindow", "Response window", win) : null),
     h("fieldset", { class: "rt-caps" }, h("legend", {}, "Caps"), h("div", { class: "rt-row3" }, fld("rtTurns", "Max turns", num("rtTurns", "max_turns", "e.g. 12")),
       fld("rtMsgs", "Max messages per speaker", num("rtMsgs", "max_msgs", "e.g. 3")), fld("rtCost", "Cost cap (USD)", num("rtCost", "cost_cap", "0.00", "0.01")))),
+    (el.research = h("fieldset", { class: "rt-caps rt-research" })),
     h("section", { class: "card rt-share", "aria-labelledby": "rtShareH" }, h("h3", { id: "rtShareH" }, "External-sharing preview"),
       h("p", { class: "muted" }, "This is exactly what would leave this machine, and who would receive it. Changing the objective or the roster clears your confirmation."),
       el.sharePrev, h("label", { class: "rt-ack", for: "rtAck" }, el.ack, h("span", {}, "I've reviewed what would be shared"))),
@@ -660,8 +664,24 @@ function rtBuild(focusId) {
       h("button", { type: "button", class: "iconbtn", "aria-label": "Close roundtable", onclick: () => $("rtDlg").close() }, icon("x"))),
     h("div", { id: "rtStatus", class: "rt-status", role: "status", "aria-live": "polite" }),
     (el.body = h("div", { class: "rt-body" }, (el.part = part), main, el.side)), (el.foot = foot));
-  rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtStartRender(); rtDraftsRender(); rtCompareRender();
+  rtResearchRender(); rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtStartRender(); rtDraftsRender(); rtCompareRender();
   if (focusId && $(focusId)) $(focusId).focus();
+}
+// Researcher: an on-call public web search lane any speaker (or the owner) can call during a session.
+function rtResearchRender() {
+  const el = RT.el; if (!el.research) return; const f = RT.f; const st = RT.researcher;
+  const avail = !!(st && st.available);
+  const box = h("input", { id: "rtResearch", type: "checkbox", disabled: !avail, "aria-describedby": "rtResearchHelp",
+    onchange: (e) => { f.research = e.target.checked; rtResetAck(); rtRefresh(); rtStale(); } });
+  box.checked = avail && f.research;
+  const cap = h("input", { id: "rtResearchCap", type: "number", min: "0", max: "20", step: "1", value: f.max_research, placeholder: "8",
+    disabled: !avail, oninput: (e) => { f.max_research = e.target.value; rtStale(); } });
+  el.research.replaceChildren(h("legend", {}, "Researcher"),
+    h("label", { class: "rt-ack", for: "rtResearch" }, box, h("span", {}, icon("search"), avail ? ` Researcher on call (${st.names.join(" + ")} web search)` : " Researcher unavailable")),
+    h("div", { class: "rt-row3" }, h("div", { class: "field" }, h("label", { for: "rtResearchCap" }, "Max lookups per session"), cap)),
+    h("p", { class: "faint", id: "rtResearchHelp" }, avail
+      ? `Speakers call it with a line "RESEARCH: <question>"; you can also ask it from the live room. Sources land in the timeline for everyone to cite. Only the question text is sent, never the transcript. ${st.used_today || 0}/${st.daily_cap} lookups used today.`
+      : (st && st.note) || (RT.loading ? "Checking the Researcher…" : "Researcher status could not be loaded.")));
 }
 function rtResetAck() { if (RT.f.ack) { RT.f.ack = false; if (RT.el.ack) RT.el.ack.checked = false; } }
 function rtLanesRender() {
@@ -710,7 +730,8 @@ function rtRefresh() {
     h("div", { class: "faint" }, "Exact text that would be shared"),
     h("pre", { class: "out" }, f.objective.trim() ? f.objective : "(objective is empty)"),
     h("div", { class: "faint" }, "Selected lanes that would receive it"),
-    sel.length ? h("ul", { class: "rt-recips" }, ...sel.map((l) => h("li", {}, h("strong", {}, l.name), ` · ${l.route_type || "no route"} · ${RT_CLASS[l.lane_class] || l.lane_class}`))) : h("p", { class: "muted" }, "No lanes selected; nothing would be shared."));
+    sel.length ? h("ul", { class: "rt-recips" }, ...sel.map((l) => h("li", {}, h("strong", {}, l.name), ` · ${l.route_type || "no route"} · ${RT_CLASS[l.lane_class] || l.lane_class}`)),
+      RT.researcher && RT.researcher.available && f.research ? h("li", {}, h("strong", {}, "Researcher"), ` · ${RT.researcher.names.join(" + ")} · receives only the research questions, not the objective or transcript`) : null) : h("p", { class: "muted" }, "No lanes selected; nothing would be shared."));
   rtCompareRender();
 }
 function rtGatesRender() {
@@ -777,7 +798,8 @@ function rtBody() {
   const f = RT.f; const num = (v) => (v === "" || v === null || v === undefined || !isFinite(Number(v)) ? null : Number(v));
   return { ...(RT.rec ? { id: RT.rec.id } : {}), mode: f.mode, objective: f.objective, deliverable: f.deliverable, outcome_type: f.outcome_type,
     time_limit_min: Number(f.time_limit_min), response_window_s: f.mode === "war_room" ? Number(f.response_window_s) : null, roster: [...f.roster],
-    sharing_ack: !!f.ack, caps: { max_turns: num(f.max_turns), max_messages_per_speaker: num(f.max_msgs), cost_cap_usd: num(f.cost_cap) } };
+    sharing_ack: !!f.ack, caps: { max_turns: num(f.max_turns), max_messages_per_speaker: num(f.max_msgs), cost_cap_usd: num(f.cost_cap),
+      research: !!f.research, max_research: num(f.max_research) } };
 }
 // Every response is applied only to the modal session and draft generation that sent it.
 async function rtSave(quiet) {
@@ -834,11 +856,12 @@ const SP_LABEL = { idle: "idle", working: "working…", stalled: "stalled", disc
 const SP_TONE = { idle: "", working: "info", stalled: "warn", disconnected: "bad", budget_exhausted: "bad" };
 // Inline formatting: **bold**, `code`, @mentions and [E#] references (clickable). Everything stays textContent.
 function rtText(t, room) {
-  const out = []; const re = /(\*\*[^*\n]+\*\*|`[^`\n]+`|@[\w.-]+|\[E\d+(?:\s*[–-]\s*E?\d+)?(?:,\s*E\d+(?:\s*[–-]\s*E?\d+)?)*\]|(?<![\w*])\*(?!\s)[^*\n]+?\*(?![\w*])|(?<![\w_])_(?!\s)[^_\n]+?_(?![\w_]))/g; let last = 0; let m;
+  const out = []; const re = /(https?:\/\/[^\s<>()"']+[^\s<>()"'.,;:!?]|\*\*[^*\n]+\*\*|`[^`\n]+`|@[\w.-]+|\[E\d+(?:\s*[–-]\s*E?\d+)?(?:,\s*E\d+(?:\s*[–-]\s*E?\d+)?)*\]|(?<![\w*])\*(?!\s)[^*\n]+?\*(?![\w*])|(?<![\w_])_(?!\s)[^_\n]+?_(?![\w_]))/g; let last = 0; let m;
   while ((m = re.exec(t))) {
     if (m.index > last) out.push(t.slice(last, m.index));
     const tok = m[1];
-    if (tok.startsWith("**")) out.push(h("strong", {}, tok.slice(2, -2)));
+    if (/^https?:/.test(tok)) out.push(h("a", { href: tok, target: "_blank", rel: "noopener noreferrer nofollow", class: "evlink" }, tok.replace(/^https?:\/\/(www\.)?/, "").slice(0, 70)));
+    else if (tok.startsWith("**")) out.push(h("strong", {}, tok.slice(2, -2)));
     else if (tok[0] === "`") out.push(h("code", {}, tok.slice(1, -1)));
     else if (tok[0] === "@") out.push(h("span", { class: "mention" }, tok));
     else if (tok[0] === "*" || tok[0] === "_") out.push(h("em", {}, tok.slice(1, -1)));
@@ -888,9 +911,9 @@ function rtJump(room, label) {
   t.li.scrollIntoView({ block: "center", behavior: "smooth" }); t.li.focus({ preventScroll: true });
   t.li.classList.add("flash"); setTimeout(() => t.li.classList.remove("flash"), 1600);
 }
-const RT_KIND = { opening: "Opening", closing: "Closing", system: "Studio", memo: "Memo", gap: "Gap" };
+const RT_KIND = { opening: "Opening", closing: "Closing", system: "Studio", memo: "Memo", gap: "Gap", research: "Sources" };
 const RT_CLAMP_CHARS = 1100, RT_CLAMP_LINES = 16;
-const rtTint = (room, k) => { if (!k) return null; if (!(k in room.tints)) room.tints[k] = Object.keys(room.tints).length % 6; return room.tints[k]; };
+const rtTint = (room, k) => { if (!k) return null; if (k === "researcher") return "r"; if (!(k in room.tints)) room.tints[k] = Object.keys(room.tints).length % 6; return room.tints[k]; };
 // Feed items are threaded: replies link to the event they answer; passes are compact and can be hidden.
 function rtEvent(ev, sps, room) {
   const sp = sps[ev.speaker]; const name = sp ? sp.name : ev.speaker || (ev.kind === "system" ? "Studio" : ev.kind);
@@ -920,7 +943,7 @@ function rtEvent(ev, sps, room) {
   const kind = RT_KIND[ev.kind];
   li.append(...replies,
     h("div", { class: "evh" },
-      h("span", { class: "evav", "aria-hidden": "true" }, ev.kind === "system" ? "AS" : initials(name)),
+      ev.speaker === "researcher" ? h("span", { class: "evav", "aria-hidden": "true" }, icon("search")) : h("span", { class: "evav", "aria-hidden": "true" }, ev.kind === "system" ? "AS" : initials(name)),
       h("strong", { class: "evname" }, name), kind ? h("span", { class: "evkind" + (ev.kind === "gap" ? " warn" : "") }, kind) : null, ...mentions,
       h("span", { class: "evmeta" }, h("code", {}, label), ev.latency_s != null ? ` · ${ev.latency_s}s` : "", ev.seen_label ? ` · saw up to ${ev.seen_label}` : "")),
     body);
@@ -977,13 +1000,21 @@ function rtRoom(id, readOnly) {
   const latest = h("button", { type: "button", class: "btn sm rt-latest", hidden: true, onclick: () => { feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" }); } }, "Jump to latest ↓");
   feed.addEventListener("scroll", () => { latest.hidden = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80; });
   pauseBtn.hidden = resumeBtn.hidden = stopBtn.hidden = true;
+  const askIn = h("input", { id: "rtAskQ", type: "search", maxlength: "300", placeholder: "Ask the Researcher, e.g. current Bid Whist tournament scoring rules", "aria-label": "Research question" });
+  const askBtn = abtn("Research", async () => {
+    const q = askIn.value.trim(); if (q.length < 4) { rtSay("Type a research question first.", "bad"); askIn.focus(); return; }
+    try { const r = await api("POST", `/api/roundtables/${id}/research`, { query: q });
+      if (RT === s) { rtSay(r.queued ? `Researcher is looking up: ${q}` : `Not sent: ${r.reason}`, r.queued ? "ok" : "bad"); if (r.queued) askIn.value = ""; } }
+    catch (e) { if (RT === s) rtSay(e.message, "bad"); }
+  }, "sm", "search");
+  const ask = h("form", { class: "rt-ask", hidden: true, onsubmit: (e) => { e.preventDefault(); askBtn.click(); } }, askIn, askBtn);
   const main = h("section", { class: "rt-col rt-main rt-room", "aria-label": "Live room" },
     h("div", { class: "rt-roomhead" },
       h("div", { class: "ttl" }, h("h3", {}, readOnly ? "Roundtable record" : "Live room"), stPill, clock),
       h("div", { class: "row rt-roomctl" }, pauseBtn, resumeBtn, stopBtn, exportBtn, back)),
     h("div", { class: "rt-bar" }, chips,
       h("div", { class: "row rt-viewctl", role: "toolbar", "aria-label": "Reading options" }, room.showAll, clampBtn, bigBtn, passBtn, memoBtn)),
-    cov, h("div", { class: "rt-feedwrap" }, feed, latest), announce);
+    cov, h("div", { class: "rt-feedwrap" }, feed, latest), ask, announce);
   const side = h("section", { class: "rt-col rt-side", "aria-label": "Memo" }, memo);
   $("rtDlg").classList.add("rooming");
   s.el.body.classList.toggle("memo-off", !rtPref("memo", true));
@@ -1018,9 +1049,9 @@ function rtRoom(id, readOnly) {
       chipSig = sig;
       chips.replaceChildren(...Object.entries(sps).map(([k, v]) => h("button", { type: "button", class: "rt-chip sp" + rtTint(room, k), "data-sp": k, "aria-pressed": room.only === k ? "true" : "false",
         title: `Show only ${v.name || k}`, onclick: () => rtFilter(room, k) },
-        h("span", { class: "evav", "aria-hidden": "true" }, initials(v.name || k)),
+        h("span", { class: "evav", "aria-hidden": "true" }, k === "researcher" ? icon("search") : initials(v.name || k)),
         h("span", { class: "rt-chipt" }, h("strong", {}, v.name || k),
-          h("span", { class: "faint" }, `${SP_LABEL[v.state] || v.state || "unknown"} · ${v.turns || 0} turns${v.last_latency_s != null ? ` · ${v.last_latency_s}s` : ""}${typeof v.cost_usd === "number" ? ` · ${fmtCost(v.cost_usd)}` : ""}`)),
+          h("span", { class: "faint" }, v.role === "researcher" ? `${SP_LABEL[v.state] || v.state} · ${v.lookups || 0}/${v.cap} lookups` : `${SP_LABEL[v.state] || v.state || "unknown"} · ${v.turns || 0} turns${v.last_latency_s != null ? ` · ${v.last_latency_s}s` : ""}${typeof v.cost_usd === "number" ? ` · ${fmtCost(v.cost_usd)}` : ""}`)),
         h("span", { class: "dot " + (SP_TONE[v.state] || ""), "aria-hidden": "true" }))));
     }
     const ms = st.memo ? (typeof st.memo === "string" ? st.memo : JSON.stringify(st.memo, null, 1)) : "";
@@ -1030,6 +1061,7 @@ function rtRoom(id, readOnly) {
     pauseBtn.hidden = readOnly || ended || st.live_status === "PAUSED";
     resumeBtn.hidden = readOnly || ended || st.live_status !== "PAUSED";
     stopBtn.hidden = readOnly || ended;
+    ask.hidden = readOnly || ended || !sps.researcher;
     if (focused && focused.hidden) [resumeBtn, pauseBtn, exportBtn].find((b) => !b.hidden).focus();
     if (ended) { cov.replaceChildren(rtCoverage(st.coverage)); rtSay(`Session ${st.live_status.toLowerCase()}.`); return; }
     s.timer = setTimeout(tick, 1000);

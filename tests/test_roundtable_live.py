@@ -128,3 +128,57 @@ class TestBroker(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestResearcher(TestBroker):
+    def setUp(self):
+        super().setUp()
+        os.environ["AESOP_SIM_RESEARCH"] = "1"
+        os.environ["AESOP_SIM_ASK_RESEARCH"] = "1"
+
+    def tearDown(self):
+        os.environ.pop("AESOP_SIM_RESEARCH", None)
+        os.environ.pop("AESOP_SIM_ASK_RESEARCH", None)
+        super().tearDown()
+
+    def test_speakers_call_researcher_and_results_join_timeline(self):
+        rec = roundtable.save(self.store, self.p["id"], {
+            "mode": "general", "objective": "Pick a note storage engine", "deliverable": "memo",
+            "outcome_type": "architecture review", "time_limit_min": 5, "roster": [l["id"] for l in self.lanes],
+            "sharing_ack": True, "caps": {"max_turns": 10, "max_messages_per_speaker": 2, "cost_cap_usd": 0,
+                                          "max_research": 2}})
+        st = self.run_session(rec)
+        self.assertEqual(st["live_status"], "COMPLETED")
+        evs = self.broker.events(rec["id"])
+        found = [e for e in evs if e["kind"] == "research"]
+        self.assertEqual(len(found), 2)  # four openings asked, the session cap of 2 held
+        self.assertTrue(all(e["speaker"] == "researcher" and e["reply_to"] for e in found))
+        self.assertIn("Simulated source 1", found[0]["content"])
+        self.assertTrue(any(e["kind"] == "gap" and "research cap" in e["content"] for e in evs))
+        self.assertEqual(st["speakers"]["researcher"]["lookups"], 2)
+        self.assertNotIn("Researcher", st["coverage"]["spoke"])  # never counted as a speaker
+        self.assertIn("researcher", st["consent"])
+        prompts = [self.sup.get(e["task_id"])["prompt"] for e in evs if e["kind"] == "message" and e["task_id"]]
+        self.assertTrue(any("Researcher (web sources" in p for p in prompts))  # speakers saw the sources
+
+    def test_owner_can_ask_and_switch_off(self):
+        rec = self.draft()
+        res = self.broker.start(rec, self.svc.project(self.p["id"]), clock={"limit_s": 30, "reserve_s": 5,
+                                                                             "turn_timeout": 30})
+        self.assertTrue(res["started"])
+        q = self.broker.ask_research(rec["id"], "latest sqlite release notes")
+        self.assertTrue(q["queued"])
+        with self.assertRaises(ValueError):
+            self.broker.ask_research(rec["id"], "x")
+        end = time.time() + 90
+        while time.time() < end and self.broker.status(rec["id"])["live_status"] in ("RUNNING", "PAUSED"):
+            time.sleep(0.2)
+        evs = self.broker.events(rec["id"])
+        self.assertTrue(any(e["kind"] == "research" and "Owner" in e["content"] for e in evs))
+        off = roundtable.save(self.store, self.p["id"], {**{k: rec[k] for k in ("mode", "objective", "deliverable",
+                              "outcome_type", "time_limit_min")}, "roster": [l["id"] for l in self.lanes],
+                              "sharing_ack": True, "caps": {"max_turns": 4, "max_messages_per_speaker": 1,
+                                                            "research": False}})
+        self.assertFalse(off["caps"]["research"])
+        st = self.run_session(off, limit=20)
+        self.assertNotIn("researcher", st["speakers"])

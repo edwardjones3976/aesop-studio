@@ -857,3 +857,11 @@ button.rt-chip { min-height: 40px; }
 .rt-cov { align-items: center; padding: 6px 12px; }
 .rt-cov details > summary { cursor: pointer; min-height: 28px; display: flex; align-items: center; }
 .rt-cov details > p { margin: 4px 0 2px; color: var(--text-2); }
+/* researcher lane */
+.spr { --sp: #7FD6E8; --sp-bg: rgba(127, 214, 232, .14); }
+.rt-feed .ev-research { background: linear-gradient(0deg, rgba(127, 214, 232, .05), rgba(127, 214, 232, .05)), var(--sunken); border-color: rgba(127, 214, 232, .3); }
+.evav .ico { width: 16px; height: 16px; }
+.evlink { color: var(--sky); text-underline-offset: 2px; overflow-wrap: anywhere; }
+.rt-ask { display: flex; gap: 8px; align-items: center; }
+.rt-ask input { flex: 1 1 auto; min-width: 0; }
+.rt-research .rt-ack .ico { vertical-align: -3px; }

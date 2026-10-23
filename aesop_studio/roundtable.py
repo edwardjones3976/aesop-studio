@@ -48,7 +48,11 @@ def _clean(body: dict) -> dict:
     caps = body.get("caps") or {}
     caps = {"max_turns": max(1, min(200, int(caps.get("max_turns") or 24))),
             "max_messages_per_speaker": max(1, min(50, int(caps.get("max_messages_per_speaker") or 6))),
-            "cost_cap_usd": max(0.0, min(165.0, float(caps.get("cost_cap_usd") or 0)))}
+            "cost_cap_usd": max(0.0, min(165.0, float(caps.get("cost_cap_usd") or 0))),
+            # Researcher lane (public web search on request); on by default, the owner can switch it off per draft
+            "research": caps.get("research") is not False,
+            "max_research": max(0, min(20, int(caps["max_research"]) if caps.get("max_research") not in (None, "")
+                                else 8))}
     roster = [str(x)[:64] for x in (body.get("roster") or [])][:32]
     return {"mode": mode, "objective": str(body.get("objective") or "").strip()[:4000],
             "deliverable": str(body.get("deliverable") or "").strip()[:500], "outcome_type": outcome,
