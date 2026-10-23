@@ -52,7 +52,7 @@ def start_server(repo: Path, data: Path, port: int):
 
 def seed(page, base: str, proj_root: Path) -> None:
     js = """async ([root]) => {
-      const K = sessionStorage.getItem('aesop.key') || '';
+      const K = localStorage.getItem('aesop.key') || '';
       const s = await (await fetch('/api/session', {headers: {'X-Aesop-Key': K}})).json();
       const H = {'Content-Type': 'application/json', 'X-CSRF-Token': s.csrf, 'X-Aesop-Key': K};
       const post = async (u, b) => (await fetch(u, {method: 'POST', headers: H, body: JSON.stringify(b)})).json();

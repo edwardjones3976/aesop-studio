@@ -338,6 +338,11 @@ def display_name(route_id: str) -> str:
 def _named(routes: dict) -> dict:
     for rid, r in routes.items():
         r["display_name"], r["family"] = DISPLAY.get(rid, (rid, rid))
+        if rid in ("grok", "zai"):
+            # Capabilities come from the installed adapter, including for cached verification records.
+            r["supported_modes"] = ["chat", "agent"]
+            r["filesystem_scope"] = ("chat: tools disabled in an empty temp dir; agent: file edits and shell "
+                                     "commands in the project root; runs as your Windows user, not an isolation boundary")
     return routes
 
 
@@ -408,22 +413,25 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         if not cmd:
             raise RuntimeError("copilot unavailable")
         return cmd + ["-s", "--no-color"] + (["--model", model] if model else [])  # prompt via stdin
-    if route_id == "grok" and mode == "chat":
+    if route_id == "grok" and mode in ("chat", "agent"):
         cmd = _grok_cmd()
         if not cmd:
             raise RuntimeError("grok CLI unavailable")
         if prompt is None or len(prompt) > MAX_ARGV_PROMPT:
             raise RuntimeError(f"Grok takes the prompt as an argument; context over {MAX_ARGV_PROMPT:,} characters "
                                "is refused")
-        return cmd + ["--permission-mode", "plan", "--output-format", "plain"] + (["-m", model] if model else []) + [
+        permissions = (["--permission-mode", "default", "--tools", ""] if mode == "chat" else
+                       ["--permission-mode", "acceptEdits", "--allow", "Bash"])
+        return cmd + ["--cwd", cwd, "--no-plan"] + permissions + ["--output-format", "plain"] + (["-m", model] if model else []) + [
             "-p", prompt]
-    if route_id == "zai" and mode == "chat":
+    if route_id == "zai" and mode in ("chat", "agent"):
         cmd = _zai_cmd()
         if not cmd:
             raise RuntimeError("claude-zai launcher unavailable")
+        permissions = (["--tools", ""] if mode == "chat" else
+                       ["--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep"])
         return cmd + (["-Model", model] if model else []) + [
-            "-p", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config",
-            "--disallowedTools", "Bash,Edit,Write,WebFetch,WebSearch,NotebookEdit,Task"]
+            "-p", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config"] + permissions
     if route_id == "simulated":
         return _sim_cmd() + [mode, out_file]
     raise RuntimeError(f"route {route_id} has no in-app execution path for {mode}")

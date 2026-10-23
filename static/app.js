@@ -107,11 +107,13 @@ function routeTag(r) { return r ? h("span", { class: "tag " + (isMetered(r) ? "b
 function takeKey() {
   const m = /(?:^#|&)k=([^&]+)/.exec(location.hash || "");
   if (m) {
-    try { sessionStorage.setItem("aesop.key", decodeURIComponent(m[1])); } catch { /* storage blocked */ }
+    try { localStorage.setItem("aesop.key", decodeURIComponent(m[1])); } catch { /* storage blocked */ }
     try { history.replaceState(null, "", location.pathname + location.search); } catch { /* ignore */ }
   }
 }
-function apiKey() { try { return sessionStorage.getItem("aesop.key") || ""; } catch { return ""; } }
+// The origin key persists in this origin's localStorage (other ports/sites cannot read it), so Studio stays signed
+// in across tabs and browser restarts; the server-side session lasts 30 days and renews on use.
+function apiKey() { try { return localStorage.getItem("aesop.key") || sessionStorage.getItem("aesop.key") || ""; } catch { return ""; } }
 function signInCard() {
   navBump();
   $("view").replaceChildren(h("div", { class: "empty welcome" }, h("div", { class: "eico" }, icon("shield")), h("div", { class: "et" }, h("strong", {}, "Sign-in needed"),

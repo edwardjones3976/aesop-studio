@@ -37,7 +37,7 @@ def wait_generated(page, count: int, timeout_s: int) -> float:
     while time.time() - t0 < timeout_s:
         n = page.evaluate("""async () => { const pid = S.project.id, cid = S.conv;
             const r = await fetch(`/api/projects/${pid}/conversations/${cid}/messages`,
-                {headers: {'X-Aesop-Key': sessionStorage.getItem('aesop.key') || ''}}); const m = await r.json();
+                {headers: {'X-Aesop-Key': localStorage.getItem('aesop.key') || ''}}); const m = await r.json();
             return m.filter(x => x.role === 'assistant' && x.status === 'generated').length; }""")
         if n >= count:
             return time.time() - t0

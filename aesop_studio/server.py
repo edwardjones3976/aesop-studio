@@ -18,6 +18,7 @@ from pathlib import Path
 from . import backup, deletion, derive, evidence, lanes, ledger, providers, roundtable, roundtable_compare
 from .security import MAX_UPLOAD_BYTES, ScopeError, redact
 from .services import Conflict, Services
+from .sessions import SESSION_DAYS, Sessions
 from .store import Store
 from . import tasks as tasks_mod
 from .tasks import Supervisor
@@ -59,11 +60,7 @@ class App:
         self.store = Store(data_dir)
         self.sup = Supervisor(self.store)
         self.svc = Services(self.store, self.sup)
-        self.sessions: dict[str, str] = {}  # session -> csrf
-        # session -> origin key. Cookies are not port-scoped, so another service on 127.0.0.1 could receive the
-        # session cookie; the key is delivered only in the login redirect's URL fragment (never sent to servers)
-        # and kept in this origin's sessionStorage, which other ports cannot read. Every /api call must carry it.
-        self.keys: dict[str, str] = {}
+        self.sessions = Sessions(self.store.data_dir)  # persistent: survives restarts (30-day sliding)
         self.login_code = secrets.token_urlsafe(24)
         self.reconciled = self.sup.reconcile()
         from .roundtable_live import Broker
@@ -118,7 +115,8 @@ class Handler(BaseHTTPRequestHandler):
     def _session(self) -> str | None:
         c = cookies.SimpleCookie(self.headers.get("Cookie", ""))
         tok = c.get("aesop_session")
-        return tok.value if tok and tok.value in self.app.sessions else None
+        self._sitem = self.app.sessions.get(tok.value if tok else None)
+        return tok.value if self._sitem else None
 
     def _host_ok(self) -> bool:
         return self.headers.get("Host", "") in self.app.allowed_hosts()
@@ -153,13 +151,13 @@ class Handler(BaseHTTPRequestHandler):
         sess = self._session()
         if not sess:
             return self.err(401, "not signed in to this Studio session; use the launch link printed at startup")
-        if not hmac.compare_digest(self.headers.get("X-Aesop-Key", ""), self.app.keys.get(sess, "-")):
+        if not self.app.sessions.key_ok(self._sitem, self.headers.get("X-Aesop-Key", "")):
             return self.err(401, "missing or invalid Studio key; reopen Studio from its launch link")
         if method != "GET":
             origin = self.headers.get("Origin")
             if origin not in {f"http://{h}" for h in self.app.allowed_hosts()}:
                 return self.err(403, "cross-origin request rejected")
-            if not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), self.app.sessions[sess]):
+            if not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), self._sitem["csrf"]):
                 return self.err(403, "missing or invalid CSRF token")
         for m, pat, name in ROUTES:
             if m == method:
@@ -182,11 +180,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self.app.login_code or not hmac.compare_digest(code, self.app.login_code):
             return self._send(403, b"Launch link expired. Restart Aesop Studio to get a new one.", "text/plain")
         self.app.login_code = ""  # one-time
-        sess = secrets.token_urlsafe(32)
-        self.app.sessions[sess] = secrets.token_urlsafe(32)
-        self.app.keys[sess] = key = secrets.token_urlsafe(32)
+        sess, _csrf, key = self.app.sessions.create()
         self._send(303, b"", "text/plain", {
-            "Location": f"/#k={key}", "Set-Cookie": f"aesop_session={sess}; HttpOnly; SameSite=Strict; Path=/"})
+            "Location": f"/#k={key}",
+            "Set-Cookie": f"aesop_session={sess}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_DAYS * 86400}"})
 
     def _static(self, path: str):
         if path == "/favicon.ico":  # the page declares its own icon; answer quietly instead of 404 noise
@@ -204,7 +201,7 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- API ----------
     @route("GET", r"/api/session")
     def session(self, sess):
-        self.json({"csrf": self.app.sessions[sess], "reconciled": self.app.reconciled, "port": self.app.port})
+        self.json({"csrf": self._sitem["csrf"], "reconciled": self.app.reconciled, "port": self.app.port})
 
     @route("GET", r"/api/routes")
     def routes(self, sess):

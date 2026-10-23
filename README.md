@@ -12,7 +12,12 @@ No dependencies beyond Python 3.11+ (stdlib only). There is no build step and no
 
 ## Start / stop (Windows)
 
+Double-click **Aesop Studio** on the Desktop (this PC's home). That login app starts Studio if needed and opens a one-time sign-in link in your browser.
+
 ```powershell
+python tools\login_app.py --install-shortcut   # pin or restore the Desktop shortcut
+python tools\login_app.py                      # login window (also recreates the shortcut)
+.\open.ps1           # same sign-in without the window
 .\start.ps1          # starts on http://127.0.0.1:8765 and opens the one-time launch link
 .\stop.ps1           # stops the server started by start.ps1
 ```

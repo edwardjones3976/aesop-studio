@@ -187,6 +187,25 @@ class TestApiDeadline(unittest.TestCase):  # stability-07
                          "cancelled_presend")
 
 
+class TestPersistentSessions(unittest.TestCase):  # owner: sign-in must work freely and consistently
+    def test_session_survives_restart_and_file_holds_no_raw_secrets(self):
+        from aesop_studio.sessions import Sessions
+        d = Path(tempfile.mkdtemp(prefix="aesop-sess-"))
+        s1 = Sessions(d)
+        sess, csrf, key = s1.create()
+        raw = (d / "sessions.json").read_text(encoding="utf-8")
+        self.assertNotIn(sess, raw)
+        self.assertNotIn(key, raw)
+        s2 = Sessions(d)  # a restarted server
+        it = s2.get(sess)
+        self.assertIsNotNone(it)
+        self.assertEqual(it["csrf"], csrf)
+        self.assertTrue(s2.key_ok(it, key))
+        self.assertFalse(s2.key_ok(it, "wrong"))
+        self.assertIsNone(s2.get("not-a-session"))
+        shutil.rmtree(d, ignore_errors=True)
+
+
 class TestInstanceLock(unittest.TestCase):  # stability-03
     def test_second_server_refused(self):
         d = tempfile.mkdtemp(prefix="aesop-lock-")
