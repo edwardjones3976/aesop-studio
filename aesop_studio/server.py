@@ -220,7 +220,7 @@ class Handler(BaseHTTPRequestHandler):
         rec = providers.verify_live(self.app.store, rid)
         self.json({"verification": rec, "routes": providers.refresh(self.app.store)})
 
-    # ---------- roundtables: planning only (no provider is contacted; Start is always refused) ----------
+    # ---------- roundtables: drafts, compare, and live broker (gated by owner "Live roundtables" switch) ----------
     @route("GET", r"/api/roundtable/lanes")
     def rt_lanes(self, sess):
         self.json(lanes.discover(self.app.store))

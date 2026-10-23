@@ -162,13 +162,25 @@ def preflight(store: Store, rec: dict, discovered: dict | None = None) -> dict:
 def export_packet(store: Store, rec: dict, project: dict) -> dict:
     disc = lane_mod.discover(store)
     sel = {r["lane"] for r in rec["roster"]}
-    return {"format": "aesop-roundtable-planning-packet/1", "status": "PLANNING_ONLY_NOT_EXECUTED",
-            "note": "Planning packet only. No provider was contacted to produce it; checked lanes are per-session "
-                    "selections and grant no authority, credentials, routing or spend.",
+    live = rec.get("live_status") or "DRAFT"
+    cmp = rec.get("compare") if isinstance(rec.get("compare"), dict) else None
+    if live == "DRAFT" and not cmp:
+        status, note = "PLANNING_ONLY_NOT_EXECUTED", (
+            "Planning packet only. No provider was contacted to produce it; checked lanes are per-session "
+            "selections and grant no authority, credentials, routing or spend.")
+    elif live == "DRAFT" and cmp:
+        status, note = "PLANNING_WITH_COMPARE", (
+            "Draft export including any stored side-by-side compare results. Compare used read-only chat turns only.")
+    else:
+        status, note = "LIVE_SESSION_RECORD", (
+            f"Session record export (live_status={live}). Transcript and memo reflect brokered read-only chat; "
+            "nothing was executed from provider replies.")
+    session_keys = ("id", "mode", "objective", "deliverable", "outcome_type", "time_limit_min", "response_window_s",
+                    "roster", "sharing_ack", "caps", "status", "created", "updated", "live_status", "started", "ended",
+                    "memo", "coverage", "compare")
+    return {"format": "aesop-roundtable-planning-packet/2", "status": status, "note": note,
             "project": {"id": project["id"], "name": project["name"]},
-            "session": {k: rec[k] for k in ("id", "mode", "objective", "deliverable", "outcome_type",
-                                            "time_limit_min", "response_window_s", "roster", "sharing_ack",
-                                            "caps", "status", "created", "updated")},
+            "session": {k: rec[k] for k in session_keys if k in rec},
             "preflight": preflight(store, rec, disc),
             "lanes_at_export": [{k: l[k] for k in ("id", "name", "lane_class", "readiness", "route_type",
                                                    "conversation_support", "counts_as_speaker", "reasons")}

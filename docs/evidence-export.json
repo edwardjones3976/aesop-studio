@@ -6,7 +6,7 @@
   "ambiguous": 0,
   "committed": 2.019329,
   "remaining": 162.980671,
-  "included_uses": 4,
+  "included_uses": 39,
   "metered_calls": 7,
   "permit": false,
   "runtime_limit": 0.0,
@@ -187,11 +187,11 @@
    "display_name": "Copilot CLI",
    "family": "Copilot CLI",
    "provider": "github",
-   "state": "UNVERIFIED",
+   "state": "UNAVAILABLE",
    "version": "GitHub Copilot CLI 1.0.103.",
    "billing_basis": "subscription_included",
    "incremental_cost_status": "unknown",
-   "evidence": "installed; run Verify (one minimal live call) to enable",
+   "evidence": "last live verification failed: You have exceeded your monthly quota (Request ID: EB4F:21CE38:1069512:12AE27A:6ADB48A5)",
    "limitations": "GitHub Copilot premium-request quota; paid overage only if enabled on the account"
   },
   {
@@ -199,12 +199,24 @@
    "display_name": "Grok CLI",
    "family": "Grok CLI",
    "provider": "xai",
-   "state": "BLOCKED_POLICY",
+   "state": "READY_INCLUDED",
    "version": "grok 1.0.67 (2fe064390d07) [stable]",
-   "billing_basis": "unknown",
-   "incremental_cost_status": "unknown (not enabled)",
-   "evidence": "grok CLI installed; billing basis unverified, so no calls are made",
-   "limitations": "Billing basis not verifiable (subscription vs API key); not enabled to avoid unbounded charges."
+   "billing_basis": "subscription_included",
+   "incremental_cost_status": "plan quota (no $ visibility)",
+   "evidence": "live verification 2026-10-23 04:55: reply matched",
+   "limitations": "SuperGrok subscription quota (owner-confirmed paid plan)"
+  },
+  {
+   "id": "zai",
+   "display_name": "Z.ai GLM",
+   "family": "Z.ai GLM",
+   "provider": "zai",
+   "state": "READY_INCLUDED",
+   "version": "Claude Code -> Z.ai GLM Coding Plan | model glm-5.3 (haiku slot: glm-5.3-flash) ",
+   "billing_basis": "subscription_included",
+   "incremental_cost_status": "plan quota (no $ visibility)",
+   "evidence": "live verification 2026-10-23 04:56: reply matched",
+   "limitations": "Z.ai GLM Coding Plan credits (owner-confirmed paid plan); Claude Code client against Z.ai"
   },
   {
    "id": "perplexity",
@@ -232,29 +244,111 @@
   }
  ],
  "tasks": {
-  "total": 7,
+  "total": 42,
   "by_state": {
-   "COMPLETED": 7
+   "COMPLETED": 39,
+   "INTERRUPTED": 3
   },
-  "reconciliations": 0,
+  "reconciliations": 3,
   "period": {
    "a": 1792744320.9420145,
-   "b": 1792752072.0649018
+   "b": 1792755869.1922076
   },
-  "repairs": []
+  "repairs": [
+   {
+    "id": "rep_36f3a57fb8da",
+    "task_id": "task_f50d8ee8eb86",
+    "signature": "RUNNING->INTERRUPTED",
+    "reproducer": "task task_f50d8ee8eb86 provider claude prompt sha256 a4a3b3eecfb4a378",
+    "contract": "task supervision / restart reconciliation",
+    "status": "RESOLVED_BY_OWNER",
+    "created": 1792753337.1654334
+   },
+   {
+    "id": "rep_e9799cd6376d",
+    "task_id": "task_089c51de8e70",
+    "signature": "RUNNING->INTERRUPTED",
+    "reproducer": "task task_089c51de8e70 provider codex prompt sha256 8303d0304771ff5d",
+    "contract": "task supervision / restart reconciliation",
+    "status": "RESOLVED_BY_OWNER",
+    "created": 1792753336.691215
+   },
+   {
+    "id": "rep_ebb1a9228dcc",
+    "task_id": "task_88f5c9bf92a3",
+    "signature": "RUNNING->INTERRUPTED",
+    "reproducer": "task task_88f5c9bf92a3 provider cursor prompt sha256 959ab88e1ce40a10",
+    "contract": "task supervision / restart reconciliation",
+    "status": "RESOLVED_BY_OWNER",
+    "created": 1792753336.2791553
+   }
+  ]
  },
  "latency": [
   {
-   "route": "codex/chat",
-   "n": 4,
-   "median_s": 9.18,
-   "min_s": 8.96,
-   "max_s": 9.61,
+   "route": "claude/chat",
+   "n": 12,
+   "median_s": 10.44,
+   "min_s": 5.77,
+   "max_s": 55.46,
    "samples": [
-    9.22,
-    8.96,
-    9.14,
-    9.61
+    10.13,
+    7.56,
+    7.87,
+    55.46,
+    13.36,
+    9.36,
+    7.72,
+    5.77,
+    11.42,
+    36.8
+   ]
+  },
+  {
+   "route": "codex/chat",
+   "n": 14,
+   "median_s": 16.11,
+   "min_s": 8.96,
+   "max_s": 20.85,
+   "samples": [
+    20.85,
+    18.32,
+    16.75,
+    16.92,
+    16.01,
+    19.3,
+    19.93,
+    16.2,
+    12.18,
+    14.8
+   ]
+  },
+  {
+   "route": "cursor/chat",
+   "n": 9,
+   "median_s": 18.12,
+   "min_s": 16.86,
+   "max_s": 22.82,
+   "samples": [
+    17.19,
+    17.94,
+    18.43,
+    18.12,
+    22.82,
+    21.66,
+    16.86,
+    20.84,
+    17.64
+   ]
+  },
+  {
+   "route": "lmstudio/chat",
+   "n": 1,
+   "median_s": 2.97,
+   "min_s": 2.97,
+   "max_s": 2.97,
+   "samples": [
+    2.97
    ]
   },
   {

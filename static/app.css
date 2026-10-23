@@ -566,6 +566,8 @@ dialog.rt[open] { display: flex; flex-direction: column; }
 .rt-drafts .dtxt { display: flex; flex-direction: column; min-width: 0; flex: 1 1 220px; }
 .rt-drafts .dtxt strong { font-weight: 580; overflow-wrap: anywhere; }
 .rt-answer { border: 1px solid var(--border); border-radius: var(--r-ctl); padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; background: var(--sunken); }
+.chat-prow { flex-wrap: wrap; align-items: center; gap: 8px; }
+select.chat-prov { min-height: 36px; max-width: min(100%, 280px); font: inherit; font-size: 13px; padding: 4px 8px; border-radius: var(--r-ctl); border: 1px solid var(--border); background: var(--raised); color: var(--text); }
 .rt-foot { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--s2) var(--s4); flex-wrap: wrap; padding: var(--s3) var(--s5); border-top: 1px solid var(--border); background: var(--panel); }
 .rt-startgrp { display: flex; align-items: center; gap: var(--s2) var(--s3); flex-wrap: wrap; min-width: 0; flex: 1 1 260px; justify-content: flex-end; }
 .btn.rt-start[aria-disabled="true"] { opacity: .55; cursor: not-allowed; transform: none; background: var(--raised); }

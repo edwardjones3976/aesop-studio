@@ -528,9 +528,6 @@ async function openRoundtable(opener, opts = {}) {
   rtApplyMode(s.f, opts.mode === "war_room" ? "war_room" : "general", opts.roster);
   rtBuild(); $("rtDlg").showModal(); $("rtObjective").focus();
   try {
-    // Owner rule: opening Roundtable / War Room turns the Live roundtables switch on; the server turns it
-    // back off 30s after a session concludes.
-    try { await api("POST", "/api/roundtable/live-authorization", { enabled: true }); } catch { /* shown via lanes */ }
     const [lanes, drafts] = await Promise.all([api("GET", "/api/roundtable/lanes"), api("GET", `/api/projects/${s.pid}/roundtables`)]);
     if (RT !== s) return;
     s.lanes = lanes.lanes || []; s.gates = lanes.mission_gates || []; s.example = lanes.documented_example || [];
@@ -736,7 +733,7 @@ function rtSideRender() {
   RT.el.side.replaceChildren(...kids);
 }
 function rtStartRender() {
-  RT.el.liveNote.textContent = RT.live ? "Live roundtables are switched on. Start runs a brokered, time-boxed session once preflight passes." : "Live roundtables are switched off (Evidence → Spend controls). You can still plan and save drafts.";
+  RT.el.liveNote.textContent = RT.live ? "Live roundtables are on (Evidence → Spend controls). Compare and Start contact providers only after preflight passes." : "Turn on Live roundtables under Evidence → Spend controls to run compare or start a live session. Planning and drafts work while off.";
   const ok = rtCanStart();
   RT.el.start.setAttribute("aria-disabled", ok ? "false" : "true");
   RT.el.start.classList.toggle("primary", ok); RT.el.saveBtn.classList.toggle("primary", !ok);
@@ -964,7 +961,6 @@ async function rtOpenDraft(id) {
 const rtSelKey = (pid) => "aesop.rt.sel." + pid;
 function rtStoredSel(pid) { try { const v = JSON.parse(localStorage.getItem(rtSelKey(pid)) || "[]"); return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []; } catch { return []; } }
 function rtStoreSel(pid, ids) { try { localStorage.setItem(rtSelKey(pid), JSON.stringify(ids)); } catch { /* storage unavailable */ } }
-async function rtAuthorize() { try { await api("POST", "/api/roundtable/live-authorization", { enabled: true }); } catch { /* surfaced in the modal */ } }
 function rtMenu() {
   const pid = S.project.id; let sel = new Set(rtStoredSel(pid)); let open = false;
   const trig = h("button", { type: "button", class: "btn rt-entry", id: "rtMenuBtn", "aria-haspopup": "true", "aria-expanded": "false", "aria-controls": "rtMenuPop" },
@@ -987,7 +983,6 @@ function rtMenu() {
   };
   const load = async () => {
     list.replaceChildren(h("p", { class: "muted" }, "Checking lanes…"));
-    await rtAuthorize();
     let lanes = [];
     try { lanes = (await api("GET", "/api/roundtable/lanes")).lanes || []; } catch (e) { list.replaceChildren(h("p", { class: "muted" }, e.message)); return; }
     const isConv = (l) => l.lane_class === "admin" || l.lane_class === "speaker";
@@ -1176,9 +1171,11 @@ async function openProject(id) {
 // Route labels outside the header (composer chip, Build line, research draft line) follow the live project default.
 function refreshRouteLabels() {
   const p = S.project; if (!p) return;
-  const pv = p.provider_default; const rr = S.routes[pv];
+  const pv = ($("chatProv") && $("chatProv").value) || p.provider_default;
+  const rr = S.routes[pv];
   const c = $("composerRoute");
-  if (c) c.replaceChildren(pv ? routeDot(pv) : h("span", { class: "dot" }), h("span", { class: "t" }, `${routeName(pv) || "No provider chosen"}${rr ? " · " + access(rr.state) : ""}`));
+  if (c) c.replaceChildren(pv ? routeDot(pv) : h("span", { class: "dot" }), h("span", { class: "t" },
+    `${routeName(pv) || "No provider chosen"}${rr ? " · " + access(rr.state) : ""}${pv !== p.provider_default ? " · not the project default" : ""}`));
   const bt = $("buildRouteTag"); if (bt) bt.replaceChildren(...(rr ? [routeTag(rr)] : []));
   const bd = $("buildRouteDesc"); if (bd) bd.textContent = `Runs the official ${routeName(pv) || "(choose a provider)"} CLI inside ${p.root}. Output is redacted and size-limited. Cancel stops the local process tree only.`;
   const dr = $("draftRoute"); if (dr) dr.textContent = pv ? `Uses ${routeName(pv)}; one request` : "Choose a project provider first";
@@ -1405,35 +1402,51 @@ async function renderChat() {
     convs.length ? h("div", { class: "convstrip", role: "list", "aria-label": "Conversations" }, ...convs.map((c) => h("span", { role: "listitem", class: "convchip" + (c.id === cid ? " cur" : "") },
       h("button", { type: "button", class: "convpick", "aria-current": c.id === cid ? "true" : "false", title: c.title, onclick: () => { S.conv = c.id; refresh("chat"); } }, icon("chat", "sm"), h("span", {}, c.title)),
       h("button", { type: "button", class: "convdel", "aria-label": `Delete conversation ${c.title}`, title: "Delete conversation", onclick: () => deleteConversation(pid, c.id) }, icon("trash", "sm"))))) : h("span", { class: "grow" }),
-    sumBtn, cid ? abtn("Delete conversation", () => deleteConversation(pid, cid), "ghost danger del", "trash") : null, rtMenu(), btn("War Room", (e) => { rtAuthorize(); openRoundtable(e.currentTarget, { mode: "war_room" }); }, "rt-entry", "shield"), btn("New conversation", newConv, "ghost", "plus"));
+    sumBtn, cid ? abtn("Delete conversation", () => deleteConversation(pid, cid), "ghost danger del", "trash") : null, rtMenu(), btn("War Room", (e) => openRoundtable(e.currentTarget, { mode: "war_room" }), "rt-entry", "shield"), btn("New conversation", newConv, "ghost", "plus"));
   const root = h("div", { class: "chatv" }, bar, h("div", { "data-deriv": "summary", class: "section" }, ...dView("summary")));
   if (!cid) {
     root.append(empty("chat", "No conversations yet", "Start a conversation to talk with this project's provider. Messages are saved locally before anything is sent.", btn("Start a conversation", newConv, "primary", "plus")));
     $("view").replaceChildren(root); refreshRouteLabels(); return;
   }
   const draftKey = "aesop.draft.chat." + cid;
+  const provKey = "aesop.chat.prov." + cid;
   const chips = chatChips[cid] || (chatChips[cid] = new Set());
+  const usable = usableRoutes();
+  let provPick = ssGet(provKey) || S.project.provider_default || "";
+  if (!usable.some(([id]) => id === provPick)) provPick = S.project.provider_default || (usable[0] && usable[0][0]) || "";
   const msgsEl = h("div", { class: "msgs", "aria-live": "polite", "aria-relevant": "additions" });
   const ta = h("textarea", { "aria-label": "Message", placeholder: "Ask something about this project…" });
   ta.value = ssGet(draftKey) || "";
   ta.addEventListener("input", () => ssSet(draftKey, ta.value));
   const chosen = () => [...chips].filter((id) => atts.some((a) => a.id === id));
   let sending = false;
+  const messageProvider = () => ($("chatProv") && $("chatProv").value) || provPick || S.project.provider_default;
   const send = async (confirm) => {
     if (sending) return;
     const raw = ta.value; const text = raw.trim(); if (!text) { ta.focus(); return; }
+    const provider = messageProvider();
+    if (!provider) { banner("Choose a provider for this message.", "bad"); return; }
     sending = true; sendBtn.disabled = true; sendBtn.setAttribute("aria-busy", "true");
     try {
-      await api("POST", `/api/projects/${pid}/conversations/${cid}/messages`, { text, attachment_ids: chosen(), confirm_switch: confirm });
+      await api("POST", `/api/projects/${pid}/conversations/${cid}/messages`,
+        { text, attachment_ids: chosen(), provider, confirm_switch: !!confirm });
       if (ta.value === raw) { ta.value = ""; grow(); ssSet(draftKey, ""); } // keep anything typed while the request was pending
       banner("Saved locally and submitted to provider.", "ok");
       if (gen === S.viewGen) { S.msgSig = ""; drawMsgs(); }
-    } catch (e) { banner(e.message, "bad"); }
-    finally { sending = false; sendBtn.disabled = false; sendBtn.removeAttribute("aria-busy"); }
+    } catch (e) {
+      if (e.status === 409 && !confirm) {
+        const go = await dialog("Use a different provider for this message?", [
+          { name: "why", label: "Reason", type: "textarea", value: e.message, readonly: true, tall: true },
+        ], "Send with this provider");
+        if (go) return send(true);
+      } else banner(e.message, "bad");
+    } finally { sending = false; sendBtn.disabled = false; sendBtn.removeAttribute("aria-busy"); }
   };
   const sendBtn = btn("Send", () => send(false), "primary", "send");
   const preview = async () => guard(async () => {
-    const r = await api("POST", `/api/projects/${pid}/conversations/${cid}/preview`, { text: ta.value, attachment_ids: chosen() });
+    const provider = messageProvider();
+    const r = await api("POST", `/api/projects/${pid}/conversations/${cid}/preview`,
+      { text: ta.value, attachment_ids: chosen(), provider });
     await dialog(`Context that will be sent to ${routeName(r.provider)} (${r.chars} chars)`, [{ name: "ctx", label: "Exact payload", type: "textarea", value: r.context, tall: true, readonly: true }], "Close");
   });
   ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(false); } });
@@ -1444,9 +1457,13 @@ async function renderChat() {
         onclick: (e) => { const b = e.currentTarget; const on = b.getAttribute("aria-pressed") !== "true"; b.setAttribute("aria-pressed", on ? "true" : "false"); if (on) chips.add(a.id); else chips.delete(a.id); } },
       h("span", {}, a.name))))
     : h("div", { class: "attach" }, h("span", { class: "lbl" }, icon("clip", "sm"), "No readable files to attach yet."), h("button", { type: "button", class: "linkish", onclick: (e) => openInspector("files", e.currentTarget) }, "Add files"));
+  const provSel = h("select", { id: "chatProv", class: "chat-prov", "aria-label": "Provider for this message",
+    onchange: (e) => { ssSet(provKey, e.target.value); refreshRouteLabels(); } },
+    ...usable.map(([id, r]) => h("option", { value: id, selected: id === provPick },
+      `${routeName(id)} · ${access(r.state)}`)));
   const composer = h("div", { class: "composer" }, ta, attachRow,
     h("div", { class: "cfoot" },
-      h("div", { class: "row" }, h("span", { class: "chip", id: "composerRoute" }), h("span", { class: "hint" }, h("kbd", {}, "Ctrl"), h("kbd", {}, "Enter"), " send")),
+      h("div", { class: "row chat-prow" }, provSel, h("span", { class: "chip", id: "composerRoute" }), h("span", { class: "hint" }, h("kbd", {}, "Ctrl"), h("kbd", {}, "Enter"), " send")),
       h("div", { class: "row" }, btn("Preview context", preview, "ghost", "eye"), sendBtn)));
   root.append(msgsEl, h("div", { class: "composer-dock" }, composer));
   $("view").replaceChildren(root);

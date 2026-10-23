@@ -2,7 +2,7 @@
 
 A personal, local-first browser workspace for AI projects on Windows. Open a project, choose its provider, attach files, chat or run a supervised agent task, inspect and save the results, then close and resume later.
 
-- **Chat & Model Lab:** project conversations through the official `codex` (ChatGPT plan) and `claude` (claude.ai plan) CLIs. You can preview the exact context before it is sent.
+- **Chat & Model Lab:** project conversations through every **usable** in-app route (Codex, Claude Code, Cursor, Antigravity, Copilot CLI after **Verify**, optional Codex API, and the offline test adapter). Each message can pick a provider in the composer; switching away from the project default asks for confirmation. You can preview the exact context before it is sent.
 - **Developer workspace / Agent control:** supervised agent tasks scoped to the project folder. Each task shows live redacted output, the files it changed, and a cancel button that stops the owned process tree. Interrupted tasks are reconciled on restart and never replayed automatically.
 - **Research & Knowledge:** a cited notebook mixing public pages (fetched SSRF-safely) and approved local documents. Exports can include or exclude private sources.
 - **Project memory:** authoritative records, source-linked derived summaries, and explicitly promoted shared knowledge. Corrections supersede old records and keep them for provenance.
@@ -53,10 +53,13 @@ Each request is capped at 2,000 output tokens. Its worst-case cost (input estima
 ## Tests
 
 ```powershell
-python -W ignore -m unittest tests.test_studio
+.\scripts\run_tests.ps1          # full suite (~90s), offline — recommended
+# or:
+$env:AESOP_PROBE_OFFLINE = "1"; $env:AESOP_SIMULATED_ROUTE = "1"
+python -W ignore -m unittest discover -s tests -p "test_*.py"
 ```
 
-Offline tests use a `SIMULATED` adapter (enabled only with `AESOP_SIMULATED_ROUTE=1`), which is never counted as a live provider. Live provider results are recorded in `docs/report.html`.
+`AESOP_PROBE_OFFLINE=1` skips live CLI probes during route discovery (set automatically by `tests/__init__.py` and `run_tests.ps1`). The `SIMULATED` adapter is enabled only with `AESOP_SIMULATED_ROUTE=1` and is never counted as a live provider. Live provider results are recorded in `docs/report.html`.
 
 ## Backup / restore
 
@@ -66,9 +69,15 @@ Use **Evidence → Create backup**, or call `aesop_studio.backup.create_backup`.
 
 Research → **Draft findings** and Chat → **Summarize to memory** ask the project's own provider (one request) to propose cited findings or a derived summary. Proposals stay out of exports and context packets until you **Accept** them.
 
-## Roundtables (planning only)
+## Roundtables (live, off by default)
 
-Chat → **Roundtable** configures a multi-provider session from live lane discovery and exports a planning packet. Start stays disabled in this release.
+Chat → **Roundtable** / **War Room** configures a multi-provider session from live lane discovery. **Evidence → Spend controls → Live roundtables** must be **On** before compare, preflight **Start**, or a live broker session (the switch is forced **off** at every server restart and auto-off shortly after a session ends).
+
+- **Planning:** save drafts, run preflight, export a planning packet (no providers contacted).
+- **Side-by-side compare:** one read-only chat turn per selected speaker (2–4), owner-confirmed, separate from the live broker.
+- **Live broker:** concurrent openings and a moderated open floor; read-only chat turns only — nothing said is executed.
+
+Use **Providers → Verify** for Cursor, Antigravity, and Copilot CLI before they count as roundtable speakers.
 
 ## Paid review tool
 
