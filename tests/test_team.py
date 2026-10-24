@@ -104,3 +104,43 @@ class TestTeam(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBuildTests(TestTeam):
+    def test_tests_run_after_build_and_reach_the_reviewer(self):
+        (self.root / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+        (self.root / "test_calc.py").write_text(
+            "import unittest\nfrom calc import add\n\nclass T(unittest.TestCase):\n"
+            "    def test_add(self):\n        self.assertEqual(add(2, 2), 4)\n\n"
+            "    def test_env_has_no_keys(self):\n        import os\n"
+            "        self.assertFalse([k for k in os.environ if 'KEY' in k.upper() or 'TOKEN' in k.upper()])\n",
+            encoding="utf-8")
+        os.environ["AESOP_FAKE_API_KEY"] = "must-not-leak"
+        try:
+            self.svc.update_project(self.p["id"], {"transfer_policy": {"simulated": True}})
+            tid = self.sup.create(self.p, "simulated", "WRITE something", mode="agent", timeout=30)
+            team.plan(self.store, tid, "simulated")
+            team.watch(self.store, self.sup, self.svc, tid)
+            r = self.wait_review(tid)
+        finally:
+            os.environ.pop("AESOP_FAKE_API_KEY", None)
+        self.assertEqual(r["tests"]["state"], "PASSED", r["tests"])
+        self.assertEqual(r["tests"]["summary"], "all 2 passed")
+        self.assertIn("Tests, run by Studio", self.sup.get(r["review_task"])["prompt"])
+        # a failing test is reported as FAILED with the count, and no reviewer is needed for tests to run
+        (self.root / "test_calc.py").write_text(
+            "import unittest\n\nclass T(unittest.TestCase):\n    def test_bad(self):\n        self.assertEqual(1, 2)\n",
+            encoding="utf-8")
+        tid2 = self.sup.create(self.p, "simulated", "WRITE more", mode="agent", timeout=30)
+        team.plan(self.store, tid2, None)
+        team.watch(self.store, self.sup, self.svc, tid2)
+        end = time.time() + 60
+        while time.time() < end and (team.get(self.store, tid2)["tests"]["state"] in ("WAITING", "RUNNING")):
+            time.sleep(0.2)
+        t2 = team.get(self.store, tid2)["tests"]
+        self.assertEqual(t2["state"], "FAILED")
+        self.assertEqual(t2["summary"], "0 of 1 passed")
+
+    def test_no_tests_found(self):
+        from aesop_studio import testrun
+        self.assertEqual(testrun.run(str(self.tmp / "d"))["state"], "NO_TESTS")

@@ -413,7 +413,7 @@ const RT_WINDOWS = [15, 30, 45];
 const RT_CLASS = { admin: "admin", speaker: "speaker", research: "research-only", review: "review-only" };
 const RT_MODES = { general: "General Roundtable", war_room: "Admin War Room" };
 const RT_FILTERS = [["all", "All"], ["speakers", "Speakers"], ["research", "Research"], ["review", "Review"], ["ready", "Ready only"]];
-const RT_NOT_LIVE = "Live roundtables are switched off (Evidence → Spend controls).";
+const RT_NOT_LIVE = "Live sessions are off. Use the Live switch at the top of this window.";
 const LIVE_END = ["COMPLETED", "STOPPED", "FAILED", "INTERRUPTED"];
 let RT = null;
 
@@ -447,7 +447,7 @@ function rtSay(msg, kind = "") {
 function setupRoundtable() {
   $("rtDlg").addEventListener("close", () => {
     if (!RT) return;
-    clearTimeout(RT.timer); clearTimeout(RT.compareTimer); const o = RT.opener; RT = null;
+    clearTimeout(RT.timer); clearTimeout(RT.compareTimer); clearInterval(RT.liveTimer); const o = RT.opener; RT = null;
     if (o && o.isConnected && o.focus) o.focus();
   });
 }
@@ -543,7 +543,38 @@ async function openRoundtable(opener, opts = {}) {
     s.discovered = lanes.discovered_at || null; s.live = !!lanes.live_authorized; s.drafts = Array.isArray(drafts) ? drafts : [];
   } catch (e) { if (RT === s) s.err = e.message; }
   if (RT !== s) return;
-  s.loading = false; rtResearchRender(); rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtDraftsRender(); rtStartRender();
+  s.loading = false; rtResearchRender(); rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtDraftsRender(); rtStartRender(); rtLiveRender();
+  if (!s.err && !s.live) await rtSetLive(true, true); // opening Roundtable / War Room is the go-ahead; it switches off 30 s after a session
+  clearInterval(s.liveTimer);
+  s.liveTimer = setInterval(async () => {
+    if (RT !== s) { clearInterval(s.liveTimer); return; }
+    try { const r = await api("GET", "/api/roundtable/live-authorization"); if (RT === s && !!r.live_authorized !== !!s.live) rtLiveApply(!!r.live_authorized); } catch { /* next tick */ }
+  }, 4000);
+}
+const RT_LIVE_GATE = "LIVE_ROUNDTABLES_OFF";
+function rtLiveApply(on) {
+  const s = RT; if (!s) return;
+  s.live = on;
+  s.gates = on ? (s.gates || []).filter((g) => g.code !== RT_LIVE_GATE)
+    : (s.gates || []).some((g) => g.code === RT_LIVE_GATE) ? s.gates : [...(s.gates || []), { code: RT_LIVE_GATE, reason: RT_NOT_LIVE }];
+  if (s.pre && !on) s.preStale = true;
+  rtLiveRender(); rtGatesRender(); rtStartRender(); rtSideRender();
+}
+function rtLiveRender() {
+  const s = RT; if (!s || !s.el || !s.el.liveSw) return;
+  s.el.liveSw.setAttribute("aria-checked", s.live ? "true" : "false");
+  s.el.liveState.textContent = s.loading ? "…" : s.live ? "On" : "Off";
+}
+async function rtSetLive(on, auto) {
+  const s = RT; if (!s) return false;
+  try {
+    const r = await api("POST", "/api/roundtable/live-authorization", { enabled: !!on });
+    if (RT !== s) return false;
+    rtLiveApply(!!r.live_authorized);
+    if (!auto) rtSay(`Live sessions turned ${r.live_authorized ? "on" : "off"}.`, "ok");
+    else if (r.live_authorized) rtSay("Live sessions are on (they switch off by themselves 30 s after a session ends).");
+    return !!r.live_authorized;
+  } catch (e) { if (RT === s) rtSay(e.message, "bad"); return false; }
 }
 // Any edit after a preflight makes its pass/fail list out of date until the next check.
 function rtStale() {
@@ -665,10 +696,16 @@ function rtBuild(focusId) {
   $("rtIn").replaceChildren(
     h("header", { class: "rt-head" }, h("div", { class: "ttl" }, icon("users"), h("div", {}, h("h2", { id: "rtTitle" }, f.mode === "war_room" ? "War Room" : "Roundtable"),
       (el.liveNote = h("p", { class: "faint" })))),
-      h("button", { type: "button", class: "iconbtn", "aria-label": "Close roundtable", onclick: () => $("rtDlg").close() }, icon("x"))),
+      h("div", { class: "row rt-livectl" },
+        h("span", { id: "rtLiveLbl", class: "rt-livelbl" }, "Live"),
+        (el.liveState = h("span", { class: "faint rt-livestate" })),
+        (el.liveSw = h("button", { type: "button", class: "switch", role: "switch", "aria-checked": "false", "aria-labelledby": "rtLiveLbl",
+          title: "Live sessions let the chosen providers talk to each other. On when you open this window; off 30 s after a session ends.",
+          onclick: () => rtSetLive(el.liveSw.getAttribute("aria-checked") !== "true") }, h("span", { class: "knob" }))),
+        h("button", { type: "button", class: "iconbtn", "aria-label": "Close roundtable", onclick: () => $("rtDlg").close() }, icon("x")))),
     h("div", { id: "rtStatus", class: "rt-status", role: "status", "aria-live": "polite" }),
     (el.body = h("div", { class: "rt-body" }, (el.part = part), main, el.side)), (el.foot = foot));
-  rtResearchRender(); rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtStartRender(); rtDraftsRender(); rtCompareRender();
+  rtResearchRender(); rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtStartRender(); rtDraftsRender(); rtCompareRender(); rtLiveRender();
   if (focusId && $(focusId)) $(focusId).focus();
 }
 // Researcher: an on-call public web search lane any speaker (or the owner) can call during a session.
@@ -761,7 +798,8 @@ function rtSideRender() {
   RT.el.side.replaceChildren(...kids);
 }
 function rtStartRender() {
-  RT.el.liveNote.textContent = RT.live ? "Live roundtables are on (Evidence → Spend controls). Compare and Start contact providers only after preflight passes." : "Turn on Live roundtables under Evidence → Spend controls to run compare or start a live session. Planning and drafts work while off.";
+  RT.el.liveNote.textContent = RT.live ? "Live sessions are on. Compare and Start contact providers only after preflight passes." : "Live sessions are off: flip the Live switch to run compare or start a session. Planning and drafts work while off.";
+  rtLiveRender();
   const ok = rtCanStart();
   RT.el.start.setAttribute("aria-disabled", ok ? "false" : "true");
   RT.el.start.classList.toggle("primary", ok); RT.el.saveBtn.classList.toggle("primary", !ok);
@@ -842,6 +880,10 @@ async function rtExport() {
 const rtCanStart = () => !!(RT && RT.live && RT.rec && RT.pre && !RT.preStale && RT.pre.start_allowed === true);
 async function rtStart() {
   const s = RT; if (!s) return;
+  if (!s.live && s.rec) { // the switch went off after the last session: turn it back on and re-check
+    if (!(await rtSetLive(true, true)) || RT !== s) return;
+    await rtPreflight(); if (RT !== s) return;
+  }
   if (!rtCanStart()) { rtSay(`Start is disabled. ${s.el.startWhy.textContent}`); return; }
   if (s.starting) return; s.starting = true;
   try {
@@ -2140,7 +2182,7 @@ async function renderAgent(selected) {
     h("option", { value: "" }, "No review"),
     ...rv.reviewers.map((r) => h("option", { value: r, selected: r === rvPick }, `${routeName(r)} reviews it`)));
   const rvRow = h("div", { class: "row rv-row" }, h("label", { for: "buildReviewer", class: "faint" }, "Second opinion"), rvSel,
-    h("span", { class: "faint", id: "buildReviewerHelp" }, `When the build finishes, another AI reviews the change (read-only). Fixes go back only when you say so; at most ${rv.max_rounds} rounds.`));
+    h("span", { class: "faint", id: "buildReviewerHelp" }, `When the build finishes, Studio runs the project's tests on this PC (3-minute limit, no keys in the environment), then another AI reviews the change and the results (read-only). Fixes go back only when you say so; at most ${rv.max_rounds} rounds.`));
   const blockNote = h("div");
   const draftKey = "aesop.draft.build." + pid;
   const ta = h("textarea", { "aria-label": "Agent task", placeholder: "Describe a bounded coding task to run inside the project folder…" });
@@ -2261,7 +2303,7 @@ function reviewPanel(tid, box, openTask, rv) {
     let t = null; try { t = (await api("GET", `/api/tasks/${tid}`)).task; } catch { /* shown without task state */ }
     const s2 = JSON.stringify([r, t && t.state]);
     if (s2 !== sig) { sig = s2; draw(r, t); }
-    if (["WAITING_FOR_BUILD", "REVIEWING"].includes(r.state)) timer = setTimeout(tick, 3000);
+    if (["WAITING_FOR_BUILD", "REVIEWING"].includes(r.state) || ["WAITING", "RUNNING"].includes((r.tests || {}).state)) timer = setTimeout(tick, 3000);
   };
   const reviewerPick = (cur) => {
     const sel = h("select", { class: "chat-prov", "aria-label": "Reviewer" }, ...((rv && rv.reviewers) || []).map((x) => h("option", { value: x, selected: x === cur }, routeName(x))));
@@ -2272,19 +2314,36 @@ function reviewPanel(tid, box, openTask, rv) {
     catch (e) { banner(e.message, "bad"); }
   }, "sm", "eye");
   const put = (...kids) => box.replaceChildren(...kids.filter(Boolean)); // DOM would print a skipped piece as "null"
+  const testsView = (r, t) => {
+    const x = r.tests; if (!x) return null;
+    const ok = x.state === "PASSED", bad = x.state === "FAILED" || x.state === "ERROR";
+    const line = x.state === "WAITING" ? (t && t.state === "COMPLETED" ? "Tests: starting…" : "Tests run here when the build finishes.")
+      : x.state === "RUNNING" ? "Tests: running on this PC…"
+      : x.state === "NO_TESTS" ? "Tests: none found in this project." : x.state === "SKIPPED" ? `Tests: skipped (${x.note}).`
+      : x.state === "ERROR" ? `Tests: could not run — ${x.note}` : `Tests ${ok ? "passed" : "failed"}: ${x.summary} (${x.label}, ${x.duration_s}s)`;
+    const again = t && t.state === "COMPLETED" && !["WAITING", "RUNNING"].includes(x.state)
+      ? abtn("Run tests again", async () => { await api("POST", `/api/tasks/${tid}/tests`); sig = ""; setTimeout(tick, 800); }, "ghost sm", "terminal") : null;
+    return h("div", { class: "rvtests " + (ok ? "ok" : bad ? "bad" : "") },
+      h("div", { class: "row" }, icon(ok ? "check" : bad ? "alert" : "terminal", "sm"), h("span", {}, line), again),
+      x.output ? h("details", {}, h("summary", {}, "Test output"), h("pre", { class: "out" }, x.output)) : null);
+  };
   const draw = (r, t) => {
     const who = r.reviewer ? routeName(r.reviewer) : "The reviewer";
     const head = h("div", { class: "rvhead" }, icon("users"), h("h4", {}, "Second opinion"), r.round > 1 ? h("span", { class: "faint" }, `round ${r.round} of ${(rv && rv.max_rounds) || 3}`) : null);
     const done = t && ["COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED", "BLOCKED_OWNER", "EFFECT_UNKNOWN"].includes(t.state);
+    const tv = testsView(r, t);
     if (r.state === "NONE" || r.state === "NO_REVIEW") {
-      if (!(t && t.state === "COMPLETED") || !(rv && rv.reviewers.length)) { box.replaceChildren(); box.hidden = true; return; }
-      const sel = reviewerPick(rv.reviewers[0]);
-      box.hidden = false; put(head, h("p", { class: "muted" }, "No review yet. Ask another AI to check this change (read-only):"), h("div", { class: "row" }, sel, again(sel)));
+      const canAsk = t && t.state === "COMPLETED" && rv && rv.reviewers.length;
+      if (!canAsk && !tv) { box.replaceChildren(); box.hidden = true; return; }
+      const sel = canAsk ? reviewerPick(rv.reviewers[0]) : null;
+      box.hidden = false;
+      put(h("div", { class: "rvhead" }, icon("users"), h("h4", {}, "Checks")), tv,
+        canAsk ? h("p", { class: "muted" }, "No review yet. Ask another AI to check this change (read-only):") : null, canAsk ? h("div", { class: "row" }, sel, again(sel)) : null);
       return;
     }
     box.hidden = false;
-    if (r.state === "WAITING_FOR_BUILD") { put(head, h("p", { class: "muted" }, done ? `${who} is about to review…` : `${who} reviews the change as soon as the build finishes.`)); return; }
-    if (r.state === "REVIEWING") { put(head, h("p", { class: "muted" }, `${who} is reviewing the change (${r.change_kind || "changes"}, ${Number(r.change_chars || 0).toLocaleString()} chars)…`)); return; }
+    if (r.state === "WAITING_FOR_BUILD") { put(head, tv, h("p", { class: "muted" }, done ? `${who} is about to review…` : `${who} reviews the change as soon as the build finishes.`)); return; }
+    if (r.state === "REVIEWING") { put(head, tv, h("p", { class: "muted" }, `${who} is reviewing the change (${r.change_kind || "changes"}, ${Number(r.change_chars || 0).toLocaleString()} chars)…`)); return; }
     if (r.state !== "DONE") {
       const sel = reviewerPick(r.reviewer);
       const fix = r.state === "BLOCKED" ? abtn(`Allow files to ${who}`, async () => {
@@ -2293,7 +2352,7 @@ function reviewPanel(tid, box, openTask, rv) {
         S.project = { ...S.project, ...up, transfer_policy: up.transfer_policy || pol };
         await api("POST", `/api/tasks/${tid}/review`, { reviewer: r.reviewer }); sig = ""; tick();
       }, "sm") : null;
-      put(head, h("div", { class: "note " + (r.state === "SKIPPED" ? "" : "bad") }, icon(r.state === "SKIPPED" ? "info" : "alert"), h("span", {}, r.note || r.state.toLowerCase())),
+      put(head, tv, h("div", { class: "note " + (r.state === "SKIPPED" ? "" : "bad") }, icon(r.state === "SKIPPED" ? "info" : "alert"), h("span", {}, r.note || r.state.toLowerCase())),
         h("div", { class: "row" }, fix, r.state !== "SKIPPED" ? sel : null, r.state !== "SKIPPED" ? again(sel, "Review again") : null));
       return;
     }
@@ -2315,7 +2374,7 @@ function reviewPanel(tid, box, openTask, rv) {
     }, "primary sm", "send");
     const acceptBtn = abtn(r.accepted_at ? "Accepted" : "Accept", async () => { await api("POST", `/api/tasks/${tid}/accept`); sig = ""; tick(); }, "sm", "check");
     acceptBtn.disabled = !!r.accepted_at;
-    put(head,
+    put(head, tv,
       h("div", { class: "rvverdict" }, h("span", { class: "pill " + tone_ }, lbl), h("span", { class: "faint" }, `by ${who}`)),
       r.summary ? h("p", {}, r.summary) : null,
       checks.length ? h("ul", { class: "rvissues" }, ...checks.map((c) => c.li)) : h("p", { class: "muted" }, "No issues listed."),

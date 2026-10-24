@@ -846,7 +846,7 @@ button.eref { min-height: 0; padding: 0 2px; font: inherit; font-family: var(--m
 @media (max-width: 1023px) { .rt-feed .ev.reply { width: calc(100% - 14px); } }
 .evb em { color: var(--text-2); }
 /* compact room header so the conversation gets the height */
-dialog.rt.rooming .rt-head .faint { display: none; }
+dialog.rt.rooming .rt-head .ttl .faint { display: none; }
 dialog.rt.rooming .rt-head { height: 56px; min-height: 56px; }
 .rt-room { gap: 10px; }
 .rt-bar { display: flex; align-items: center; gap: 8px 12px; min-width: 0; }
@@ -956,3 +956,13 @@ dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
 .sev-high .rvsev { background: var(--red-bg); color: var(--red); }
 .sev-medium .rvsev { background: var(--amber-bg); color: var(--amber); }
 .rvbox textarea { min-height: 52px; font: inherit; font-size: 13.5px; }
+/* live switch in the roundtable header */
+.rt-livectl { gap: 8px; align-items: center; flex: none; }
+.rt-livelbl { font-size: 13px; font-weight: 600; color: var(--text); }
+.rt-livestate { font-size: 12.5px; min-width: 22px; }
+.rvtests { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--panel); font-size: 13.5px; }
+.rvtests.ok { border-color: rgba(128, 225, 203, .45); color: var(--mint); }
+.rvtests.bad { border-color: rgba(255, 143, 143, .45); color: var(--red); }
+.rvtests .row { gap: 8px; align-items: center; flex-wrap: wrap; }
+.rvtests details { color: var(--text-2); }
+.rvtests pre.out { max-height: 260px; overflow: auto; font-size: 12px; }

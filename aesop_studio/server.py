@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import sys
+import threading
 import time
 import urllib.parse
 from http import cookies
@@ -258,6 +259,10 @@ class Handler(BaseHTTPRequestHandler):
         code = 202 if out.get("status") == "RUNNING" else (409 if out.get("status") == "BLOCKED" else 200)
         self.json(out, code)
 
+    @route("GET", r"/api/roundtable/live-authorization")
+    def rt_live_auth_get(self, sess):
+        self.json({"live_authorized": lanes.live_authorized(self.app.store)})
+
     @route("POST", r"/api/roundtable/live-authorization")
     def rt_live_auth(self, sess):
         lanes.set_live_authorized(self.app.store, bool(self.body().get("enabled")))
@@ -461,9 +466,9 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"{reviewer} can't review right now; pick another reviewer or none")
         tid = self.app.sup.create(p, prov, b["prompt"].strip(), mode="agent",
                                   timeout=max(30, min(3600, int(b.get("timeout", 900)))))
-        if reviewer:
-            team.plan(self.app.store, tid, reviewer)
-            team.watch(self.app.store, self.app.sup, self.app.svc, tid)
+        # every build gets its tests run by Studio afterwards; a reviewer (optional) then sees the results
+        team.plan(self.app.store, tid, reviewer)
+        team.watch(self.app.store, self.app.sup, self.app.svc, tid)
         self.json(self.app.sup.get(tid), 202)
 
     @route("GET", r"/api/projects/(\w+)/reviewers")
@@ -481,6 +486,14 @@ class Handler(BaseHTTPRequestHandler):
     def task_review_again(self, sess, tid):
         self._task(tid)
         self.json(team.retry(self.app.store, self.app.sup, self.app.svc, tid, self.body().get("reviewer")), 202)
+
+    @route("POST", r"/api/tasks/(\w+)/tests")
+    def task_tests(self, sess, tid):
+        t = self._task(tid)
+        if t["state"] != "COMPLETED":
+            raise ValueError("tests run on completed builds only")
+        threading.Thread(target=team.run_tests, args=(self.app.store, self.app.sup, self.app.svc, tid), daemon=True).start()
+        self.json({"started": True}, 202)
 
     @route("POST", r"/api/tasks/(\w+)/fixes")
     def task_fixes(self, sess, tid):

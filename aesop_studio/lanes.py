@@ -52,8 +52,9 @@ _EXTS = ("", ".exe", ".cmd", ".bat", ".ps1")
 # off by default, changed only through the authenticated UI/API. The broker never changes it.
 AUTH_KEY = "roundtable_live_authorized"
 LIVE_GATE = {"code": "LIVE_ROUNDTABLES_OFF",
-             "reason": "Live roundtables are switched off. Turn them on under Evidence → Spend controls → Live "
-                       "roundtables. Each session still needs roster consent, the sharing acknowledgement and caps."}
+             "reason": "Live sessions are off. Use the Live switch at the top of this window (it turns on by itself "
+                       "when you open Roundtable or War Room). Each session still needs roster consent, the sharing "
+                       "acknowledgement and caps."}
 MISSION_GATES = [LIVE_GATE]
 
 
