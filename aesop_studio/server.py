@@ -417,6 +417,14 @@ class Handler(BaseHTTPRequestHandler):
     def browser_drive_stop(self, sess):
         self.json(self.app.drive.stop())
 
+    @route("POST", r"/api/browser/use-chrome")
+    def browser_use_chrome(self, sess):
+        self.json(self.app.browser.use_my_chrome(bool(self.body().get("confirm"))), 202)
+
+    @route("POST", r"/api/browser/use-studio")
+    def browser_use_studio(self, sess):
+        self.json(self.app.browser.use_studio_chrome())
+
     @route("POST", r"/api/browser/signin")
     def browser_signin(self, sess):
         self.json(self.app.browser.sign_in(self.body().get("url") or ""), 202)

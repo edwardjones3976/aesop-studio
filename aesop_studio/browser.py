@@ -15,10 +15,14 @@ import threading
 import time
 from pathlib import Path
 
+import os
+import socket
+
 REPO = Path(__file__).resolve().parent.parent
 WORKER = Path(__file__).with_name("browser_worker.py")
 LAUNCH_TIMEOUT = 60
 CMD_TIMEOUT = 45
+CDP_PORT = 9222
 NEW_GROUP = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -28,6 +32,40 @@ def venv_python() -> Path | None:
         if c.is_file():
             return c
     return None
+
+
+def chrome_exe() -> Path | None:
+    for c in (Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Google/Chrome/Application/chrome.exe",
+              Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Google/Chrome/Application/chrome.exe",
+              Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe"):
+        if c.is_file():
+            return c
+    return None
+
+
+def chrome_user_data() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/User Data"
+
+
+def _port_open(port: int) -> bool:
+    s = socket.socket(); s.settimeout(0.4)
+    try:
+        s.connect(("127.0.0.1", port)); return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _chrome_running() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq chrome.exe", "/NH"], capture_output=True, text=True,
+                           timeout=10, creationflags=NEW_GROUP)
+        return "chrome.exe" in (r.stdout or "")
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 class Browser:
@@ -42,6 +80,8 @@ class Browser:
         base = Path(data_dir) if data_dir else REPO
         self.profile = str(base / "browser-profile")
         self.signin_proc: subprocess.Popen | None = None
+        self.mode = "studio"          # "studio" = Studio's own profile; "chrome" = the owner's running Chrome via CDP
+        self.cdp_url = f"http://127.0.0.1:{CDP_PORT}"
 
     # ---- availability ----
     def available(self) -> bool:
@@ -54,11 +94,63 @@ class Browser:
         return {"available": self.available(),
                 "running": bool(self.proc and self.proc.poll() is None),
                 "signing_in": self.signing_in(),
+                "mode": self.mode,
+                "chrome_found": chrome_exe() is not None,
+                "chrome_connected": self.mode == "chrome" and _port_open(CDP_PORT),
                 "url": self.last.get("url", ""), "title": self.last.get("title", ""),
                 "error": self.error,
                 "note": "" if self.available() else
                         "The browser needs Playwright + Chrome in the project's .venv. Run: "
                         ".venv\\Scripts\\python -m playwright install chrome"}
+
+    # ---- use the owner's own Chrome (their real profile and logins) over the DevTools port ----
+    def use_my_chrome(self, confirm_restart: bool = False) -> dict:
+        if not chrome_exe():
+            raise RuntimeError("Google Chrome was not found on this PC")
+        with self.lock:
+            self._kill()  # free our worker; the CDP worker will attach instead
+            if _port_open(CDP_PORT):
+                self.mode = "chrome"; self.error = ""
+                return {"connected": True, "mode": "chrome", "note": "Connected to your Chrome."}
+            if _chrome_running() and not confirm_restart:
+                return {"needs_restart": True, "running": True, "mode": self.mode,
+                        "note": "Your Chrome is open but without remote control. To use it, Studio must close and "
+                                "reopen it with remote control on (your tabs are restored, your logins kept). Confirm to continue."}
+            if _chrome_running():
+                try:
+                    subprocess.run(["taskkill", "/IM", "chrome.exe", "/T"], capture_output=True, timeout=15,
+                                   creationflags=NEW_GROUP)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                for _ in range(40):
+                    if not _chrome_running():
+                        break
+                    time.sleep(0.25)
+                if _chrome_running():
+                    return {"connected": False, "error": "Chrome would not close (a window may be asking to confirm). "
+                                                         "Close all Chrome windows yourself, then try again."}
+                time.sleep(0.5)
+            try:
+                subprocess.Popen([str(chrome_exe()), f"--remote-debugging-port={CDP_PORT}",
+                                  f"--user-data-dir={chrome_user_data()}", "--restore-last-session"],
+                                 creationflags=NEW_GROUP)
+            except OSError as e:
+                return {"connected": False, "error": f"could not launch Chrome: {type(e).__name__}"}
+            for _ in range(60):
+                if _port_open(CDP_PORT):
+                    break
+                time.sleep(0.25)
+            if not _port_open(CDP_PORT):
+                return {"connected": False, "error": "Chrome started but did not open its remote-control port. "
+                                                     "Make sure all other Chrome windows are closed, then try again."}
+            self.mode = "chrome"; self.error = ""
+            return {"connected": True, "mode": "chrome", "note": "Connected to your Chrome (your profile and logins)."}
+
+    def use_studio_chrome(self) -> dict:
+        with self.lock:
+            self._kill()
+            self.mode = "studio"; self.error = ""
+        return {"mode": "studio"}
 
     # ---- owner sign-in: a real window the owner uses by hand ----
     def sign_in(self, url: str = "") -> dict:
@@ -96,7 +188,15 @@ class Browser:
                 self.q.get_nowait()
             except queue.Empty:
                 break
-        self.proc = subprocess.Popen([str(py), "-I", str(WORKER), self.profile], stdin=subprocess.PIPE,
+        if self.mode == "chrome":
+            if not _port_open(CDP_PORT):
+                self.mode = "studio"
+                raise RuntimeError("your Chrome is no longer connected (its window was closed); switched back to "
+                                   "Studio's browser — use “Use my Chrome” to reconnect")
+            worker_args = ["--cdp", self.cdp_url]
+        else:
+            worker_args = [self.profile]
+        self.proc = subprocess.Popen([str(py), "-I", str(WORKER), *worker_args], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=str(REPO), text=True,
                                      encoding="utf-8", bufsize=1, creationflags=NEW_GROUP)
         threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()

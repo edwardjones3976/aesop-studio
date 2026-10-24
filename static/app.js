@@ -1586,7 +1586,7 @@ function inspBrowser(body, pid, gen) {
   const stat = h("div", { class: "brstat", role: "status", "aria-live": "polite" }, "Starting…");
   const wrap = h("div", { class: "brview", tabindex: "0", "aria-label": "Browser page — click, scroll and type to interact" }, loadbar, shot);
   const frame = h("div", { class: "brframe" }, wrap);
-  let busy = false, curUrl = "", driveBtn;
+  let busy = false, curUrl = "", driveBtn, signinBtn;
   const setBusy = (v) => { busy = v; frame.classList.toggle("loading", v); };
   const call = async (method, path, b) => { setBusy(true); try { return await api(method, path, b); } finally { setBusy(false); } };
   const refresh = async () => {
@@ -1652,8 +1652,35 @@ function inspBrowser(body, pid, gen) {
   };
   const signingNote = h("div", { class: "note", hidden: true }, icon("shield"), h("div", { class: "section" },
     h("strong", {}, "A sign-in window opened on your desktop"), h("p", {}, "Sign in there, then close that window. This panel resumes automatically and keeps you signed in.")));
-  const actions = h("div", { class: "brbar2" }, sendChat,
-    abtn("Sign in", signin, "sm", "shield"),
+  let brMode = "studio";
+  const chromeBtn = h("button", { type: "button", class: "btn sm", "aria-pressed": "false" });
+  const renderMode = (m) => {
+    brMode = m || "studio"; const on = brMode === "chrome";
+    chromeBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    chromeBtn.replaceChildren(icon("globe", "sm"), on ? "Using your Chrome ✓" : "Use my Chrome");
+    chromeBtn.title = on ? "Studio is driving a tab in your own Chrome. Click to switch back to Studio's browser."
+      : "Use your own Chrome (your profile, logins and extensions) instead of Studio's separate browser.";
+    signinBtn.hidden = on; // sign-in-by-window is for Studio's own profile; in your Chrome you're already you
+  };
+  const useChrome = async (confirm) => {
+    try {
+      const r = await call("POST", "/api/browser/use-chrome", { confirm: !!confirm });
+      if (r.needs_restart) {
+        const ok = await dialog("Use your own Chrome", [{ name: "x", type: "textarea", readonly: true, tall: true, label: "What happens",
+          value: "Studio will close your open Chrome and reopen it with remote control enabled, then drive a new tab in it.\n\n• Your tabs are restored and your logins are kept.\n• Save anything unsaved first (forms, documents) — Chrome will close.\n\nContinue?" }], "Close and reopen my Chrome");
+        if (!ok) return;
+        return useChrome(true);
+      }
+      if (r.connected) { renderMode("chrome"); banner(r.note || "Connected to your Chrome.", "ok"); urlIn.value = "https://"; stat.textContent = "Your Chrome is connected. Type a web address above."; }
+      else banner(r.error || "Could not connect to your Chrome.", "bad");
+    } catch (e) { banner(e.message, "bad"); }
+  };
+  chromeBtn.addEventListener("click", async () => {
+    if (brMode === "chrome") { try { await call("POST", "/api/browser/use-studio"); renderMode("studio"); banner("Switched back to Studio's browser.", "ok"); shot.removeAttribute("src"); stat.textContent = "Studio's browser. Type a web address above."; } catch (e) { banner(e.message, "bad"); } }
+    else useChrome(false);
+  });
+  const actions = h("div", { class: "brbar2" }, sendChat, chromeBtn,
+    (signinBtn = abtn("Sign in", signin, "sm", "shield")),
     abtn("Read text", async () => { try { const r = await call("GET", "/api/browser/text"); await dialog("Page text", [{ name: "t", label: r.title || r.url || "Page", type: "textarea", value: r.text || "(empty)", tall: true, readonly: true }], "Close"); } catch (e) { banner(e.message, "bad"); } }, "ghost sm", "note"),
     abtn("Stop browser", async () => { try { await call("POST", "/api/browser/stop"); stat.textContent = "Browser stopped."; shot.removeAttribute("src"); } catch (e) { banner(e.message, "bad"); } }, "ghost sm danger", "stop"));
   const unavailable = h("div", { class: "note", hidden: true });
@@ -1701,6 +1728,7 @@ function inspBrowser(body, pid, gen) {
       const st = await api("GET", "/api/browser");
       if (gen !== inspGen) return;
       if (!st.available) { unavailable.hidden = false; unavailable.replaceChildren(icon("alert"), h("div", { class: "section" }, h("strong", {}, "Browser not set up"), h("p", {}, st.note))); bar.hidden = actions.hidden = frame.hidden = driveSection.hidden = true; stat.textContent = ""; return; }
+      renderMode(st.mode);
       if (st.signing_in) { frame.hidden = true; signingNote.hidden = false;
         const poll = setInterval(async () => { if (gen !== inspGen) { clearInterval(poll); return; } try { const s2 = await api("GET", "/api/browser"); if (!s2.signing_in) { clearInterval(poll); signingNote.hidden = true; frame.hidden = false; after(await call("POST", "/api/browser/act", { op: "reload" })); } } catch { /* keep polling */ } }, 1500); }
       else if (st.url) { setStat(st); refresh(); } else { urlIn.value = "https://"; stat.textContent = "Ready. Type a web address above."; urlIn.focus(); }
