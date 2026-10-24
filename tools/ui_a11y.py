@@ -58,7 +58,7 @@ def main():
 
             # Ctrl+1/2/3
             ws = {}
-            for key, name in (("1", "chat"), ("2", "agent"), ("3", "research")):
+            for key, name in (("1", "chat"), ("2", "agent")):  # Ctrl+3 opens the research notebook inside Chat
                 page.locator("body").click(position={"x": 5, "y": 5})
                 page.keyboard.press(f"Control+{key}")
                 page.wait_for_timeout(500)
@@ -73,7 +73,7 @@ def main():
                 page.keyboard.press("Control+3")
                 page.wait_for_timeout(300)
                 typing_guard = page.evaluate("() => document.querySelector('[data-tab=chat]')?.getAttribute('aria-selected')") == "true"
-            res["shortcuts"] = {"ctrl1_chat": ws["1"], "ctrl2_build": ws["2"], "ctrl3_research": ws["3"],
+            res["shortcuts"] = {"ctrl1_chat": ws["1"], "ctrl2_build": ws["2"],
                                 "ignored_while_typing": typing_guard}
 
             # Composer sizing
@@ -126,7 +126,7 @@ def main():
             for w, h in ((960, 540), (683, 384)):
                 page.set_viewport_size({"width": w, "height": h})
                 page.wait_for_timeout(400)
-                for n in ("chat", "agent", "research"):
+                for n in ("chat", "agent"):
                     page.evaluate("(n) => document.querySelector(`[data-tab=${n}]`)?.click()", n)
                     page.wait_for_timeout(400)
                     m = page.evaluate("() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]")

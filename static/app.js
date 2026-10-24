@@ -51,7 +51,7 @@ const access = (state) => state === "READY_INCLUDED" ? "official CLI · plan quo
   : state === "SIMULATED" ? "simulated test route" : "unavailable";
 const hashIdx = (s, n) => { let x = 0; for (const c of String(s)) x = (x * 31 + c.charCodeAt(0)) >>> 0; return x % n; };
 const initials = (s) => { const w = String(s || "?").trim().split(/[\s_\-.]+/).filter(Boolean); return ((w[0] || "?")[0] + (w.length > 1 ? w[1][0] : (w[0] || "").slice(1, 2))).toUpperCase(); };
-const WS = { chat: "Chat", agent: "Build", research: "Research", memory: "Memory", artifacts: "Saved" };
+const WS = { chat: "Chat", agent: "Build", memory: "Memory", artifacts: "Saved" }; // research lives inside Chat
 const GL = { providers: "Providers", evidence: "Evidence" };
 
 // ---------- icons (inline SVG via createElementNS; no markup strings) ----------
@@ -190,7 +190,7 @@ function dialog(title, fields, submitLabel = "Save") {
 }
 function showShortcuts() {
   const rows = [[["Ctrl", "K"], "Open the command palette"], [["Ctrl", "Enter"], "Send message / start task"], [["Ctrl", "1"], "Chat"], [["Ctrl", "2"], "Build"],
-    [["Ctrl", "3"], "Research"], [["Esc"], "Close a dialog, drawer or sheet"], [["?"], "Show this list"], [["←", "→"], "Resize a focused panel divider"]];
+    [["Ctrl", "3"], "Research notebook (in Chat)"], [["Esc"], "Close a dialog, drawer or sheet"], [["?"], "Show this list"], [["←", "→"], "Resize a focused panel divider"]];
   if ($("dlg").open || $("rtDlg").open) return Promise.resolve(null);
   const done = dialog("Keyboard shortcuts", [], "Close");
   $("dlgForm").insertBefore(h("dl", { class: "keylist" }, ...rows.flatMap(([k, d]) => [h("dt", {}, ...k.map((x) => h("kbd", {}, x))), h("dd", {}, d)])), $("dlgForm").querySelector(".actions"));
@@ -335,7 +335,11 @@ function globalKeys(e) {
     return;
   }
   if (isTyping(e.target)) return;
-  if (e.ctrlKey && !e.altKey && !e.shiftKey && ["1", "2", "3"].includes(e.key) && S.project) { e.preventDefault(); setTab(["chat", "agent", "research"][Number(e.key) - 1]); return; }
+  if (e.ctrlKey && !e.altKey && !e.shiftKey && ["1", "2", "3"].includes(e.key) && S.project) {
+    e.preventDefault();
+    if (e.key === "3") { openResearch(); return; }
+    setTab(["chat", "agent"][Number(e.key) - 1]); return;
+  }
   if (e.key === "?" && !e.ctrlKey && !e.altKey) { e.preventDefault(); showShortcuts(); }
 }
 
@@ -359,7 +363,8 @@ function routeIndicator() {
 let PAL = { items: [], sel: 0, opener: null };
 function paletteItems() {
   const it = [];
-  if (S.project) for (const [k, v] of Object.entries(WS)) it.push({ g: "Workspace", ico: { chat: "chat", agent: "terminal", research: "search", memory: "layers", artifacts: "bookmark" }[k], label: `Go to ${v}`, key: { chat: "Ctrl 1", agent: "Ctrl 2", research: "Ctrl 3" }[k], run: () => setTab(k) });
+  if (S.project) for (const [k, v] of Object.entries(WS)) it.push({ g: "Workspace", ico: { chat: "chat", agent: "terminal", memory: "layers", artifacts: "bookmark" }[k], label: `Go to ${v}`, key: { chat: "Ctrl 1", agent: "Ctrl 2" }[k], run: () => setTab(k) });
+  if (S.project) it.push({ g: "Workspace", ico: "search", label: "Open the research notebook (in Chat)", key: "Ctrl 3", run: () => openResearch() });
   for (const p of S.projects) it.push({ g: "Project", ico: "folder", label: `Switch to ${p.name}`, hint: p.root, run: () => openProject(p.id) });
   it.push({ g: "Action", ico: "plus", label: "New project", run: newProject });
   if (S.project) it.push({ g: "Action", ico: "users", label: "Start a roundtable", run: () => openRoundtable(PAL.opener, { mode: "general", roster: rtStoredSel(S.project.id) }) });
@@ -1290,7 +1295,7 @@ function rtMenu() {
 // Navigation token: every project/view switch bumps navGen and viewGen. Async work checks its token before touching state or the DOM.
 S.navGen = 0; S.viewGen = 0;
 function navBump() { S.navGen++; S.viewGen++; clearInterval(S.poll); }
-const RENDER = { chat: () => renderChat(), agent: (sel) => renderAgent(sel), research: () => renderResearch(), memory: () => renderMemory(), artifacts: () => renderArtifacts() };
+const RENDER = { chat: () => renderChat(), agent: (sel) => renderAgent(sel), memory: () => renderMemory(), artifacts: () => renderArtifacts() };
 function errorView(msg, retry) {
   return h("div", { class: "note bad", role: "alert" }, icon("alert"), h("div", { class: "section" }, h("span", {}, msg), retry ? h("div", {}, btn("Retry", retry, "sm", "refresh")) : null));
 }
@@ -1775,7 +1780,15 @@ async function renderChat() {
       h("button", { type: "button", class: "convpick", "aria-current": c.id === cid ? "true" : "false", title: c.title, onclick: () => { S.conv = c.id; refresh("chat"); } }, icon("chat", "sm"), h("span", {}, c.title)),
       h("button", { type: "button", class: "convdel", "aria-label": `Delete conversation ${c.title}`, title: "Delete conversation", onclick: () => deleteConversation(pid, c.id) }, icon("trash", "sm"))))) : h("span", { class: "grow" }),
     sumBtn, cid ? abtn("Delete conversation", () => deleteConversation(pid, cid), "ghost danger del", "trash") : null, rtMenu(), btn("War Room", (e) => openRoundtable(e.currentTarget, { mode: "war_room" }), "rt-entry", "shield"), btn("New conversation", newConv, "ghost", "plus"));
-  const root = h("div", { class: "chatv" }, bar, h("div", { "data-deriv": "summary", class: "section" }, ...dView("summary")));
+  const rpanel = h("section", { id: "researchPanel", class: "card rpanel", "aria-label": "Research notebook", hidden: !researchOpen(pid) });
+  const researchBtn = h("button", { type: "button", id: "researchBtn", class: "btn ghost", "aria-expanded": researchOpen(pid) ? "true" : "false", "aria-controls": "researchPanel",
+    title: "Sources, findings, project search and notebook export (Ctrl+3)", onclick: async () => {
+      const on = rpanel.hidden; setResearchOpen(pid, on); rpanel.hidden = !on; researchBtn.setAttribute("aria-expanded", on ? "true" : "false");
+      if (on) await researchPanel(rpanel, pid);
+    } }, icon("search"), "Research");
+  bar.insertBefore(researchBtn, bar.firstChild && bar.firstChild.nextSibling ? bar.firstChild.nextSibling : null);
+  const root = h("div", { class: "chatv" }, bar, rpanel, h("div", { "data-deriv": "summary", class: "section" }, ...dView("summary")));
+  if (!rpanel.hidden) researchPanel(rpanel, pid);
   if (!cid) {
     root.append(empty("chat", "No conversations yet", "Start a conversation to talk with this project's provider. Messages are saved locally before anything is sent.", btn("Start a conversation", newConv, "primary", "plus")));
     $("view").replaceChildren(root); refreshRouteLabels(); return;
@@ -2098,7 +2111,9 @@ async function renderChat() {
         h("div", { class: "mhead" },
           h("div", { class: "who" }, h("strong", {}, user ? "You" : routeName(m.provider) || "Assistant"), !user ? routeTag(r) : null,
             user && m.status === "saved" ? null : statePill(m.status), user ? h("span", { class: "mdot" }, "saved locally") : null),
-          save),
+          h("span", { class: "macts" }, save,
+            m.role === "assistant" && m.status === "generated" && URLS_IN(m.content).length ? h("button", { type: "button", class: "linkish msave", title: "Fetch the pages this answer cites into the research notebook", onclick: () => guard(() => addLinksAsSources(pid, m.content)) }, icon("link", "sm"), "Add links as sources") : null,
+            m.role === "assistant" && m.status === "generated" ? h("button", { type: "button", class: "linkish msave", title: "Prefill a finding in the research notebook", onclick: () => saveAsFinding(pid, m.content) }, icon("note", "sm"), "Save as finding") : null)),
         body,
         h("div", { class: "mtime" }, fmtClock(m.created), meta.duration_s ? ` · ${meta.duration_s}s provider wait` : ""),
         costBits.length ? h("div", { class: "costline" }, icon("dollar", "sm"), costBits.join(" · ")) : null));
@@ -2474,15 +2489,24 @@ function keepDraft(ctrl, key) {
   ctrl.addEventListener(ctrl.tagName === "SELECT" ? "change" : "input", () => ssSet(key, ctrl.value));
   return ctrl;
 }
-async function renderResearch() {
-  if (!S.project || S.global || S.tab !== "research") return;
-  const pid = S.project.id;
-  const gen = ++S.viewGen;
+// ---------- research notebook (a panel inside Chat; the separate Research tab was retired) ----------
+const researchKey = (pid) => "aesop.chat.research." + pid;
+const researchOpen = (pid) => { try { return localStorage.getItem(researchKey(pid)) === "1"; } catch { return false; } };
+function setResearchOpen(pid, on) { try { localStorage.setItem(researchKey(pid), on ? "1" : "0"); } catch { /* optional */ } }
+async function openResearch(focus) {
+  if (!S.project) return;
+  setResearchOpen(S.project.id, true);
+  if (S.tab !== "chat" || S.global) await setTab("chat"); else { const el = $("researchPanel"); if (el) { el.hidden = false; await researchPanel(el, S.project.id); } }
+  const el = $("researchPanel"); if (el) { el.scrollIntoView({ block: "start" }); const f = focus && el.querySelector(focus); if (f) f.focus(); }
+}
+async function researchPanel(el, pid) {
+  const gen = (el._gen = (el._gen || 0) + 1);
+  const live = () => el._gen === gen && el.isConnected && S.project && S.project.id === pid;
   const nb = await api("GET", `/api/projects/${pid}/notebook`);
-  if (gen !== S.viewGen) return;
+  if (!live()) return;
   const atts = await api("GET", `/api/projects/${pid}/attachments`);
-  if (gen !== S.viewGen) return;
-  setActivity("Notebook");
+  if (!live()) return;
+  const again = () => researchPanel(el, pid);
   const dk = (k) => `aesop.draft.nb.${pid}.${k}`;
   const url = keepDraft(h("input", { type: "url", placeholder: "https://…", class: "grow" }), dk("url"));
   const attSel = h("select", { class: "grow" }, h("option", { value: "" }, "— choose a project file —"), ...atts.map((a) => h("option", { value: a.id }, a.name)));
@@ -2494,7 +2518,7 @@ async function renderResearch() {
   const lim = keepDraft(h("input", { placeholder: "e.g. small sample, single vendor" }), dk("lim"));
   const q = h("input", { type: "search", placeholder: "Search this project… (Enter)", "aria-label": "Search project", class: "grow" });
   const results = h("div", { class: "section" });
-  q.addEventListener("keydown", (e) => { if (e.key === "Enter") guard(async () => { const r = await api("GET", `/api/projects/${pid}/search?q=${encodeURIComponent(q.value)}`); if (gen !== S.viewGen) return; results.replaceChildren(...(r.length ? r.map((x) => h("div", { class: "card" }, h("div", { class: "row" }, statePill(x.type), h("strong", {}, x.title)), h("pre", { class: "out" }, x.snippet))) : [empty("search", "No matches", "Nothing in this project matched that search.")])); }); });
+  q.addEventListener("keydown", (e) => { if (e.key === "Enter") guard(async () => { const r = await api("GET", `/api/projects/${pid}/search?q=${encodeURIComponent(q.value)}`); if (!live()) return; results.replaceChildren(...(r.length ? r.map((x) => h("div", { class: "card" }, h("div", { class: "row" }, statePill(x.type), h("strong", {}, x.title)), h("pre", { class: "out" }, x.snippet))) : [empty("search", "No matches", "Nothing in this project matched that search.")])); }); });
   const srcNo = (id) => { const i = nb.sources.findIndex((s) => s.id === id); return i >= 0 ? `[${i + 1}]` : "—"; };
   const srcTitle = (id) => { const s = nb.sources.find((x) => x.id === id); return s ? s.title : ""; };
 
@@ -2508,7 +2532,7 @@ async function renderResearch() {
   const draftBtn = abtn("Draft findings", async () => {
     const ids = [...picks.querySelectorAll("input:checked")].map((x) => x.value);
     if (!ids.length) { banner("Choose at least one read source to draft from.", "bad"); return; }
-    await startDerivation("findings", `/api/projects/${pid}/notebook/draft-findings`, { source_ids: ids }, () => { if (S.project && S.project.id === pid) refresh("research"); });
+    await startDerivation("findings", `/api/projects/${pid}/notebook/draft-findings`, { source_ids: ids }, () => { if (S.project && S.project.id === pid) again(); });
   }, "", "sparkle");
   if (running || !S.project.provider_default) draftBtn.disabled = true;
   const draftCard = h("div", { class: "card" }, h("div", { class: "card-head" }, h("div", { class: "ttl" }, icon("sparkle"), h("h2", {}, "Draft findings from sources")),
@@ -2521,7 +2545,7 @@ async function renderResearch() {
   const proposed = nb.findings.filter((f) => f.status === "proposed");
   const rejected = nb.findings.filter((f) => f.status === "rejected");
   const kept = nb.findings.filter((f) => f.status !== "proposed" && f.status !== "rejected");
-  const after = () => refresh("research");
+  const after = () => again();
   const propCard = (f) => h("div", { class: "card prop" }, h("div", { class: "row" }, statePill(f.status), h("span", { class: "tag" }, `source ${srcNo(f.source_id)}`), srcTitle(f.source_id) ? h("span", { class: "faint" }, srcTitle(f.source_id)) : null),
     h("p", { class: "content" }, f.claim),
     h("div", { class: "facts" }, h("span", {}, "Locator ", h("b", {}, f.locator || "—")), h("span", {}, "Limitation ", h("b", {}, f.limitation || "—"))),
@@ -2533,21 +2557,26 @@ async function renderResearch() {
     banner("Fetching (public addresses only)…");
     const s = await api("POST", `/api/projects/${pid}/notebook/sources`, { url: url.value });
     ssSet(dk("url"), "");
-    banner(`Source ${s.status}: ${s.title}`, s.status === "read" ? "ok" : "bad"); refresh("research");
+    banner(`Source ${s.status}: ${s.title}`, s.status === "read" ? "ok" : "bad"); again();
   }), "", "download");
   const addBtn = abtn("Add local document", () => guard(async () => {
     if (!attSel.value) { banner("Choose a project file first.", "bad"); return; }
     await api("POST", `/api/projects/${pid}/notebook/sources`, { attachment_id: attSel.value });
-    ssSet(dk("att"), ""); refresh("research");
+    ssSet(dk("att"), ""); again();
   }), "", "file");
   const saveBtn = abtn("Save finding", () => guard(async () => {
     await api("POST", `/api/projects/${pid}/notebook/findings`, { claim: claim.value, source_id: srcSel.value || null, locator: loc.value, limitation: lim.value });
     for (const k of ["claim", "src", "loc", "lim"]) ssSet(dk(k), "");
-    banner("Finding saved.", "ok"); refresh("research");
+    banner("Finding saved.", "ok"); again();
   }), "primary", "check");
 
-  $("view").replaceChildren(
-    h("div", { class: "row" }, q, dlBtn("Export (public sources only)", `/api/projects/${pid}/notebook/export?private=0`, `notebook-${pid}.md`), dlBtn("Export incl. private", `/api/projects/${pid}/notebook/export?private=1`, `notebook-${pid}-private.md`)),
+  const head = h("div", { class: "rp-head" },
+    h("div", { class: "ttl" }, icon("search"), h("h2", {}, "Research notebook"), h("span", { class: "faint" }, `${nb.sources.length} source${nb.sources.length === 1 ? "" : "s"} · ${kept.length} finding${kept.length === 1 ? "" : "s"}${proposed.length ? ` · ${proposed.length} to review` : ""}`)),
+    h("div", { class: "row" }, dlBtn("Export (public sources only)", `/api/projects/${pid}/notebook/export?private=0`, `notebook-${pid}.md`), dlBtn("Export incl. private", `/api/projects/${pid}/notebook/export?private=1`, `notebook-${pid}-private.md`),
+      h("button", { type: "button", class: "iconbtn", "aria-label": "Close research notebook", onclick: () => { setResearchOpen(pid, false); el.hidden = true; const b = $("researchBtn"); if (b) { b.setAttribute("aria-expanded", "false"); b.focus(); } } }, icon("x"))));
+  el.replaceChildren(head,
+    h("p", { class: "faint rp-tip" }, "Tip: ask Perplexity or Firecrawl in the chat below, then use “Add links as sources” on the answer; “Save as finding” fills the form here."),
+    h("div", { class: "row" }, q),
     results,
     h("div", { class: "grid2" },
       h("div", { class: "card" }, h("div", { class: "ttl" }, icon("link"), h("h2", {}, "Add a source")),
@@ -2569,6 +2598,21 @@ async function renderResearch() {
       nb.sources.length ? table(["#", "Title", "Publisher", "Locator", "Retrieved", "Status", "Visibility"], nb.sources.map((s, i) => h("tr", {}, h("td", { class: "num" }, i + 1), h("td", { class: "wrap" }, s.title), h("td", {}, s.publisher || ""), h("td", {}, s.locator), h("td", {}, fmtTime(s.retrieved_at)), h("td", {}, statePill(s.status)), h("td", {}, h("span", { class: "tag" }, s.private ? "private" : "public")))))
         : empty("link", "No sources yet", "Add a public page or a local document to start the research notebook.")));
   refreshRouteLabels();
+}
+// Chat answers feed the notebook: cited links become sources, an answer can prefill a finding.
+const URLS_IN = (t) => [...new Set((String(t || "").match(/https?:\/\/[^\s<>()"'\]]+[^\s<>()"'.,;:!?\]]/g) || []))].slice(0, 8);
+async function addLinksAsSources(pid, text) {
+  const urls = URLS_IN(text); if (!urls.length) return;
+  banner(`Adding ${urls.length} source${urls.length === 1 ? "" : "s"} (public pages only)…`);
+  let ok = 0, bad = 0;
+  for (const u of urls) { try { const r = await api("POST", `/api/projects/${pid}/notebook/sources`, { url: u }); if (r.status === "read") ok++; else bad++; } catch { bad++; } }
+  banner(`Added ${ok} source${ok === 1 ? "" : "s"} to the research notebook${bad ? `; ${bad} could not be read` : ""}.`, ok ? "ok" : "bad");
+  await openResearch();
+}
+function saveAsFinding(pid, text) {
+  ssSet(`aesop.draft.nb.${pid}.claim`, String(text || "").replace(/\n+Sources:[\s\S]*$/, "").trim().slice(0, 1500));
+  openResearch("textarea");
+  banner("Finding prefilled in the research notebook: pick its source and locator, then Save finding.");
 }
 
 // ---------- memory ----------
