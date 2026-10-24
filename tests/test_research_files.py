@@ -234,56 +234,43 @@ class TestPageWall(unittest.TestCase):
 
 
 class TestBrowserManager(unittest.TestCase):
-    def test_profile_under_data_dir_and_signin_blocks(self):
-        import tempfile
-        import types
-        from aesop_studio import browser
-        d = tempfile.mkdtemp()
-        b = browser.Browser(d)
-        self.assertTrue(b.profile.endswith("browser-profile"))
-        self.assertFalse(b.status()["signing_in"])
-        b.signin_proc = types.SimpleNamespace(poll=lambda: None)  # pretend a sign-in window is open
-        self.assertTrue(b.signing_in())
-        with self.assertRaises(RuntimeError) as e:
-            b.cmd("ping", timeout=2)
-        self.assertIn("signing in", str(e.exception))
-
-    def test_use_my_chrome_paths(self):
-        import tempfile
+    def test_connect_paths(self):
         from pathlib import Path
         from aesop_studio import browser
-        b = browser.Browser(tempfile.mkdtemp())
+        b = browser.Browser()
         orig = (browser.chrome_exe, browser._port_open, browser._chrome_running)
         try:
             browser.chrome_exe = lambda: None
             with self.assertRaises(RuntimeError):
-                b.use_my_chrome()
+                b.connect()
             browser.chrome_exe = lambda: Path("C:/chrome.exe")
-            browser._port_open = lambda port: True           # already listening -> connect
-            self.assertTrue(b.use_my_chrome()["connected"])
-            self.assertEqual(b.mode, "chrome")
-            self.assertTrue(b.status()["chrome_connected"])
-            b.use_studio_chrome()
-            self.assertEqual(b.mode, "studio")
-            browser._port_open = lambda port: False
-            browser._chrome_running = lambda: True           # running, no port, no confirm -> ask to restart
-            self.assertTrue(b.use_my_chrome(confirm_restart=False).get("needs_restart"))
-            self.assertEqual(b.mode, "studio")               # nothing restarted without confirmation
+            browser._port_open = lambda port=0: True            # already listening -> connected
+            self.assertTrue(b.connect()["connected"])
+            self.assertTrue(b.status()["connected"])
+            browser._port_open = lambda port=0: False
+            browser._chrome_running = lambda: True              # running, no port, no confirm -> ask first
+            r = b.connect(confirm_restart=False)
+            self.assertTrue(r.get("needs_restart"))
+            self.assertIn("reopened once", r["note"])
         finally:
             browser.chrome_exe, browser._port_open, browser._chrome_running = orig
 
-    def test_status_shape_and_unavailable_note(self):
+    def test_status_shape_and_guards(self):
         from aesop_studio import browser
         b = browser.Browser()
         st = b.status()
-        self.assertEqual(set(st) >= {"available", "running", "url", "title", "note", "mode", "chrome_found"}, True)
+        self.assertTrue(set(st) >= {"available", "connected", "running", "chrome_found", "url", "title", "note"})
         self.assertFalse(st["running"])
-        # when no venv python exists, cmd fails cleanly rather than hanging
-        orig = browser.venv_python
-        browser.venv_python = lambda: None
+        orig = (browser.venv_python, browser._port_open)
         try:
+            browser.venv_python = lambda: None                  # no venv -> clean failure, never a hang
             self.assertFalse(b.available())
             with self.assertRaises(RuntimeError):
                 b.cmd("ping", timeout=2)
+            browser.venv_python, browser._port_open = orig[0], lambda port=0: False
+            with self.assertRaises(RuntimeError) as e:          # venv ok but Chrome not connected
+                b.cmd("ping", timeout=2)
+            self.assertIn("isn't connected", str(e.exception))
         finally:
-            browser.venv_python = orig
+            browser.venv_python, browser._port_open = orig
+

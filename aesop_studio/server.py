@@ -64,7 +64,7 @@ class App:
         self.sessions = Sessions(self.store.data_dir)  # persistent: survives restarts (30-day sliding)
         self.login_code = secrets.token_urlsafe(24)
         self.reconciled = self.sup.reconcile()
-        self.browser = browser_mod.Browser(self.store.data_dir)
+        self.browser = browser_mod.Browser()
         self.drive = browse_agent.Drive(self.store, self.sup, self.browser)
         from .roundtable_live import Broker
         self.broker = Broker(self.store, self.sup)
@@ -393,7 +393,9 @@ class Handler(BaseHTTPRequestHandler):
     @route("GET", r"/api/browser/shot")
     def browser_shot(self, sess):
         full = (self.query.get("full") or ["0"])[0] == "1"
-        self._send(200, self.app.browser.shot_png(full), "image/png", {"Cache-Control": "no-store"})
+        sh = self.app.browser.shot(full)
+        self._send(200, sh["png"], "image/png", {"Cache-Control": "no-store",
+                                                 "X-Browser-W": str(sh["vw"]), "X-Browser-H": str(sh["vh"])})
 
     @route("GET", r"/api/browser/text")
     def browser_text(self, sess):
@@ -417,17 +419,9 @@ class Handler(BaseHTTPRequestHandler):
     def browser_drive_stop(self, sess):
         self.json(self.app.drive.stop())
 
-    @route("POST", r"/api/browser/use-chrome")
-    def browser_use_chrome(self, sess):
-        self.json(self.app.browser.use_my_chrome(bool(self.body().get("confirm"))), 202)
-
-    @route("POST", r"/api/browser/use-studio")
-    def browser_use_studio(self, sess):
-        self.json(self.app.browser.use_studio_chrome())
-
-    @route("POST", r"/api/browser/signin")
-    def browser_signin(self, sess):
-        self.json(self.app.browser.sign_in(self.body().get("url") or ""), 202)
+    @route("POST", r"/api/browser/connect")
+    def browser_connect(self, sess):
+        self.json(self.app.browser.connect(bool(self.body().get("confirm"))), 202)
 
     @route("POST", r"/api/browser/stop")
     def browser_stop(self, sess):

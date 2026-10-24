@@ -29,6 +29,7 @@ class Drive:
         self.store, self.sup, self.browser = store, sup, browser
         self.lock = threading.Lock()
         self.run: dict | None = None
+        self.dims = (VW, VH)
 
     def vision_routes(self) -> list[str]:
         routes = providers.cached(self.store)
@@ -71,8 +72,8 @@ class Drive:
     def _ask(self, run, shot_path: str, page_text: str) -> dict:
         hist = "\n".join(f"{i+1}. {s['action']} {s.get('detail','')}".strip() for i, s in enumerate(run["steps"][-8:]))
         prompt = (
-            f"You are operating a web browser to accomplish a goal for the owner. Look at the attached screenshot "
-            f"(the browser viewport is {VW}x{VH} pixels; coordinates are measured from the top-left).\n\n"
+            f"You are operating the owner's web browser to accomplish a goal for them. Look at the attached "
+            f"screenshot (the viewport is {self.dims[0]}x{self.dims[1]} pixels; coordinates are measured from the top-left).\n\n"
             f"GOAL: {run['goal']}\n\n"
             f"Steps so far:\n{hist or '(none yet)'}\n\n"
             f"Visible page text (may be clipped):\n{page_text[:4000]}\n\n"
@@ -110,7 +111,8 @@ class Drive:
             r = self.browser.cmd("navigate", url=str(act.get("url") or ""))
             return redact(r.get("url") or r.get("error") or "")
         if a == "click":
-            x = max(0, min(VW, int(act.get("x", VW // 2)))); y = max(0, min(VH, int(act.get("y", VH // 2))))
+            w, hgt = self.dims
+            x = max(0, min(w, int(act.get("x", w // 2)))); y = max(0, min(hgt, int(act.get("y", hgt // 2))))
             self.browser.cmd("click", x=x, y=y)
             return f"({x},{y})"
         if a == "type":
@@ -134,7 +136,9 @@ class Drive:
                     run["answer"] = run.get("answer") or "Stopped by the owner."
                     break
                 try:
-                    png = self.browser.shot_png(False)
+                    sh = self.browser.shot(False)
+                    png = sh["png"]
+                    self.dims = (sh["vw"], sh["vh"])
                     info = self.browser.cmd("text")
                 except Exception as e:  # noqa: BLE001
                     run["steps"].append({"action": "error", "detail": f"browser: {type(e).__name__}"})
