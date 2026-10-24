@@ -62,6 +62,8 @@ class TestDrive(unittest.TestCase):
         self.d._do({"action": "key", "key": "Enter"})
         self.assertEqual(self.fb.calls[-1], ("key", {"key": "Enter"}))
         self.assertEqual(self.d._do({"action": "read"}), "(read the page)")
+        self.d._do({"action": "type", "text": "hi"})
+        self.assertTrue(self.fb.calls[-1][1].get("agent"))   # the provider's typing is flagged so passwords are refused
 
     def test_status_shape(self):
         st = self.d.status()

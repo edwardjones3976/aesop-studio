@@ -114,7 +114,7 @@ class Drive:
             self.browser.cmd("click", x=x, y=y)
             return f"({x},{y})"
         if a == "type":
-            r = self.browser.cmd("type", text=str(act.get("text", ""))[:400])
+            r = self.browser.cmd("type", text=str(act.get("text", ""))[:400], agent=True)
             return redact(str(act.get("text", ""))[:60]) + ("" if r.get("ok") else f" [{r.get('error')}]")
         if a == "key":
             self.browser.cmd("key", key=str(act.get("key", "Enter")))

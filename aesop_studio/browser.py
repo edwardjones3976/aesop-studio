@@ -31,26 +31,49 @@ def venv_python() -> Path | None:
 
 
 class Browser:
-    def __init__(self):
+    def __init__(self, data_dir=None):
         self.lock = threading.Lock()
         self.proc: subprocess.Popen | None = None
         self.q: queue.Queue = queue.Queue()
         self.last = {"url": "", "title": ""}
         self.started_at = 0.0
         self.error = ""
+        # A persistent profile so the owner's sign-ins and cookies survive restarts.
+        base = Path(data_dir) if data_dir else REPO
+        self.profile = str(base / "browser-profile")
+        self.signin_proc: subprocess.Popen | None = None
 
     # ---- availability ----
     def available(self) -> bool:
         return venv_python() is not None and WORKER.is_file()
 
+    def signing_in(self) -> bool:
+        return bool(self.signin_proc and self.signin_proc.poll() is None)
+
     def status(self) -> dict:
         return {"available": self.available(),
                 "running": bool(self.proc and self.proc.poll() is None),
+                "signing_in": self.signing_in(),
                 "url": self.last.get("url", ""), "title": self.last.get("title", ""),
                 "error": self.error,
                 "note": "" if self.available() else
                         "The browser needs Playwright + Chrome in the project's .venv. Run: "
                         ".venv\\Scripts\\python -m playwright install chrome"}
+
+    # ---- owner sign-in: a real window the owner uses by hand ----
+    def sign_in(self, url: str = "") -> dict:
+        py = venv_python()
+        if not py:
+            raise RuntimeError("browser unavailable: no project .venv Python with Playwright")
+        with self.lock:
+            if self.signing_in():
+                return {"signing_in": True, "note": "a sign-in window is already open"}
+            self._kill()  # free the profile lock: only one process may use it at a time
+            time.sleep(0.3)
+            args = [str(py), "-I", str(WORKER), self.profile, "--signin", url or "about:blank"]
+            self.signin_proc = subprocess.Popen(args, cwd=str(REPO), creationflags=NEW_GROUP)
+        return {"signing_in": True, "note": "A browser window opened on your desktop. Sign in there, then close "
+                                            "the window — your session is saved for the panel and the providers."}
 
     # ---- lifecycle ----
     def _reader(self, proc):
@@ -63,6 +86,8 @@ class Browser:
     def _ensure(self) -> None:
         if self.proc and self.proc.poll() is None:
             return
+        if self.signing_in():
+            raise RuntimeError("finish signing in first (close the sign-in window on your desktop)")
         py = venv_python()
         if not py:
             raise RuntimeError("browser unavailable: no project .venv Python with Playwright")
@@ -71,9 +96,9 @@ class Browser:
                 self.q.get_nowait()
             except queue.Empty:
                 break
-        self.proc = subprocess.Popen([str(py), "-I", str(WORKER)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL, cwd=str(REPO), text=True, encoding="utf-8",
-                                     bufsize=1, creationflags=NEW_GROUP)
+        self.proc = subprocess.Popen([str(py), "-I", str(WORKER), self.profile], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, cwd=str(REPO), text=True,
+                                     encoding="utf-8", bufsize=1, creationflags=NEW_GROUP)
         threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
         try:
             ready = self.q.get(timeout=LAUNCH_TIMEOUT)
@@ -136,4 +161,10 @@ class Browser:
                 except OSError:
                     pass
             self._kill()
+            if self.signin_proc and self.signin_proc.poll() is None:
+                try:
+                    self.signin_proc.kill()
+                except OSError:
+                    pass
+            self.signin_proc = None
             self.last = {"url": "", "title": ""}

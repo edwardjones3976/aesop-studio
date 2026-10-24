@@ -64,7 +64,7 @@ class App:
         self.sessions = Sessions(self.store.data_dir)  # persistent: survives restarts (30-day sliding)
         self.login_code = secrets.token_urlsafe(24)
         self.reconciled = self.sup.reconcile()
-        self.browser = browser_mod.Browser()
+        self.browser = browser_mod.Browser(self.store.data_dir)
         self.drive = browse_agent.Drive(self.store, self.sup, self.browser)
         from .roundtable_live import Broker
         self.broker = Broker(self.store, self.sup)
@@ -416,6 +416,10 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/browser/drive/stop")
     def browser_drive_stop(self, sess):
         self.json(self.app.drive.stop())
+
+    @route("POST", r"/api/browser/signin")
+    def browser_signin(self, sess):
+        self.json(self.app.browser.sign_in(self.body().get("url") or ""), 202)
 
     @route("POST", r"/api/browser/stop")
     def browser_stop(self, sess):

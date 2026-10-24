@@ -1635,7 +1635,25 @@ function inspBrowser(body, pid, gen) {
       if (S.tab === "chat" && !S.global) refresh2Chat(); else setTab("chat");
     } catch (e) { banner(e.message, "bad"); }
   }, "sm", "chat");
+  const signin = async () => {
+    const host = (() => { try { return new URL(curUrl).host; } catch { return ""; } })();
+    const v = await dialog("Sign in to a website", [
+      { name: "url", label: "Sign-in page", value: host ? `https://${host}/login` : "https://github.com/login",
+        help: "A real browser window opens on your desktop. Sign in there (passwords, 2FA, everything work normally), then close the window. Your session is saved, so the panel and the providers can then see pages that need a login — including private GitHub repos." }], "Open sign-in window");
+    if (!v || !v.url) return;
+    try {
+      await api("POST", "/api/browser/signin", { url: v.url });
+      frame.hidden = true; signingNote.hidden = false; stat.textContent = "";
+      const poll = setInterval(async () => {
+        if (gen !== inspGen) { clearInterval(poll); return; }
+        try { const st = await api("GET", "/api/browser"); if (!st.signing_in) { clearInterval(poll); signingNote.hidden = true; frame.hidden = false; after(await call("POST", "/api/browser/act", { op: "reload" })); banner("Sign-in window closed. Your session is saved.", "ok"); } } catch { /* keep polling */ }
+      }, 1500);
+    } catch (e) { banner(e.message, "bad"); }
+  };
+  const signingNote = h("div", { class: "note", hidden: true }, icon("shield"), h("div", { class: "section" },
+    h("strong", {}, "A sign-in window opened on your desktop"), h("p", {}, "Sign in there, then close that window. This panel resumes automatically and keeps you signed in.")));
   const actions = h("div", { class: "brbar2" }, sendChat,
+    abtn("Sign in", signin, "sm", "shield"),
     abtn("Read text", async () => { try { const r = await call("GET", "/api/browser/text"); await dialog("Page text", [{ name: "t", label: r.title || r.url || "Page", type: "textarea", value: r.text || "(empty)", tall: true, readonly: true }], "Close"); } catch (e) { banner(e.message, "bad"); } }, "ghost sm", "note"),
     abtn("Stop browser", async () => { try { await call("POST", "/api/browser/stop"); stat.textContent = "Browser stopped."; shot.removeAttribute("src"); } catch (e) { banner(e.message, "bad"); } }, "ghost sm danger", "stop"));
   const unavailable = h("div", { class: "note", hidden: true });
@@ -1677,13 +1695,15 @@ function inspBrowser(body, pid, gen) {
       h("p", { class: "faint" }, "A provider reads the page screenshot and takes one action at a time toward your goal. It never enters passwords or payment details. You can Stop anytime."),
       h("div", { class: "brbar" }, driveSel, stepsIn, h("span", { class: "faint" }, "steps")),
       goalIn, h("div", { class: "row" }, driveBtn, driveStop), driveLog));
-  body.replaceChildren(h("div", { class: "brpanel" }, bar, unavailable, frame, stat, actions, driveSection));
+  body.replaceChildren(h("div", { class: "brpanel" }, bar, unavailable, signingNote, frame, stat, actions, driveSection));
   (async () => {
     try {
       const st = await api("GET", "/api/browser");
       if (gen !== inspGen) return;
       if (!st.available) { unavailable.hidden = false; unavailable.replaceChildren(icon("alert"), h("div", { class: "section" }, h("strong", {}, "Browser not set up"), h("p", {}, st.note))); bar.hidden = actions.hidden = frame.hidden = driveSection.hidden = true; stat.textContent = ""; return; }
-      if (st.url) { setStat(st); refresh(); } else { urlIn.value = "https://"; stat.textContent = "Ready. Type a web address above."; urlIn.focus(); }
+      if (st.signing_in) { frame.hidden = true; signingNote.hidden = false;
+        const poll = setInterval(async () => { if (gen !== inspGen) { clearInterval(poll); return; } try { const s2 = await api("GET", "/api/browser"); if (!s2.signing_in) { clearInterval(poll); signingNote.hidden = true; frame.hidden = false; after(await call("POST", "/api/browser/act", { op: "reload" })); } } catch { /* keep polling */ } }, 1500); }
+      else if (st.url) { setStat(st); refresh(); } else { urlIn.value = "https://"; stat.textContent = "Ready. Type a web address above."; urlIn.focus(); }
       const d = await api("GET", "/api/browser/drive"); if (gen === inspGen) { renderDrive(d); if (d.active) { driveSection.open = true; startDrivePoll(); } }
     } catch (e) { stat.textContent = e.message; }
   })();
