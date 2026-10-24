@@ -44,8 +44,20 @@ def chrome_exe() -> Path | None:
     return None
 
 
-def chrome_user_data() -> Path:
-    return Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/User Data"
+def studio_chrome_dir() -> Path:
+    """Chrome 136+ refuses the DevTools link on the default profile, so the connected window uses its own
+    persistent profile: a real, visible Chrome window that stays signed in across restarts."""
+    return Path(os.environ.get("LOCALAPPDATA", "C:/")) / "AesopStudio" / "chrome-studio"
+
+
+CHROME_ARGS = ["--remote-debugging-port={port}", "--user-data-dir={udd}", "--no-first-run",
+               "--no-default-browser-check", "--restore-last-session"]
+
+
+def launch_studio_chrome() -> None:
+    udd = studio_chrome_dir(); udd.mkdir(parents=True, exist_ok=True)
+    args = [str(chrome_exe())] + [a.format(port=CDP_PORT, udd=udd) for a in CHROME_ARGS]
+    subprocess.Popen(args, creationflags=NEW_GROUP)
 
 
 def _port_open(port: int = CDP_PORT) -> bool:
@@ -87,54 +99,33 @@ class Browser:
     def status(self) -> dict:
         return {"available": self.available(), "connected": self.connected(),
                 "running": bool(self.proc and self.proc.poll() is None),
-                "chrome_found": chrome_exe() is not None, "chrome_running": _chrome_running(),
+                "chrome_found": chrome_exe() is not None,
                 "url": self.last.get("url", ""), "title": self.last.get("title", ""), "error": self.error,
                 "note": "" if self.available() else
                         "The browser needs Playwright in the project's .venv. Run: "
                         ".venv\\Scripts\\python -m playwright install chrome"}
 
-    # ---- connecting the owner's Chrome ----
-    def connect(self, confirm_restart: bool = False) -> dict:
+    # ---- connecting: opens the owner's Studio Chrome window (a real second Chrome profile) ----
+    def connect(self, confirm_restart: bool = False) -> dict:  # confirm_restart kept for old clients; unused
         if not chrome_exe():
             raise RuntimeError("Google Chrome was not found on this PC")
         with self.lock:
             if _port_open():
                 self.error = ""
-                return {"connected": True, "note": "Connected to your Chrome."}
+                return {"connected": True, "note": "Connected to your Studio Chrome window."}
             self._kill()
-            if _chrome_running() and not confirm_restart:
-                return {"needs_restart": True,
-                        "note": "Chrome has to be reopened once with remote control on. Your tabs are restored and "
-                                "your logins are kept — save anything unsaved first."}
-            if _chrome_running():
-                try:
-                    subprocess.run(["taskkill", "/IM", "chrome.exe", "/T"], capture_output=True, timeout=15,
-                                   creationflags=NEW_GROUP)
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-                for _ in range(40):
-                    if not _chrome_running():
-                        break
-                    time.sleep(0.25)
-                if _chrome_running():
-                    return {"connected": False, "error": "Chrome would not close (a window may be asking you to "
-                                                         "confirm something). Close every Chrome window, then try again."}
-                time.sleep(0.5)
-            try:
-                subprocess.Popen([str(chrome_exe()), f"--remote-debugging-port={CDP_PORT}",
-                                  f"--user-data-dir={chrome_user_data()}", "--restore-last-session"],
-                                 creationflags=NEW_GROUP)
-            except OSError as e:
-                return {"connected": False, "error": f"could not launch Chrome: {type(e).__name__}"}
+            launch_studio_chrome()
             for _ in range(60):
                 if _port_open():
                     break
                 time.sleep(0.25)
             if not _port_open():
-                return {"connected": False, "error": "Chrome started but its remote-control port never opened. "
-                                                     "Close every Chrome window and try again."}
+                return {"connected": False, "error": "The Studio Chrome window did not open its link. If a stale "
+                                                     "Studio Chrome window is open, close it and try again."}
             self.error = ""
-            return {"connected": True, "note": "Connected to your Chrome — your logins and extensions are live."}
+            return {"connected": True, "opened": True,
+                    "note": "A Chrome window opened — that's Studio's browser. Sign into sites there once "
+                            "(GitHub, anything); it stays signed in."}
 
     # ---- worker lifecycle ----
     def _reader(self, proc):

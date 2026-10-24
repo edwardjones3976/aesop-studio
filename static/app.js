@@ -1583,23 +1583,17 @@ function inspBrowser(body, pid, gen) {
   // ---- not-connected view: a single action ----
   const connectCard = (st) => {
     clearInterval(autoTimer);
-    const go = abtn("Connect my Chrome", async () => {
+    const go = abtn("Open the connected Chrome", async () => {
       try {
-        let r = await api("POST", "/api/browser/connect", { confirm: false });
-        if (r.needs_restart) {
-          const ok = await dialog("Connect your Chrome", [{ name: "x", type: "textarea", readonly: true, tall: true, label: "One-time step",
-            value: "Chrome has to be reopened once with remote control on.\n\n• Your tabs are restored and your logins are kept.\n• Save anything unsaved first — Chrome will close and reopen.\n\nAfter this, the Browser tab is simply your Chrome." }], "Reopen Chrome and connect");
-          if (!ok) return;
-          r = await api("POST", "/api/browser/connect", { confirm: true });
-        }
-        if (r.connected) { banner(r.note || "Connected to your Chrome.", "ok"); inspBrowser(body, pid, gen); }
+        const r = await api("POST", "/api/browser/connect", {});
+        if (r.connected) { banner(r.note || "Connected.", "ok"); inspBrowser(body, pid, gen); }
         else if (r.error) banner(r.error, "bad");
       } catch (e) { banner(e.message, "bad"); }
     }, "primary", "globe");
     body.replaceChildren(h("div", { class: "brconnect" }, icon("globe"),
-      h("h3", {}, "Use your Chrome with Studio"),
+      h("h3", {}, "Your connected Chrome window"),
       h("p", { class: "muted" }, st && !st.chrome_found ? "Google Chrome was not found on this PC." :
-        "Studio drives one tab in your own Chrome — your logins and extensions, your other tabs untouched. Providers can read the page and, when you ask, browse it."),
+        "One click opens a real Chrome window that Studio is linked to. Use it like any browser and sign into sites once (GitHub, anything) — it stays signed in. This panel mirrors it live, and the providers can read the page and, when you ask, browse it. (Chrome no longer allows linking your main profile, so this window keeps its own.)"),
       st && st.chrome_found !== false ? go : null));
   };
 

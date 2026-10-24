@@ -238,22 +238,29 @@ class TestBrowserManager(unittest.TestCase):
         from pathlib import Path
         from aesop_studio import browser
         b = browser.Browser()
-        orig = (browser.chrome_exe, browser._port_open, browser._chrome_running)
+        orig = (browser.chrome_exe, browser._port_open, browser.launch_studio_chrome)
         try:
             browser.chrome_exe = lambda: None
             with self.assertRaises(RuntimeError):
                 b.connect()
             browser.chrome_exe = lambda: Path("C:/chrome.exe")
-            browser._port_open = lambda port=0: True            # already listening -> connected
+            launched = []
+            browser.launch_studio_chrome = lambda: launched.append(1)
+            browser._port_open = lambda port=0: True              # window already up: connected, nothing launched
             self.assertTrue(b.connect()["connected"])
-            self.assertTrue(b.status()["connected"])
-            browser._port_open = lambda port=0: False
-            browser._chrome_running = lambda: True              # running, no port, no confirm -> ask first
-            r = b.connect(confirm_restart=False)
-            self.assertTrue(r.get("needs_restart"))
-            self.assertIn("reopened once", r["note"])
+            self.assertEqual(launched, [])
+            state = {"n": 0}                                       # not up: launch once, then the port appears
+            def port(port=0):
+                state["n"] += 1
+                return state["n"] > 2
+            browser._port_open = port
+            r = b.connect()
+            self.assertTrue(r["connected"])
+            self.assertTrue(r.get("opened"))
+            self.assertEqual(launched, [1])
+            self.assertIn("stays signed in", r["note"])
         finally:
-            browser.chrome_exe, browser._port_open, browser._chrome_running = orig
+            browser.chrome_exe, browser._port_open, browser.launch_studio_chrome = orig
 
     def test_status_shape_and_guards(self):
         from aesop_studio import browser
