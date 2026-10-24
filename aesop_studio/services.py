@@ -28,7 +28,11 @@ RESEARCH_ROUTES = ("firecrawl", "perplexity")  # answer on the spot from the web
 MAX_IMAGES_PER_MESSAGE = 12  # 6 photos from the owner; very tall or wide ones may be split into parts
 MAX_IMAGE_BYTES_PER_MESSAGE = 20 * 1024 * 1024
 
-CONTEXT_MESSAGES = 8
+CONTEXT_MESSAGES = 8  # (kept for older callers)
+HISTORY_MESSAGES = 30
+HISTORY_MESSAGE_CHARS = 6000
+# Room for the conversation so far, per provider (characters). Argv-prompt routes (Grok, Antigravity) cap at 24k.
+HISTORY_BUDGET = {"grok": 9_000, "antigravity": 9_000, "openai-api": 60_000, "default": 40_000}
 CONTEXT_ATTACHMENT_CHARS = 20_000
 
 
@@ -279,10 +283,46 @@ class Services:
         from .research_routes import perplexity_messages
         hist = []
         if cid and provider == "perplexity":
-            hist = list(reversed(self.s.q("SELECT role,content FROM messages WHERE conversation_id=? AND status IN "
-                                          "('saved','generated') ORDER BY created DESC LIMIT 6", (cid,))))
-        return {"question": text, "messages": perplexity_messages([{"role": h["role"], "content": redact(h["content"])}
-                                                                   for h in hist], text)}
+            hist = list(reversed(self.s.q("SELECT role,content,provider FROM messages WHERE conversation_id=? AND status IN "
+                                          "('saved','generated') ORDER BY created DESC LIMIT 8", (cid,))))
+        return {"question": text, "messages": perplexity_messages([
+            {"role": h["role"], "content": (f"({providers.display_name(h['provider'])} answered:) " if h["role"] == "assistant"
+                                            and h["provider"] and h["provider"] != "perplexity" else "") + redact(h["content"])}
+            for h in hist], text)}
+
+    def _history(self, cid: str, provider: str) -> list[str]:
+        """The conversation so far, newest kept first within the provider's room, each answer labelled with who
+        wrote it, plus a takeover note when another provider answered last, so the next one picks up seamlessly."""
+        budget = HISTORY_BUDGET.get(provider, HISTORY_BUDGET["default"])
+        total = self.s.one("SELECT COUNT(*) n FROM messages WHERE conversation_id=? AND status IN ('saved','generated')",
+                           (cid,))["n"]
+        rows = self.s.q("SELECT role,content,provider FROM messages WHERE conversation_id=? AND status IN "
+                        "('saved','generated') ORDER BY created DESC LIMIT ?", (cid, HISTORY_MESSAGES))
+        kept, used = [], 0
+        for h in rows:
+            body = redact((h["content"] or "")[:HISTORY_MESSAGE_CHARS])
+            if used + len(body) > budget and kept:
+                break
+            kept.append(h)
+            used += len(body)
+        kept.reverse()
+        out = []
+        if total > len(kept):
+            out.append(f"[earlier in this conversation: {total - len(kept)} older message(s) not shown]")
+        for h in kept:
+            who = "user" if h["role"] == "user" else f"assistant · {providers.display_name(h['provider'])}" if h["provider"] \
+                else h["role"]
+            out.append(f"[{who}]\n{redact((h['content'] or '')[:HISTORY_MESSAGE_CHARS])}")
+        last = next((h for h in reversed(kept) if h["role"] == "assistant" and h["provider"]), None)
+        if last and last["provider"] != provider:
+            others = sorted({providers.display_name(h["provider"]) for h in kept if h["role"] == "assistant" and h["provider"]
+                             and h["provider"] != provider})
+            out.insert(0, f"[handoff: you are {providers.display_name(provider)}, taking over this conversation from "
+                          f"{providers.display_name(last['provider'])}. Earlier answers in the transcript were written by "
+                          f"{', '.join(others)}. Read them as your own context: continue exactly where the conversation "
+                          "left off, keep its decisions and facts unless the user changes them, and don't re-introduce "
+                          "yourself or repeat earlier answers.]")
+        return out
 
     def build_context(self, pid: str, cid: str | None, text: str, attachment_ids: list[str], provider: str) -> str:
         """Exactly what will be sent to the provider. Shown to the owner before sending."""
@@ -343,10 +383,7 @@ class Services:
                              + (f". Not included (no room left for this provider): {', '.join(omitted)}" if omitted else "")
                              + "]")
         if cid:
-            hist = self.s.q("SELECT role,content FROM messages WHERE conversation_id=? AND status IN "
-                            "('saved','generated') ORDER BY created DESC LIMIT ?", (cid, CONTEXT_MESSAGES))
-            for h in reversed(hist):
-                parts.append(f"[{h['role']}]\n{redact(h['content'][:4000])}")
+            parts.extend(self._history(cid, provider))
         parts.append(f"[user]\n{text}")
         if images:
             parts.append(f"[{len(images)} photo{'s' if len(images) > 1 else ''} attached by the user: "
@@ -363,8 +400,8 @@ class Services:
         route = provider or p["provider_default"]
         if not route:
             raise ValueError("choose a project provider first")
-        if p["provider_default"] and route != p["provider_default"] and not confirm_switch:
-            raise Conflict(f"this project uses {p['provider_default']}; confirm switching to {route} explicitly")
+        # The provider picked in the composer is the owner's explicit choice for this message (switching mid-chat is
+        # the point of Studio), so it needs no extra confirmation; confirm_switch is accepted for old clients.
         context = self.build_context(pid, cid, text, attachment_ids, route)
         _, images = self.split_images(pid, attachment_ids)
         image_paths = [str(self.s.data_dir / a["stored_path"]) for a in images]

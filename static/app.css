@@ -975,3 +975,5 @@ dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
 .rp-tip { margin: 0; font-size: 12.5px; }
 .macts { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; align-items: center; justify-content: flex-end; margin-left: auto; }
 #researchBtn[aria-expanded="true"] { background: var(--sky-bg); border-color: rgba(155, 215, 255, .45); color: var(--sky); }
+.handoff { font-size: 12.5px; color: var(--sky); }
+.handoff[hidden] { display: none; }

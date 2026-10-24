@@ -145,3 +145,34 @@ class TestFilesAndFolders(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHandoff(Base):
+    def test_switch_needs_no_confirm_and_next_provider_gets_labelled_history(self):
+        r = self.svc.send(self.p["id"], self.c["id"], "the code word is ORANGE-7", [], "simulated")
+        self.wait(r["task_id"])
+        self.svc.messages(self.p["id"], self.c["id"])  # files the finished answer into the conversation
+        # pretend an earlier answer came from Codex, then hand over to another provider
+        self.store.x("UPDATE messages SET provider='codex' WHERE role='assistant'")
+        ctx = self.svc.build_context(self.p["id"], self.c["id"], "what was the code word?", [], "simulated")
+        self.assertIn("[assistant · Codex]", ctx)
+        self.assertIn("taking over this conversation from Codex", ctx)
+        self.assertIn("ORANGE-7", ctx)
+        # the same provider continuing gets no takeover note
+        self.store.x("UPDATE messages SET provider='simulated' WHERE role='assistant'")
+        self.assertNotIn("[handoff:", self.svc.build_context(self.p["id"], self.c["id"], "again?", [], "simulated"))
+        # a project whose default is another (even unusable) provider still sends without a confirm step
+        self.svc.update_project(self.p["id"], {"provider_default": "perplexity"})
+        r = self.svc.send(self.p["id"], self.c["id"], "continue", [], "simulated")
+        self.assertEqual(self.wait(r["task_id"])["state"], "COMPLETED")
+
+    def test_history_window_is_bounded_and_says_what_it_left_out(self):
+        for i in range(40):
+            self.store.x("INSERT INTO messages(id,conversation_id,role,content,status,provider,created,meta) VALUES(?,?,?,?,?,?,?,?)",
+                         (f"m{i}", self.c["id"], "user" if i % 2 == 0 else "assistant", f"turn {i} " + "x" * 3000,
+                          "saved" if i % 2 == 0 else "generated", None if i % 2 == 0 else "codex", 1000 + i, "{}"))
+        ctx = self.svc.build_context(self.p["id"], self.c["id"], "next", [], "grok")
+        self.assertIn("older message(s) not shown", ctx)
+        self.assertIn("turn 39", ctx)       # the newest turns are the ones kept
+        self.assertNotIn("turn 0 ", ctx)
+        self.assertLess(len(ctx), 24_000)   # fits Grok's argv-prompt limit

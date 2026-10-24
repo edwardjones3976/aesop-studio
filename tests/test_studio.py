@@ -79,10 +79,11 @@ class TestWorkflow(Base):
         with self.assertRaises(KeyError):
             self.svc.build_context(self.p["id"], oc["id"], "x", [], "simulated")
 
-    def test_ac02_explicit_fallback_required(self):
+    def test_ac02_explicit_provider_pick_is_enough(self):
+        # owner rule 2026-10-23: switching provider mid-chat is the point of Studio; the composer pick needs no confirm
         c = self.svc.new_conversation(self.p["id"])
-        with self.assertRaises(Conflict):
-            self.svc.send(self.p["id"], c["id"], "hi", [], "codex")
+        r = self.svc.send(self.p["id"], c["id"], "hi", [], "codex")
+        self.assertTrue(r["task_id"])
 
     def test_unsupported_files_honest(self):
         self.assertEqual(extract("a.pdf", b"%PDF-1.4 /Encrypt")[0], "encrypted")

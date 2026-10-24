@@ -457,8 +457,7 @@ class Handler(BaseHTTPRequestHandler):
         b = self.body()
         p = self.app.svc.project(pid)
         prov = b.get("provider") or p["provider_default"]
-        if p["provider_default"] and prov != p["provider_default"] and not b.get("confirm_switch"):
-            raise Conflict(f"this project uses {p['provider_default']}; confirm switching to {prov} explicitly")
+        # an explicit provider in the request is the owner's choice; no extra confirmation
         if not (b.get("prompt") or "").strip():
             raise ValueError("task prompt is empty")
         reviewer = b.get("reviewer") or None

@@ -2043,9 +2043,21 @@ async function renderChat() {
     onchange: (e) => { ssSet(provKey, e.target.value); refreshRouteLabels(); refit(); } },
     ...usable.map(([id, r]) => h("option", { value: id, selected: id === provPick },
       `${routeName(id)} · ${access(r.state)}`)));
+  let lastProv = null;
+  const handoff = h("span", { class: "handoff faint", role: "status", "aria-live": "polite" });
+  const showHandoff = () => {
+    const prov = messageProvider();
+    handoff.textContent = lastProv && prov && lastProv !== prov ? `${routeName(prov)} picks up from ${routeName(lastProv)}: it reads this conversation.` : "";
+    handoff.hidden = !handoff.textContent;
+  };
+  function handoffHint(msgs) {
+    const last = [...(msgs || [])].reverse().find((m) => m.role === "assistant" && m.provider && m.status === "generated");
+    lastProv = last ? last.provider : null; showHandoff();
+  }
+  provSel.addEventListener("change", showHandoff);
   const composer = h("div", { class: "composer" }, ta, tray, trayNote, attachRow,
     h("div", { class: "cfoot" },
-      h("div", { class: "row chat-prow" }, provSel, h("span", { class: "chip", id: "composerRoute" }), h("span", { class: "hint" }, h("kbd", {}, "Ctrl"), h("kbd", {}, "Enter"), " send")),
+      h("div", { class: "row chat-prow" }, provSel, h("span", { class: "chip", id: "composerRoute" }), handoff, h("span", { class: "hint" }, h("kbd", {}, "Ctrl"), h("kbd", {}, "Enter"), " send")),
       h("div", { class: "row" }, btn("Preview context", preview, "ghost", "eye"), sendBtn)));
   root.append(msgsEl, h("div", { class: "composer-dock" }, composer));
   // drop photos, files or whole folders anywhere on the chat
@@ -2131,7 +2143,7 @@ async function renderChat() {
   let fails = 0;
   async function drawMsgs() {
     let msgs;
-    try { msgs = await api("GET", `/api/projects/${pid}/conversations/${cid}/messages`); }
+    try { msgs = await api("GET", `/api/projects/${pid}/conversations/${cid}/messages`); handoffHint(msgs); }
     catch (e) {
       // A refresh failure never ends polling silently: report once, then retry with backoff while this chat is on screen.
       if (gen !== S.viewGen) return;
