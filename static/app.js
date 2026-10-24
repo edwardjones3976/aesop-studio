@@ -208,7 +208,8 @@ function showShortcuts() {
 }
 
 // ---------- layout: breakpoints, docking, overlays, resizable panes ----------
-const BOUNDS = { wide: { e: [200, 320, 248], i: [380, 480, 400], cmin: 620 }, std: { e: [180, 300, 220], i: [300, 420, 320], cmin: 480 }, lap: { e: [180, 280, 208] } };
+// Inspector max raised so the browser panel is usable (owner request): ~1.9x the default, well past "2/3 more".
+const BOUNDS = { wide: { e: [200, 320, 248], i: [380, 760, 400], cmin: 560 }, std: { e: [180, 300, 220], i: [300, 600, 320], cmin: 440 }, lap: { e: [180, 280, 208] } };
 function mode() {
   const w = window.innerWidth;
   return w >= 1600 ? "wide" : w >= 1280 ? "std" : w >= 1024 ? "lap" : w >= 768 ? "tab" : "mob";
@@ -1575,37 +1576,57 @@ async function renderInspector() {
 }
 // A real headless Chrome lives beside Studio: the owner drives it here, and any page can be handed to the
 // providers (they read the screenshot + text). Provider-driven browsing is the next, opt-in step.
-const BROWSER_VW = 1280, BROWSER_VH = 800;
+const BROWSER_VW = 1366, BROWSER_VH = 854;
 function inspBrowser(body, pid, gen) {
-  const urlIn = h("input", { type: "text", class: "grow brurl", placeholder: "Type a web address and press Enter", "aria-label": "Web address" });
+  const urlIn = h("input", { type: "text", class: "grow brurl", spellcheck: "false", autocapitalize: "off", autocomplete: "off",
+    placeholder: "Search or enter a web address", "aria-label": "Web address" });
+  const lock = h("span", { class: "brlock", "aria-hidden": "true" });
   const shot = h("img", { class: "brshot", alt: "Browser page", draggable: "false" });
-  const stat = h("div", { class: "brstat faint", role: "status", "aria-live": "polite" }, "Starting…");
-  const wrap = h("div", { class: "brwrap", tabindex: "0", "aria-label": "Browser page (click to interact, scroll to scroll, type to enter text)" }, shot);
+  const loadbar = h("div", { class: "brload", "aria-hidden": "true" });
+  const stat = h("div", { class: "brstat", role: "status", "aria-live": "polite" }, "Starting…");
+  const wrap = h("div", { class: "brview", tabindex: "0", "aria-label": "Browser page — click, scroll and type to interact" }, loadbar, shot);
+  const frame = h("div", { class: "brframe" }, wrap);
   let busy = false, curUrl = "", driveBtn;
-  const call = async (method, path, b) => { busy = true; stat.textContent = "Working…"; try { return await api(method, path, b); } finally { busy = false; } };
+  const setBusy = (v) => { busy = v; frame.classList.toggle("loading", v); };
+  const call = async (method, path, b) => { setBusy(true); try { return await api(method, path, b); } finally { setBusy(false); } };
   const refresh = async () => {
     try {
       const r = await fetch("/api/browser/shot", { headers: { "X-Aesop-Key": apiKey() }, credentials: "same-origin" });
       if (gen !== inspGen) return;
-      if (r.ok) { const u = URL.createObjectURL(await r.blob()); const old = shot.src; shot.src = u; if (old.startsWith("blob:")) URL.revokeObjectURL(old); }
+      if (r.ok) { const u = URL.createObjectURL(await r.blob()); const old = shot.src; shot.src = u; if (old && old.startsWith("blob:")) URL.revokeObjectURL(old); frame.classList.add("has-page"); }
     } catch { /* keep the last frame */ }
   };
-  const setStat = (st) => { if (st && st.url !== undefined) { curUrl = st.url || ""; urlIn.value = st.url || urlIn.value; stat.textContent = st.error ? `⚠ ${st.error}` : (st.title ? `${st.title} — ${st.url}` : st.url || "Ready"); } };
+  const setStat = (st) => {
+    if (!st || st.url === undefined) return;
+    curUrl = st.url || ""; urlIn.value = st.url || urlIn.value;
+    const https = /^https:/i.test(st.url || ""); lock.className = "brlock " + (st.url ? (https ? "ok" : "warn") : "");
+    lock.textContent = st.url ? (https ? "🔒" : "⚠") : "";
+    stat.textContent = st.error ? `⚠ ${st.error}` : (st.title || (st.url ? "" : "Ready"));
+    stat.classList.toggle("err", !!st.error);
+  };
   const after = (st) => { setStat(st); refresh(); };
-  const go = async () => { if (!urlIn.value.trim()) return; try { after(await call("POST", "/api/browser/navigate", { url: urlIn.value.trim() })); } catch (e) { stat.textContent = e.message; } };
-  const act = async (op, extra) => { try { after(await call("POST", "/api/browser/act", { op, ...extra })); } catch (e) { stat.textContent = e.message; } };
+  const go = async () => { if (!urlIn.value.trim()) return; urlIn.blur(); try { after(await call("POST", "/api/browser/navigate", { url: urlIn.value.trim() })); } catch (e) { setStat({ url: curUrl, error: e.message }); } };
+  const act = async (op, extra) => { try { after(await call("POST", "/api/browser/act", { op, ...extra })); } catch (e) { setStat({ url: curUrl, error: e.message }); } };
   urlIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+  urlIn.addEventListener("focus", () => urlIn.select());
+  const flash = (cx, cy) => { const d = h("span", { class: "brclick" }); d.style.left = cx + "px"; d.style.top = cy + "px"; wrap.append(d); setTimeout(() => d.remove(), 450); };
   shot.addEventListener("click", (e) => {
     if (busy || !shot.clientWidth) return;
-    const r = shot.getBoundingClientRect();
+    const r = shot.getBoundingClientRect(); flash(e.clientX - r.left, e.clientY - r.top);
     act("click", { x: Math.round((e.clientX - r.left) / r.width * BROWSER_VW), y: Math.round((e.clientY - r.top) / r.height * BROWSER_VH) });
   });
-  wrap.addEventListener("wheel", (e) => { if (busy) return; e.preventDefault(); act("scroll", { dy: Math.max(-900, Math.min(900, e.deltaY)) }); }, { passive: false });
-  const typeBox = h("input", { type: "text", class: "grow", placeholder: "Type into the focused field, then Enter sends it", "aria-label": "Type text" });
-  typeBox.addEventListener("keydown", async (e) => { if (e.key === "Enter") { e.preventDefault(); const t = typeBox.value; typeBox.value = ""; if (t) await act("type", { text: t }); await act("key", { key: "Enter" }); } });
+  wrap.addEventListener("wheel", (e) => { if (busy) return; e.preventDefault(); act("scroll", { dy: Math.max(-1000, Math.min(1000, e.deltaY)) }); }, { passive: false });
+  // Type straight into the page when the view is focused (real-browser feel): printable keys and the common editors.
+  const SPECIAL = { Enter: "Enter", Backspace: "Backspace", Tab: "Tab", Delete: "Delete", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", Escape: "Escape", Home: "Home", End: "End" };
+  wrap.addEventListener("keydown", (e) => {
+    if (busy || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key.length === 1) { e.preventDefault(); act("type", { text: e.key }); }
+    else if (SPECIAL[e.key]) { e.preventDefault(); act("key", { key: SPECIAL[e.key] }); }
+  });
+  const iconBtn = (ico, label, fn) => h("button", { type: "button", class: "iconbtn brnav", "aria-label": label, title: label, onclick: fn }, icon(ico));
   const bar = h("div", { class: "brbar" },
-    btn("", () => act("back"), "ghost sm", "chevL"), btn("", () => act("forward"), "ghost sm", "chevR"),
-    btn("", () => act("reload"), "ghost sm", "refresh"), urlIn, btn("Go", go, "sm", "send"));
+    iconBtn("chevL", "Back", () => act("back")), iconBtn("chevR", "Forward", () => act("forward")), iconBtn("refresh", "Reload", () => act("reload")),
+    h("div", { class: "braddr" }, lock, urlIn, btn("Go", go, "primary sm brgo", "send")));
   const sendChat = abtn("Send page to chat", async () => {
     try {
       const r = await call("POST", `/api/projects/${pid}/browser/attach`);
@@ -1614,7 +1635,7 @@ function inspBrowser(body, pid, gen) {
       if (S.tab === "chat" && !S.global) refresh2Chat(); else setTab("chat");
     } catch (e) { banner(e.message, "bad"); }
   }, "sm", "chat");
-  const actions = h("div", { class: "brbar2" }, typeBox, sendChat,
+  const actions = h("div", { class: "brbar2" }, sendChat,
     abtn("Read text", async () => { try { const r = await call("GET", "/api/browser/text"); await dialog("Page text", [{ name: "t", label: r.title || r.url || "Page", type: "textarea", value: r.text || "(empty)", tall: true, readonly: true }], "Close"); } catch (e) { banner(e.message, "bad"); } }, "ghost sm", "note"),
     abtn("Stop browser", async () => { try { await call("POST", "/api/browser/stop"); stat.textContent = "Browser stopped."; shot.removeAttribute("src"); } catch (e) { banner(e.message, "bad"); } }, "ghost sm danger", "stop"));
   const unavailable = h("div", { class: "note", hidden: true });
@@ -1656,12 +1677,12 @@ function inspBrowser(body, pid, gen) {
       h("p", { class: "faint" }, "A provider reads the page screenshot and takes one action at a time toward your goal. It never enters passwords or payment details. You can Stop anytime."),
       h("div", { class: "brbar" }, driveSel, stepsIn, h("span", { class: "faint" }, "steps")),
       goalIn, h("div", { class: "row" }, driveBtn, driveStop), driveLog));
-  body.replaceChildren(h("div", { class: "brpanel" }, bar, unavailable, wrap, stat, actions, driveSection));
+  body.replaceChildren(h("div", { class: "brpanel" }, bar, unavailable, frame, stat, actions, driveSection));
   (async () => {
     try {
       const st = await api("GET", "/api/browser");
       if (gen !== inspGen) return;
-      if (!st.available) { unavailable.hidden = false; unavailable.replaceChildren(icon("alert"), h("div", { class: "section" }, h("strong", {}, "Browser not set up"), h("p", {}, st.note))); bar.hidden = actions.hidden = wrap.hidden = driveSection.hidden = true; stat.textContent = ""; return; }
+      if (!st.available) { unavailable.hidden = false; unavailable.replaceChildren(icon("alert"), h("div", { class: "section" }, h("strong", {}, "Browser not set up"), h("p", {}, st.note))); bar.hidden = actions.hidden = frame.hidden = driveSection.hidden = true; stat.textContent = ""; return; }
       if (st.url) { setStat(st); refresh(); } else { urlIn.value = "https://"; stat.textContent = "Ready. Type a web address above."; urlIn.focus(); }
       const d = await api("GET", "/api/browser/drive"); if (gen === inspGen) { renderDrive(d); if (d.active) { driveSection.open = true; startDrivePoll(); } }
     } catch (e) { stat.textContent = e.message; }

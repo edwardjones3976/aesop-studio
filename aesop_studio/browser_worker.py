@@ -1,9 +1,10 @@
 """Headless Chromium worker driven over stdin/stdout (one JSON command per line, one JSON reply per line).
 
 Runs under the project's .venv Python, which has Playwright + Chrome; the Studio server (a different interpreter)
-talks to it through aesop_studio.browser. One persistent page in one context, so sign-ins and tabs survive across
-commands within a session. Owner/provider actions only; it never types into a password field and never solves
-CAPTCHAs. Loopback concerns do not apply here — this reaches the public web as the owner's Chrome would.
+talks to it through aesop_studio.browser. A persistent context (sign-ins and tabs survive across commands) with a
+desktop viewport rendered at 2x device scale, so screenshots are crisp. Owner/provider actions only; it never types
+into a password field and never solves CAPTCHAs. Loopback concerns do not apply here — this reaches the public web
+as the owner's Chrome would.
 """
 from __future__ import annotations
 
@@ -12,8 +13,10 @@ import json
 import sys
 import time
 
-VIEWPORT = {"width": 1280, "height": 800}
+VIEWPORT = {"width": 1366, "height": 854}
+SCALE = 2
 NAV_TIMEOUT = 30_000
+SETTLE_MS = 1200
 MAX_TEXT = 40_000
 
 
@@ -27,24 +30,38 @@ def main() -> None:
 
     with sync_playwright() as pw:
         try:
-            browser = pw.chromium.launch(channel="chrome", headless=True)
+            browser = pw.chromium.launch(channel="chrome", headless=True,
+                                         args=["--disable-blink-features=AutomationControlled", "--hide-scrollbars"])
         except Exception:
             browser = pw.chromium.launch(headless=True)
-        ctx = browser.new_context(viewport=VIEWPORT, ignore_https_errors=False,
-                                  user_agent=None, locale="en-US")
+        ctx = browser.new_context(viewport=VIEWPORT, device_scale_factor=SCALE, locale="en-US",
+                                  color_scheme="light")
         ctx.set_default_timeout(NAV_TIMEOUT)
-        page = ctx.new_page()
-        reply({"ok": True, "ready": True})
+        pages = [ctx.new_page()]
+        ctx.on("page", lambda p: pages.append(p))  # a link that opens a new tab comes to the front
+
+        def page():
+            while len(pages) > 1 and pages[-1].is_closed():
+                pages.pop()
+            return pages[-1]
+
+        def settle(p):
+            try:
+                p.wait_for_load_state("networkidle", timeout=SETTLE_MS)
+            except Exception:
+                p.wait_for_timeout(250)
 
         def info():
+            p = page()
             try:
-                return {"url": page.url, "title": page.title()}
+                return {"url": p.url, "title": p.title()}
             except Exception:
-                return {"url": page.url, "title": ""}
+                return {"url": getattr(p, "url", ""), "title": ""}
 
         def shot(full=False):
-            png = page.screenshot(full_page=full, type="png", timeout=NAV_TIMEOUT)
-            return base64.b64encode(png).decode("ascii")
+            return base64.b64encode(page().screenshot(full_page=full, type="png", timeout=NAV_TIMEOUT)).decode("ascii")
+
+        reply({"ok": True, "ready": True, "viewport": VIEWPORT})
 
         for line in sys.stdin:
             line = line.strip()
@@ -53,9 +70,9 @@ def main() -> None:
             try:
                 cmd = json.loads(line)
             except ValueError:
-                reply({"ok": False, "error": "bad command"})
-                continue
+                reply({"ok": False, "error": "bad command"}); continue
             op = cmd.get("op")
+            p = page()
             try:
                 if op == "ping":
                     reply({"ok": True, **info()})
@@ -67,38 +84,41 @@ def main() -> None:
                         url = "https://" + url
                     if not url.lower().startswith(("http://", "https://")):
                         reply({"ok": False, "error": "only http(s) pages are allowed"}); continue
-                    page.goto(url, wait_until="domcontentloaded")
+                    p.goto(url, wait_until="domcontentloaded")
+                    settle(p)
                     reply({"ok": True, **info()})
                 elif op == "shot":
-                    reply({"ok": True, "png": shot(cmd.get("full")), "viewport": VIEWPORT, **info()})
+                    reply({"ok": True, "png": shot(cmd.get("full")), "viewport": VIEWPORT, "scale": SCALE, **info()})
                 elif op == "click":
                     x, y = float(cmd["x"]), float(cmd["y"])
-                    page.mouse.click(x, y)
-                    page.wait_for_timeout(300)
+                    p.mouse.click(x, y)
+                    p.wait_for_timeout(500)
+                    settle(page())
                     reply({"ok": True, **info()})
                 elif op == "scroll":
-                    page.mouse.wheel(0, float(cmd.get("dy", 600)))
-                    page.wait_for_timeout(150)
+                    p.mouse.wheel(0, float(cmd.get("dy", 700)))
+                    p.wait_for_timeout(250)
                     reply({"ok": True, **info()})
                 elif op == "type":
-                    # Never type into a password field (or any obscured input), even if asked.
-                    is_pw = page.evaluate("() => { const e = document.activeElement; return !!e && e.tagName === 'INPUT' && (e.type === 'password'); }")
+                    is_pw = p.evaluate("() => { const e = document.activeElement; return !!e && e.tagName === 'INPUT' && e.type === 'password'; }")
                     if is_pw:
                         reply({"ok": False, "error": "refused: the focused field is a password input"}); continue
-                    page.keyboard.type(str(cmd.get("text", ""))[:2000], delay=12)
+                    p.keyboard.type(str(cmd.get("text", ""))[:2000], delay=10)
                     reply({"ok": True, **info()})
                 elif op == "key":
-                    page.keyboard.press(str(cmd.get("key", "Enter"))[:40])
-                    page.wait_for_timeout(300)
+                    p.keyboard.press(str(cmd.get("key", "Enter"))[:40])
+                    p.wait_for_timeout(500)
+                    settle(page())
                     reply({"ok": True, **info()})
                 elif op in ("back", "forward", "reload"):
-                    getattr(page, {"back": "go_back", "forward": "go_forward", "reload": "reload"}[op])()
+                    getattr(p, {"back": "go_back", "forward": "go_forward", "reload": "reload"}[op])()
+                    settle(page())
                     reply({"ok": True, **info()})
                 elif op == "text":
-                    txt = page.evaluate("() => document.body ? document.body.innerText : ''")
+                    txt = p.evaluate("() => document.body ? document.body.innerText : ''")
                     reply({"ok": True, "text": (txt or "")[:MAX_TEXT], **info()})
                 elif op == "links":
-                    links = page.evaluate("""() => [...document.querySelectorAll('a[href]')].slice(0, 120)
+                    links = p.evaluate("""() => [...document.querySelectorAll('a[href]')].slice(0, 120)
                         .map(a => ({text: (a.innerText||'').trim().slice(0,80), href: a.href})).filter(l => l.text && l.href.startsWith('http'))""")
                     reply({"ok": True, "links": links, **info()})
                 elif op == "close":

@@ -56,7 +56,7 @@ class TestDrive(unittest.TestCase):
     def test_action_mapping_and_clamp(self):
         self.assertEqual(self.d._do({"action": "navigate", "url": "example.com"}), "example.com")
         self.d._do({"action": "click", "x": 99999, "y": -5})
-        self.assertEqual(self.fb.calls[-1], ("click", {"x": 1280, "y": 0}))   # clamped to the viewport
+        self.assertEqual(self.fb.calls[-1], ("click", {"x": 1366, "y": 0}))   # clamped to the viewport
         self.d._do({"action": "scroll", "dy": 400})
         self.assertEqual(self.fb.calls[-1][0], "scroll")
         self.d._do({"action": "key", "key": "Enter"})

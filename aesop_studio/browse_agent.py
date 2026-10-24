@@ -21,7 +21,7 @@ from .tasks import TERMINAL
 VISION_ROUTES = ("claude", "codex", "openai-api")  # routes verified to read a screenshot
 MAX_STEPS_CAP = 15
 STEP_TIMEOUT = 150
-VW, VH = 1280, 800
+VW, VH = 1366, 854
 
 
 class Drive:

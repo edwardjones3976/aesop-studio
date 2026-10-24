@@ -987,12 +987,45 @@ dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
 .brstep.ans { background: var(--mint-bg); color: var(--mint); }
 .brn { flex: none; width: 18px; text-align: right; color: var(--text-3); }
 .bract { flex: none; font-weight: 600; text-transform: uppercase; font-size: 10.5px; letter-spacing: .04em; color: var(--sky); }
-/* browser panel in the inspector (base) */
-.brpanel { display: flex; flex-direction: column; gap: 8px; height: 100%; min-height: 0; min-width: 0; }
-.brbar, .brbar2 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
-.brurl { min-width: 0; flex: 1 1 120px; font-size: 12.5px; height: 34px; }
-.brwrap { flex: 1 1 auto; min-height: 220px; min-width: 0; max-width: 100%; overflow: auto; border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--sunken); }
-.brwrap:focus-visible { outline: 2px solid var(--focus); }
-.brshot { display: block; width: 100%; max-width: 100%; height: auto; cursor: crosshair; }
-.brstat { font-size: 12px; overflow-wrap: anywhere; min-height: 16px; color: var(--text-2); }
+/* browser panel in the inspector */
+.brpanel { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 0; min-width: 0; }
+.brbar { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.brnav { width: 32px; height: 32px; flex: none; color: var(--text-2); }
+.brnav:hover { color: var(--text); }
+.braddr { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 6px; height: 36px; padding: 0 6px 0 10px; border-radius: 99px; border: 1px solid var(--border-2); background: var(--sunken); }
+.braddr:focus-within { border-color: var(--focus); box-shadow: 0 0 0 2px var(--focus-soft, rgba(155,215,255,.25)); }
+.brlock { font-size: 12px; flex: none; opacity: .85; }
+.brlock.warn { filter: grayscale(.2); }
+.brurl { flex: 1 1 auto; min-width: 0; border: 0; background: none; color: var(--text); font-size: 13px; height: 100%; padding: 0; outline: none; }
+.brgo { flex: none; height: 28px; border-radius: 99px; }
+/* the page frame: a clean browser window */
+.brframe { position: relative; flex: 1 1 auto; min-height: 260px; min-width: 0; border: 1px solid var(--border-2); border-radius: var(--r-ctl); overflow: hidden; background: #fff; box-shadow: var(--shadow-2); }
+.brframe[hidden] { display: none; }
+.brview { position: relative; width: 100%; height: 100%; overflow: auto; outline: none; background: #fff; }
+.brview:focus-visible { box-shadow: inset 0 0 0 2px var(--focus); }
+.brshot { display: block; width: 100%; max-width: 100%; height: auto; cursor: pointer; image-rendering: auto; }
+.brframe:not(.has-page) .brview { background: var(--sunken); min-height: 260px; display: grid; place-items: center; }
+/* top loading bar */
+.brload { position: absolute; left: 0; top: 0; height: 3px; width: 0; z-index: 3; background: linear-gradient(90deg, var(--sky), var(--coral)); opacity: 0; transition: opacity .2s; }
+.brframe.loading .brload { opacity: 1; animation: brload 1.1s ease-in-out infinite; }
+@keyframes brload { 0% { width: 8%; margin-left: 0; } 50% { width: 55%; } 100% { width: 8%; margin-left: 92%; } }
+.brframe.loading .brview { cursor: progress; }
+.brframe.loading::after { content: ""; position: absolute; inset: 0; background: rgba(10,15,22,.04); z-index: 2; pointer-events: none; }
+/* click ripple */
+.brclick { position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: var(--coral); box-shadow: 0 0 0 2px rgba(255,145,108,.5); pointer-events: none; z-index: 4; animation: brclick .45s ease-out forwards; }
+@keyframes brclick { from { transform: scale(.4); opacity: .9; } to { transform: scale(3.2); opacity: 0; } }
+.brstat { font-size: 12px; overflow-wrap: anywhere; min-height: 15px; color: var(--text-2); }
+.brstat.err { color: var(--red); }
+.brbar2 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
 .brbar2 .btn { flex: none; }
+/* provider-driven browsing */
+.brsteps { width: 56px; height: 34px; }
+.brdrive { border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--sunken); }
+.brdrive > summary { cursor: pointer; padding: 8px 10px; display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.brdrive-body { padding: 0 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+.brdrive-log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
+.brstep { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; padding: 4px 6px; border-radius: var(--r-sm); background: var(--panel); }
+.brstep.err { color: var(--amber); }
+.brstep.ans { background: var(--mint-bg); color: var(--mint); }
+.brn { flex: none; width: 18px; text-align: right; color: var(--text-3); }
+.bract { flex: none; font-weight: 600; text-transform: uppercase; font-size: 10.5px; letter-spacing: .04em; color: var(--sky); }
