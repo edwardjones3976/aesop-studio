@@ -201,3 +201,67 @@ class TestRoomHook(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStressFixes(StudyBase):
+    def test_add_ref_is_race_free(self):
+        """Twenty concurrent add_ref calls to the same folder admit exactly one row."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        app = self.tmp / "race" / "resources" / "app"; app.mkdir(parents=True)
+        (app / "m.js").write_text("//", encoding="utf-8")
+        target = str(self.tmp / "race")
+        ok = dup = 0
+        with ThreadPoolExecutor(max_workers=20) as ex:
+            futs = [ex.submit(study.add_ref, self.store, target, f"R{i}") for i in range(20)]
+            for f in as_completed(futs):
+                try: f.result(); ok += 1
+                except ValueError as e: dup += ("already registered" in str(e))
+        self.assertEqual(ok, 1)
+        self.assertEqual(dup, 19)
+        self.assertEqual(len(study.refs(self.store)), 1)
+
+    def test_list_studies_reconciles_abandoned_running_rows(self):
+        """A study row stuck RUNNING because its watcher died gets finished lazily on list_studies."""
+        ref = study.add_ref(self.store, str(self.app_root), "Ref App")
+        study.set_ack(self.store, True)
+        st = study.start(self.store, self.sup, self.svc, self.p["id"], ref["id"], "composer")
+        end = time.time() + 20
+        while time.time() < end and self.sup.get(st["task_id"])["state"] != "COMPLETED":
+            time.sleep(0.1)
+        # simulate a crashed watcher: the task finished but the row never advanced
+        self.store.x("UPDATE studies SET state='RUNNING', findings='[]', steps='[]' WHERE id=?", (st["id"],))
+        rows = study.list_studies(self.store, self.p["id"], sup=self.sup, svc=self.svc)
+        self.assertEqual(rows[0]["state"], "DONE")
+        self.assertEqual(len(rows[0]["findings"]), 2)
+
+    def test_start_refuses_non_study_capable_provider_explicitly(self):
+        ref = study.add_ref(self.store, str(self.app_root), "Ref App")
+        study.set_ack(self.store, True)
+        with self.assertRaisesRegex(ValueError, "cannot run reference studies"):
+            study.start(self.store, self.sup, self.svc, self.p["id"], ref["id"], "composer", route="grok")
+
+    def test_interrupted_study_does_not_open_a_repair_packet(self):
+        """A read-only study has no side effects to review; a restart should not file a repair."""
+        from aesop_studio.store import Store as _S
+        from aesop_studio.tasks import Supervisor as _Sup
+        ref = study.add_ref(self.store, str(self.app_root), "Ref App")
+        study.set_ack(self.store, True)
+        st = study.start(self.store, self.sup, self.svc, self.p["id"], ref["id"], "SLEEP long topic")
+        time.sleep(0.4)
+        self.store.close()
+        s2 = _S(self.tmp / "d"); sup2 = _Sup(s2)
+        sup2.reconcile()
+        repairs = s2.q("SELECT * FROM repairs WHERE task_id=?", (st["task_id"],))
+        self.assertEqual(len(repairs), 0, "a study is read-only; no repair packet should open")
+        s2.close()
+        self.store = _S(self.tmp / "d")  # restore for tearDown
+
+
+class TestRedactorNewShapes(unittest.TestCase):
+    def test_perplexity_and_firecrawl_keys_are_redacted(self):
+        from aesop_studio.security import redact
+        for raw in ("pplx-abc123xyz456lmn789qwerty000",
+                    "fc-live-abcdefghijklmnopqrstuvwxyz01",
+                    "fc-abcdefghijklmnopqrstuvwxyz01"):
+            self.assertNotIn(raw, redact(f"key: {raw} end"))
+

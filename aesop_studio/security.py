@@ -29,6 +29,8 @@ SECRET_FILE_RE = re.compile(r"(^|/)(\.env(\..*)?|.*\.(pem|key|p12|pfx|keystore|j
 
 _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),
+    re.compile(r"\bpplx-[A-Za-z0-9_\-]{20,}"),  # Perplexity API keys
+    re.compile(r"\bfc-(?:live-)?[A-Za-z0-9_\-]{20,}"),  # Firecrawl API keys
     re.compile(r"sk-ant-[A-Za-z0-9_\-]{16,}"),
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"xox[abprs]-[A-Za-z0-9\-]{10,}"),

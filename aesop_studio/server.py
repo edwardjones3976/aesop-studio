@@ -617,7 +617,7 @@ class Handler(BaseHTTPRequestHandler):
     @route("GET", r"/api/projects/(\w+)/studies")
     def study_list(self, sess, pid):
         self.app.svc.project(pid)
-        self.json({"studies": study.list_studies(self.app.store, pid)})
+        self.json({"studies": study.list_studies(self.app.store, pid, sup=self.app.sup, svc=self.app.svc)})
 
     @route("GET", r"/api/projects/(\w+)/reviewers")
     def task_reviewers(self, sess, pid):

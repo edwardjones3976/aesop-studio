@@ -60,14 +60,16 @@ def add(store: Store, pid: str, content: str, source: str = "owner", task_ref: s
     content = " ".join((content or "").split())[:400]
     if len(content) < 2:
         raise ValueError("write what the step is first")
-    n = store.one("SELECT COUNT(*) n FROM plan_items WHERE project_id=?", (pid,))["n"]
-    if n >= MAX_ITEMS:
-        raise ValueError(f"the plan holds at most {MAX_ITEMS} items; clear some done ones")
-    top = store.one("SELECT COALESCE(MAX(pos),0) p FROM plan_items WHERE project_id=?", (pid,))["p"]
-    iid = new_id("pln")
-    now = time.time()
-    store.x("INSERT INTO plan_items(id,project_id,content,status,source,task_ref,pos,created,updated) "
-            "VALUES(?,?,?,?,?,?,?,?,?)", (iid, pid, redact(content), status, source[:40], task_ref, top + 1, now, now))
+    # Count check and insert must share one critical section, or parallel inserts race past MAX_ITEMS.
+    with store.write_lock:
+        n = store.one("SELECT COUNT(*) n FROM plan_items WHERE project_id=?", (pid,))["n"]
+        if n >= MAX_ITEMS:
+            raise ValueError(f"the plan holds at most {MAX_ITEMS} items; clear some done ones")
+        top = store.one("SELECT COALESCE(MAX(pos),0) p FROM plan_items WHERE project_id=?", (pid,))["p"]
+        iid = new_id("pln")
+        now = time.time()
+        store.x("INSERT INTO plan_items(id,project_id,content,status,source,task_ref,pos,created,updated) "
+                "VALUES(?,?,?,?,?,?,?,?,?)", (iid, pid, redact(content), status, source[:40], task_ref, top + 1, now, now))
     return store.one("SELECT * FROM plan_items WHERE id=?", (iid,))
 
 

@@ -82,14 +82,17 @@ def add_ref(store: Store, path: str, name: str = "", note: str = "") -> dict:
         raise ValueError(f"reference folder refused: {e}") from None
     kind, target = _layout(root)
     name = (name or root.name).strip()[:80]
-    items = refs(store)
-    for r in items:
-        if os.path.normcase(r["path"]) == os.path.normcase(str(root)):
-            raise ValueError(f"{r['name']} is already registered for that folder")
-    rec = {"id": new_id("ref"), "name": name, "path": str(root), "target": target, "kind": kind,
-           "note": redact(note.strip())[:300], "authorized_at": time.time()}
-    items.append(rec)
-    _save(store, items)
+    # Read-modify-write of the refs list is serialized through the store's write_lock so parallel registrations
+    # cannot both see an empty list and both insert the same folder.
+    with store.write_lock:
+        items = refs(store)
+        for r in items:
+            if os.path.normcase(r["path"]) == os.path.normcase(str(root)):
+                raise ValueError(f"{r['name']} is already registered for that folder")
+        rec = {"id": new_id("ref"), "name": name, "path": str(root), "target": target, "kind": kind,
+               "note": redact(note.strip())[:300], "authorized_at": time.time()}
+        items.append(rec)
+        _save(store, items)
     store.event("study_ref", None, name=name, kind=kind)
     return rec
 
@@ -211,7 +214,12 @@ def start(store: Store, sup, svc, pid: str, ref_id: str, topic: str, route: str 
     if len(topic) < 3:
         raise ValueError("say what to study (a feature or behavior)")
     routes = providers.cached(store)
+    requested = route
     route = route or p.get("provider_default")
+    # If the caller explicitly asked for a provider that is not study-capable, refuse with a clear reason instead
+    # of silently falling back; Perplexity, Firecrawl, Grok, Z.ai etc. cannot run reverse-engineering tools.
+    if requested and requested not in STUDY_ROUTES:
+        raise ValueError(f"{requested} cannot run reference studies; pick Claude Code or Codex")
     if route not in STUDY_ROUTES or not providers.usable(routes.get(route, {"state": "?", "supported_modes": []}), "study"):
         route = next((r for r in STUDY_ROUTES if r in routes and providers.usable(routes[r], "study")), None)
     if not route:
@@ -288,10 +296,26 @@ def _row(r) -> dict:
     return d
 
 
-def list_studies(store: Store, pid: str, limit: int = 20) -> list[dict]:
+def list_studies(store: Store, pid: str, limit: int = 20, sup=None, svc=None) -> list[dict]:
     ensure_schema(store)
-    return [_row(r) for r in store.q("SELECT * FROM studies WHERE project_id=? ORDER BY created DESC LIMIT ?",
+    rows = [_row(r) for r in store.q("SELECT * FROM studies WHERE project_id=? ORDER BY created DESC LIMIT ?",
                                       (pid, limit))]
+    # If a watcher thread died mid-finish (crash, restart), a RUNNING row whose task is terminal is reconciled
+    # here lazily. Mirrors plan.list_items, which refreshes a plan item from its task_ref.
+    if sup is not None and svc is not None:
+        for i, r in enumerate(rows):
+            if r["state"] != "RUNNING" or not r.get("task_id"):
+                continue
+            t = sup.final(r["task_id"])
+            if t and t["state"] in TERMINAL:
+                ref = next((x for x in refs(store) if x["id"] == r["ref_id"]), None)
+                if ref:
+                    rows[i] = finish(store, sup, svc, pid, r["id"], t, ref, r["topic"], r["provider"])
+                else:  # ref de-registered after the study started: close without a notebook write
+                    store.x("UPDATE studies SET state='FAILED', error='reference no longer registered', ended=? "
+                            "WHERE id=?", (time.time(), r["id"]))
+                    rows[i] = get(store, r["id"])
+    return rows
 
 
 def render(st: dict) -> str:

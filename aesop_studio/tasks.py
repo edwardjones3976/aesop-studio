@@ -743,8 +743,9 @@ class Supervisor:
             metered_started = bool(cp.get("reservation_usd")) and t["state"] in ("STARTING", "RUNNING")
             billed = None if (metered_started or new_state == "EFFECT_UNKNOWN") else 0
             self._end(t["id"], new_state, cp.get("ledger_id"), billed, error=note)
-            # Read-only chat turns have no side effects to review: only agent tasks get a repair packet.
-            if t["state"] in ("STARTING", "RUNNING") and cp.get("mode") != "chat":  # unknown mode: conservative
+            # Read-only chat and study turns have no side effects to review: only agent tasks get a repair packet.
+            # An unknown mode stays conservative and opens a repair, matching the prior behavior.
+            if t["state"] in ("STARTING", "RUNNING") and cp.get("mode") not in ("chat", "study"):
                 self.open_repair(t["id"], f"{t['state']}->{new_state}", "task supervision / restart reconciliation")
             if cp.get("mode") != "agent":
                 _remove_chat_dir(t["cwd"])
