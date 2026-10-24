@@ -124,7 +124,17 @@ function signInCard() {
     h("p", {}, "Reopen Studio from its launch link (start.ps1 opens one for you). This keeps other websites and local programs from using your Studio."))));
 }
 function authFail() { signInCard(); banner("Studio session not recognised. Reopen Studio from its launch link.", "bad"); }
-async function api(method, path, body, raw) {
+async function api(method, path, body, raw, retried) {
+  if (method !== "GET" && !retried) {
+    try { return await api(method, path, body, raw, true); }
+    catch (e) {
+      // A newer sign-in (another tab, or reopening Studio) replaced this tab's session: the cookie and key are
+      // shared, but this tab still held the old CSRF token. Fetch the current one and retry once.
+      if (e.status !== 403 || !/CSRF/i.test(e.message)) throw e;
+      const s = await api("GET", "/api/session"); S.csrf = s.csrf;
+      return api(method, path, body, raw, true);
+    }
+  }
   const opts = { method, headers: { "X-Aesop-Key": apiKey() }, credentials: "same-origin" };
   if (method !== "GET") opts.headers["X-CSRF-Token"] = S.csrf;
   if (raw) { opts.body = raw.data; opts.headers["X-Filename"] = encodeURIComponent(raw.name); }
