@@ -219,3 +219,33 @@ class TestRedo(Base):
             self.svc.redo(self.p["id"], self.c["id"], r["message_id"], None, None)
         self.sup.cancel(r["task_id"])
         self.wait(r["task_id"])
+
+
+class TestPageWall(unittest.TestCase):
+    def test_wall_detection(self):
+        from aesop_studio.research_routes import _page_wall
+        gh = _page_wall("https://github.com/edwardjones3976/long-table-bid-whist",
+                        {"statusCode": 404, "title": "Page not found · GitHub"}, "You signed in with another tab")
+        self.assertIn("HTTP 404", gh)
+        self.assertIn("private or non-existent GitHub", gh)
+        self.assertIsNone(_page_wall("https://ex.org/a", {"statusCode": 200, "title": "Real"}, "x" * 2000))
+        wall = _page_wall("https://n.site/x", {"title": "Sign in to continue"}, "Sign in to continue reading")
+        self.assertIn("not readable content", wall)
+
+
+class TestBrowserManager(unittest.TestCase):
+    def test_status_shape_and_unavailable_note(self):
+        from aesop_studio import browser
+        b = browser.Browser()
+        st = b.status()
+        self.assertEqual(set(st) >= {"available", "running", "url", "title", "note"}, True)
+        self.assertFalse(st["running"])
+        # when no venv python exists, cmd fails cleanly rather than hanging
+        orig = browser.venv_python
+        browser.venv_python = lambda: None
+        try:
+            self.assertFalse(b.available())
+            with self.assertRaises(RuntimeError):
+                b.cmd("ping", timeout=2)
+        finally:
+            browser.venv_python = orig

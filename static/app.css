@@ -977,3 +977,13 @@ dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
 #researchBtn[aria-expanded="true"] { background: var(--sky-bg); border-color: rgba(155, 215, 255, .45); color: var(--sky); }
 .handoff { font-size: 12.5px; color: var(--sky); }
 .handoff[hidden] { display: none; }
+.brsteps { width: 56px; height: 34px; }
+.brdrive { border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--sunken); }
+.brdrive > summary { cursor: pointer; padding: 8px 10px; display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.brdrive-body { padding: 0 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+.brdrive-log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
+.brstep { display: flex; gap: 8px; align-items: baseline; font-size: 12.5px; padding: 4px 6px; border-radius: var(--r-sm); background: var(--panel); }
+.brstep.err { color: var(--amber); }
+.brstep.ans { background: var(--mint-bg); color: var(--mint); }
+.brn { flex: none; width: 18px; text-align: right; color: var(--text-3); }
+.bract { flex: none; font-weight: 600; text-transform: uppercase; font-size: 10.5px; letter-spacing: .04em; color: var(--sky); }

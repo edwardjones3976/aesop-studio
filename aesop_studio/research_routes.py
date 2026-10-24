@@ -71,6 +71,29 @@ def _clean_page(md: str) -> str:
     return md.strip()
 
 
+_WALL_RE = re.compile(r"page not found|404 |not found\b|sign in to|you signed in with another tab|"
+                      r"this page is private|requires? (a )?login|access denied|forbidden|rate limit", re.I)
+
+
+def _page_wall(url: str, meta: dict, body: str) -> str | None:
+    """A plain explanation when a fetched page is an error, a login wall, or a 'not found' chrome, not content.
+
+    Firecrawl reads public pages only, so private or deleted pages come back as the site's 404 / sign-in shell."""
+    status = meta.get("statusCode") or meta.get("status_code")
+    head = (meta.get("title") or "") + " " + body[:600]
+    host = re.sub(r"^https?://(www\.)?", "", url).split("/")[0].lower()
+    is_wall = (isinstance(status, int) and status >= 400) or (_WALL_RE.search(head) and len(body.strip()) < 1200)
+    if not is_wall:
+        return None
+    why = f"the page returned HTTP {status}" if isinstance(status, int) and status >= 400 else "the page is a “not found” or sign-in screen, not readable content"
+    extra = ""
+    if host == "github.com" and len(url.split("/")) >= 5:
+        extra = (" This looks like a private or non-existent GitHub repository. Firecrawl can only read public pages, "
+                 "so it cannot see a private repo. To work with it here, attach its files or a folder in the chat, "
+                 "or make the repository public.")
+    return f"Firecrawl could not read this page: {why}.{extra}"
+
+
 def firecrawl(question: str) -> dict:
     """Returns {"text": markdown answer, "credits": estimate}."""
     k = key("firecrawl")
@@ -83,6 +106,10 @@ def firecrawl(question: str) -> dict:
             data = d.get("data") or {}
             meta = data.get("metadata") or {}
             body = _clean_page(data.get("markdown") or "")
+            wall = _page_wall(u, meta, body)
+            if wall:
+                parts.append(f"## {meta.get('title') or u}\n{u}\n\n{wall}")
+                continue
             clipped = body[:PAGE_CHARS] + ("\n\n…(page clipped)" if len(body) > PAGE_CHARS else "")
             parts.append(f"## {meta.get('title') or u}\n{u}\n\n{redact(clipped) or '(no readable text on this page)'}")
         return {"text": "\n\n---\n\n".join(parts), "credits": len(urls)}

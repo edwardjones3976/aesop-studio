@@ -16,7 +16,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backup, deletion, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare
+from . import backup, browse_agent, browser as browser_mod, deletion, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare
 from .security import MAX_UPLOAD_BYTES, ScopeError, redact
 from .services import Conflict, Services
 from .sessions import SESSION_DAYS, Sessions
@@ -64,6 +64,8 @@ class App:
         self.sessions = Sessions(self.store.data_dir)  # persistent: survives restarts (30-day sliding)
         self.login_code = secrets.token_urlsafe(24)
         self.reconciled = self.sup.reconcile()
+        self.browser = browser_mod.Browser()
+        self.drive = browse_agent.Drive(self.store, self.sup, self.browser)
         from .roundtable_live import Broker
         self.broker = Broker(self.store, self.sup)
         self.reconciled += self.broker.reconcile()
@@ -371,6 +373,66 @@ class Handler(BaseHTTPRequestHandler):
     @route("GET", r"/api/projects/(\w+)/attachments")
     def attachments(self, sess, pid):
         self.json(self.app.svc.attachments(pid))
+
+    @route("GET", r"/api/browser")
+    def browser_status(self, sess):
+        self.json(self.app.browser.status())
+
+    @route("POST", r"/api/browser/navigate")
+    def browser_navigate(self, sess):
+        self.json(self.app.browser.cmd("navigate", url=self.body().get("url") or ""))
+
+    @route("POST", r"/api/browser/act")
+    def browser_act(self, sess):
+        b = self.body(); op = b.get("op")
+        if op not in ("click", "scroll", "type", "key", "back", "forward", "reload"):
+            raise ValueError("unknown browser action")
+        args = {k: b[k] for k in ("x", "y", "dy", "text", "key") if k in b}
+        self.json(self.app.browser.cmd(op, **args))
+
+    @route("GET", r"/api/browser/shot")
+    def browser_shot(self, sess):
+        full = (self.query.get("full") or ["0"])[0] == "1"
+        self._send(200, self.app.browser.shot_png(full), "image/png", {"Cache-Control": "no-store"})
+
+    @route("GET", r"/api/browser/text")
+    def browser_text(self, sess):
+        self.json(self.app.browser.cmd("text"))
+
+    @route("GET", r"/api/browser/links")
+    def browser_links(self, sess):
+        self.json(self.app.browser.cmd("links"))
+
+    @route("GET", r"/api/browser/drive")
+    def browser_drive_status(self, sess):
+        self.json(self.app.drive.status())
+
+    @route("POST", r"/api/projects/(\w+)/browser/drive")
+    def browser_drive_start(self, sess, pid):
+        b = self.body()
+        self.json(self.app.drive.start(self.app.svc.project(pid), b.get("provider") or "", b.get("goal") or "",
+                                       int(b.get("max_steps") or 6)), 202)
+
+    @route("POST", r"/api/browser/drive/stop")
+    def browser_drive_stop(self, sess):
+        self.json(self.app.drive.stop())
+
+    @route("POST", r"/api/browser/stop")
+    def browser_stop(self, sess):
+        self.app.browser.stop()
+        self.json({"stopped": True})
+
+    @route("POST", r"/api/projects/(\w+)/browser/attach")
+    def browser_attach(self, sess, pid):
+        self.app.svc.project(pid)
+        png = self.app.browser.shot_png(False)
+        info = self.app.browser.cmd("text")
+        host = re.sub(r"^https?://(www\.)?", "", info.get("url") or "page").split("/")[0][:40] or "page"
+        stamp = time.strftime("%H%M%S")
+        img = self.app.svc.attach(pid, f"browser-{host}-{stamp}.png", png)
+        page = f"Page: {info.get('title') or ''}\nURL: {info.get('url') or ''}\n\n{info.get('text') or ''}"
+        txt = self.app.svc.attach(pid, f"browser-{host}-{stamp}.md", page.encode("utf-8"))
+        self.json({"image_id": img["id"], "text_id": txt["id"], "url": info.get("url"), "title": info.get("title")})
 
     @route("POST", r"/api/attachments/(\w+)/discard")
     def attachment_discard(self, sess, aid):
@@ -748,6 +810,7 @@ def main(argv=None):
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
+        srv.app.browser.stop()
         pass
     finally:
         link_file.unlink(missing_ok=True)

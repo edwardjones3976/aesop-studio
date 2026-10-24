@@ -59,7 +59,7 @@ const SVGNS = "http://www.w3.org/2000/svg";
 const ICONS = {
   plus: "M12 5v14M5 12h14", image: "M4 5h16v14H4zM4 16l5-5 4 4 3-3 4 4M15.5 8.5h.01", chat: "M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.4A8 8 0 1 1 21 12z",
   file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5", terminal: "M4 17l6-5-6-5M12 19h8",
-  search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4", layers: "M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5",
+  chevL: "M15 6l-6 6 6 6", chevR: "M9 6l6 6-6 6", refresh: "M21 12a9 9 0 1 1-3-6.7M21 4v4h-4", search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14zM20 20l-4-4", globe: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM3 12h18M12 3c2.5 2.5 3.5 6 3.5 9s-1 6.5-3.5 9c-2.5-2.5-3.5-6-3.5-9s1-6.5 3.5-9z", layers: "M12 3l9 5-9 5-9-5 9-5zM3 13l9 5 9-5",
   bookmark: "M6 3h12v18l-6-4-6 4z", providers: "M9 2v6M15 2v6M6 8h12v3a6 6 0 0 1-12 0zM12 17v5",
   evidence: "M3 21h18M6 17v-5M11 17V6M16 17v-8M21 17v-3",
   settings: "M4 7h9M17 7h3M4 17h3M11 17h9M17 7a2 2 0 1 1-4 0 2 2 0 0 1 4 0zM11 17a2 2 0 1 1-4 0 2 2 0 0 1 4 0z",
@@ -309,7 +309,7 @@ function openInspector(tab, opener) {
 function setupShell() {
   decorateIcons();
   S.inspPref = localStorageGet("aesop.inspector") !== "0";
-  const it = localStorageGet("aesop.itab"); if (["preview", "files", "changes", "terminal", "logs"].includes(it)) S.itab = it;
+  const it = localStorageGet("aesop.itab"); if (["preview", "files", "changes", "terminal", "logs", "browser"].includes(it)) S.itab = it;
   setupSeparator("explorerSep", "e"); setupSeparator("inspectorSep", "i");
   $("explorerBtn").onclick = (e) => (S.ov && S.ov.name === "explorer" ? closeOverlay() : openOverlay("explorer", e.currentTarget));
   $("explorerClose").onclick = () => closeOverlay();
@@ -1556,6 +1556,7 @@ async function renderInspector() {
   if (!S.project) { body.replaceChildren(empty("panel", "No project open", "Open a project to see its saved items, files, task changes, terminal output and task log here.")); return; }
   const pid = S.project.id;
   try {
+    if (S.itab === "browser") return inspBrowser(body, pid, gen);
     if (S.itab === "files") return await inspFiles(body, pid, gen);
     if (S.itab === "preview") return await inspPreview(body, pid, gen);
     const tasks = await api("GET", `/api/projects/${pid}/tasks`);
@@ -1572,6 +1573,101 @@ async function renderInspector() {
     if (S.itab === "terminal") inspTerminal(body, tid, tid !== S.taskSel); else inspChanges(body, tid, tid !== S.taskSel);
   } catch (e) { if (gen === inspGen) body.replaceChildren(h("div", { class: "note bad" }, icon("alert"), h("span", {}, e.message))); }
 }
+// A real headless Chrome lives beside Studio: the owner drives it here, and any page can be handed to the
+// providers (they read the screenshot + text). Provider-driven browsing is the next, opt-in step.
+const BROWSER_VW = 1280, BROWSER_VH = 800;
+function inspBrowser(body, pid, gen) {
+  const urlIn = h("input", { type: "text", class: "grow brurl", placeholder: "Type a web address and press Enter", "aria-label": "Web address" });
+  const shot = h("img", { class: "brshot", alt: "Browser page", draggable: "false" });
+  const stat = h("div", { class: "brstat faint", role: "status", "aria-live": "polite" }, "Starting…");
+  const wrap = h("div", { class: "brwrap", tabindex: "0", "aria-label": "Browser page (click to interact, scroll to scroll, type to enter text)" }, shot);
+  let busy = false, curUrl = "", driveBtn;
+  const call = async (method, path, b) => { busy = true; stat.textContent = "Working…"; try { return await api(method, path, b); } finally { busy = false; } };
+  const refresh = async () => {
+    try {
+      const r = await fetch("/api/browser/shot", { headers: { "X-Aesop-Key": apiKey() }, credentials: "same-origin" });
+      if (gen !== inspGen) return;
+      if (r.ok) { const u = URL.createObjectURL(await r.blob()); const old = shot.src; shot.src = u; if (old.startsWith("blob:")) URL.revokeObjectURL(old); }
+    } catch { /* keep the last frame */ }
+  };
+  const setStat = (st) => { if (st && st.url !== undefined) { curUrl = st.url || ""; urlIn.value = st.url || urlIn.value; stat.textContent = st.error ? `⚠ ${st.error}` : (st.title ? `${st.title} — ${st.url}` : st.url || "Ready"); } };
+  const after = (st) => { setStat(st); refresh(); };
+  const go = async () => { if (!urlIn.value.trim()) return; try { after(await call("POST", "/api/browser/navigate", { url: urlIn.value.trim() })); } catch (e) { stat.textContent = e.message; } };
+  const act = async (op, extra) => { try { after(await call("POST", "/api/browser/act", { op, ...extra })); } catch (e) { stat.textContent = e.message; } };
+  urlIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+  shot.addEventListener("click", (e) => {
+    if (busy || !shot.clientWidth) return;
+    const r = shot.getBoundingClientRect();
+    act("click", { x: Math.round((e.clientX - r.left) / r.width * BROWSER_VW), y: Math.round((e.clientY - r.top) / r.height * BROWSER_VH) });
+  });
+  wrap.addEventListener("wheel", (e) => { if (busy) return; e.preventDefault(); act("scroll", { dy: Math.max(-900, Math.min(900, e.deltaY)) }); }, { passive: false });
+  const typeBox = h("input", { type: "text", class: "grow", placeholder: "Type into the focused field, then Enter sends it", "aria-label": "Type text" });
+  typeBox.addEventListener("keydown", async (e) => { if (e.key === "Enter") { e.preventDefault(); const t = typeBox.value; typeBox.value = ""; if (t) await act("type", { text: t }); await act("key", { key: "Enter" }); } });
+  const bar = h("div", { class: "brbar" },
+    btn("", () => act("back"), "ghost sm", "chevL"), btn("", () => act("forward"), "ghost sm", "chevR"),
+    btn("", () => act("reload"), "ghost sm", "refresh"), urlIn, btn("Go", go, "sm", "send"));
+  const sendChat = abtn("Send page to chat", async () => {
+    try {
+      const r = await call("POST", `/api/projects/${pid}/browser/attach`);
+      const cid = S.conv; if (cid) { const set = chatChips[cid] || (chatChips[cid] = new Set()); set.add(r.image_id); set.add(r.text_id); }
+      banner("Browser page added to the chat (screenshot + text). Providers that see images can read it.", "ok");
+      if (S.tab === "chat" && !S.global) refresh2Chat(); else setTab("chat");
+    } catch (e) { banner(e.message, "bad"); }
+  }, "sm", "chat");
+  const actions = h("div", { class: "brbar2" }, typeBox, sendChat,
+    abtn("Read text", async () => { try { const r = await call("GET", "/api/browser/text"); await dialog("Page text", [{ name: "t", label: r.title || r.url || "Page", type: "textarea", value: r.text || "(empty)", tall: true, readonly: true }], "Close"); } catch (e) { banner(e.message, "bad"); } }, "ghost sm", "note"),
+    abtn("Stop browser", async () => { try { await call("POST", "/api/browser/stop"); stat.textContent = "Browser stopped."; shot.removeAttribute("src"); } catch (e) { banner(e.message, "bad"); } }, "ghost sm danger", "stop"));
+  const unavailable = h("div", { class: "note", hidden: true });
+  // provider-driven browsing (bounded, owner-started, stoppable)
+  const driveLog = h("ol", { class: "brdrive-log" });
+  const driveSel = h("select", { class: "chat-prov", "aria-label": "Provider to browse" });
+  const goalIn = h("input", { type: "text", class: "grow", placeholder: "What should it do? e.g. find the official Bid Whist scoring rules", "aria-label": "Browsing goal" });
+  const stepsIn = h("input", { type: "number", min: "1", max: "15", value: "6", class: "brsteps", "aria-label": "Max steps", title: "Maximum steps" });
+  let drivePoll = null;
+  const stopDrive = async () => { try { await api("POST", "/api/browser/drive/stop"); } catch { /* */ } };
+  const renderDrive = (d) => {
+    driveSel.replaceChildren(...(d.vision_routes || []).map((r) => h("option", { value: r, selected: r === driveSel.value }, routeName(r))));
+    const active = d.active;
+    driveBtn.textContent = active ? "Browsing…" : "Let a provider browse"; driveBtn.disabled = active || !(d.vision_routes || []).length;
+    driveStop.hidden = !active; goalIn.disabled = active; driveSel.disabled = active; stepsIn.disabled = active;
+    driveLog.replaceChildren(...(d.steps || []).map((st, i) => h("li", { class: "brstep" + (st.action === "error" ? " err" : "") },
+      h("span", { class: "brn" }, String(i + 1)), h("span", { class: "bract" }, st.action),
+      h("span", {}, st.thought || "", st.detail ? h("span", { class: "faint" }, ` ${st.detail}`) : null))));
+    if (d.answer) driveLog.append(h("li", { class: "brstep ans" }, h("span", { class: "bract" }, "answer"), h("span", {}, d.answer)));
+    if (!active && (d.steps || []).length) refresh();
+  };
+  driveBtn = abtn("Let a provider browse", async () => {
+    if (!goalIn.value.trim()) { goalIn.focus(); return; }
+    try {
+      await api("POST", `/api/projects/${pid}/browser/drive`, { provider: driveSel.value, goal: goalIn.value, max_steps: Number(stepsIn.value) || 6 });
+      startDrivePoll();
+    } catch (e) { banner(e.message, "bad"); }
+  }, "sm", "sparkle");
+  var driveStop = h("button", { type: "button", class: "btn ghost sm danger", hidden: true, onclick: stopDrive }, icon("stop"), "Stop");
+  const startDrivePoll = () => {
+    clearInterval(drivePoll);
+    drivePoll = setInterval(async () => {
+      if (gen !== inspGen) { clearInterval(drivePoll); return; }
+      try { const d = await api("GET", "/api/browser/drive"); renderDrive(d); if (!d.active) { clearInterval(drivePoll); refresh(); } } catch { /* */ }
+    }, 2000);
+  };
+  const driveSection = h("details", { class: "brdrive" }, h("summary", {}, icon("sparkle", "sm"), "Let a provider browse"),
+    h("div", { class: "brdrive-body" },
+      h("p", { class: "faint" }, "A provider reads the page screenshot and takes one action at a time toward your goal. It never enters passwords or payment details. You can Stop anytime."),
+      h("div", { class: "brbar" }, driveSel, stepsIn, h("span", { class: "faint" }, "steps")),
+      goalIn, h("div", { class: "row" }, driveBtn, driveStop), driveLog));
+  body.replaceChildren(h("div", { class: "brpanel" }, bar, unavailable, wrap, stat, actions, driveSection));
+  (async () => {
+    try {
+      const st = await api("GET", "/api/browser");
+      if (gen !== inspGen) return;
+      if (!st.available) { unavailable.hidden = false; unavailable.replaceChildren(icon("alert"), h("div", { class: "section" }, h("strong", {}, "Browser not set up"), h("p", {}, st.note))); bar.hidden = actions.hidden = wrap.hidden = driveSection.hidden = true; stat.textContent = ""; return; }
+      if (st.url) { setStat(st); refresh(); } else { urlIn.value = "https://"; stat.textContent = "Ready. Type a web address above."; urlIn.focus(); }
+      const d = await api("GET", "/api/browser/drive"); if (gen === inspGen) { renderDrive(d); if (d.active) { driveSection.open = true; startDrivePoll(); } }
+    } catch (e) { stat.textContent = e.message; }
+  })();
+}
+function refresh2Chat() { if (S.tab === "chat" && !S.global) runRender("chat", () => renderChat()); }
 async function inspFiles(body, pid, gen) {
   const atts = await api("GET", `/api/projects/${pid}/attachments`);
   if (gen !== inspGen) return;
