@@ -354,7 +354,12 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/projects")
     def project_create(self, sess):
         b = self.body()
-        self.json(self.app.svc.create_project(b.get("name", ""), b.get("root", ""), b.get("provider_default")), 201)
+        self.json(self.app.svc.create_project(b.get("name", ""), b.get("root", ""), b.get("provider_default"),
+                                              bool(b.get("create_missing"))), 201)
+
+    @route("GET", r"/api/fs/dirs")
+    def fs_dirs(self, sess):
+        self.json(self.app.svc.folder_suggestions((self.query.get("q") or [""])[0]))
 
     @route("GET", r"/api/projects/(\w+)")
     def project_get(self, sess, pid):

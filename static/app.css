@@ -1063,3 +1063,10 @@ dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
 .predtog { min-height: 0; padding: 0 4px; font-size: 12px; color: var(--text-3); }
 .predtog.off { opacity: .6; }
 .predtog:hover { color: var(--sky); }
+/* new project dialog */
+.np-modes { display: flex; flex-direction: column; gap: 6px; }
+.np-mode { display: flex; gap: 10px; align-items: flex-start; font-size: 13.5px; cursor: pointer; }
+.np-mode input { margin-top: 3px; }
+.np-preview { font-size: 13px; padding: 8px 10px; border-radius: var(--r-sm); background: var(--sunken); border: 1px solid var(--border); color: var(--text-2); overflow-wrap: anywhere; font-family: var(--mono); font-size: 12.5px; }
+.np-preview.ok { border-color: rgba(128, 225, 203, .45); color: var(--mint); }
+.np-preview.bad { border-color: rgba(255, 143, 143, .45); color: var(--red); }

@@ -1411,14 +1411,79 @@ async function newProject() {
   closeOverlay(false);
   const usable = usableRoutes();
   const disabled = Object.entries(S.routes).filter(([, r]) => r.state === "READY_METERED_DISABLED").map(([id]) => id);
-  const v = await dialog("New project", [
-    { name: "name", label: "Name", required: true },
-    { name: "root", label: "Project folder (absolute path)", required: true, placeholder: "C:\\Users\\you\\Projects\\my-project", help: "Agent tasks may write only inside this folder." },
-    { name: "provider_default", label: "Default provider", type: "select", options: usable.map(([id, r]) => ({ value: id, label: `${routeName(id)} · ${access(r.state)} (${r.state})` })),
-      help: disabled.length ? `${disabled.map(routeName).join(", ")} (separately billed API) needs a monthly operating limit in Evidence → Spend controls before it can be chosen.` : null },
-  ], "Create");
+  const v = await newProjectDialog(usable, disabled);
   if (!v) return;
-  await guard(async () => { const p = await api("POST", "/api/projects", v); await loadProjects(); openProject(p.id); });
+  await guard(async () => { const p = await api("POST", "/api/projects", v); try { localStorage.setItem("aesop.proj.base", v.base); } catch { /* */ } await loadProjects(); openProject(p.id); });
+}
+// Folder picking without typing blind: the location box auto-completes existing folders as you type, and the
+// preview says exactly which folder will be used or created ("create a folder named after the project" by default).
+const folderSlug = (name) => (name || "").replace(/[<>:"/\\|?*\x00-\x1f]/g, "-").replace(/\s+/g, " ").trim().replace(/[. ]+$/, "").slice(0, 80);
+function newProjectDialog(usable, disabled) {
+  const d = $("dlg");
+  if (d.open) { banner("Finish or cancel the open dialog first."); return Promise.resolve(null); }
+  return new Promise((resolve) => {
+    const f = $("dlgForm"); const opener = document.activeElement;
+    let lastBase = ""; try { lastBase = localStorage.getItem("aesop.proj.base") || ""; } catch { /* */ }
+    const name = h("input", { name: "name", required: true, autocomplete: "off", placeholder: "e.g. Bid Whist VR" });
+    const list = h("datalist", { id: "dirlist" });
+    const loc = h("input", { name: "base", list: "dirlist", autocomplete: "off", spellcheck: "false", value: lastBase, placeholder: "Start typing a folder… suggestions appear" });
+    const modeNew = h("input", { type: "radio", name: "mode", value: "new", checked: true });
+    const modeUse = h("input", { type: "radio", name: "mode", value: "use" });
+    const preview = h("div", { class: "np-preview", "aria-live": "polite" });
+    const prov = h("select", { name: "provider_default" }, ...usable.map(([id, r]) => h("option", { value: id }, `${routeName(id)} · ${access(r.state)}`)));
+    const okBtn = h("button", { class: "btn primary", value: "ok" }, "Create");
+    let info = { dirs: [], exists: false, parent_exists: false }, timer = null, seq = 0;
+    const finalPath = () => {
+      const base = loc.value.trim().replace(/[\\/]+$/, "");
+      if (!base) return "";
+      return modeUse.checked ? base : base + "\\" + (folderSlug(name.value) || "<project name>");
+    };
+    const paint = () => {
+      const base = loc.value.trim(); const fp = finalPath();
+      let text = "", cls = "";
+      if (!base) { text = "Pick or type a folder."; }
+      else if (modeUse.checked) { text = info.exists ? `Uses this existing folder: ${fp}` : `That folder does not exist yet: ${fp}`; cls = info.exists ? "ok" : "bad"; }
+      else {
+        const slug = folderSlug(name.value);
+        if (!slug) { text = `Will create a folder named after the project inside ${base}`; }
+        else if (info.exists) { text = `Will create: ${fp}`; cls = "ok"; }
+        else text = `Location must exist first: ${base}`; cls = info.exists ? "ok" : "bad";
+      }
+      preview.textContent = text; preview.className = "np-preview " + cls;
+      okBtn.textContent = modeUse.checked ? "Use folder" : "Create folder & project";
+      okBtn.disabled = !base || (modeUse.checked ? !info.exists : !info.exists);
+    };
+    const lookup = () => {
+      const q = loc.value; const my = ++seq;
+      api("GET", `/api/fs/dirs?q=${encodeURIComponent(q)}`).then((r) => {
+        if (my !== seq) return;
+        info = r; list.replaceChildren(...(r.dirs || []).map((p) => h("option", { value: p })));
+        paint();
+      }).catch(() => { info = { dirs: [], exists: false, parent_exists: false }; paint(); });
+    };
+    loc.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(lookup, 120); paint(); });
+    loc.addEventListener("focus", () => { if (!loc.value) lookup(); });
+    name.addEventListener("input", paint);
+    modeNew.addEventListener("change", paint); modeUse.addEventListener("change", paint);
+    f.replaceChildren(h("h2", { id: "dlgTitle" }, "New project"),
+      h("div", { class: "field" }, h("label", {}, "Name", name)),
+      h("div", { class: "field" }, h("label", {}, "Location", loc, list),
+        h("p", { class: "muted" }, "Type a few letters of a path and pick from the suggestions; existing project locations and your usual folders are offered first.")),
+      h("div", { class: "np-modes", role: "radiogroup", "aria-label": "Folder" },
+        h("label", { class: "np-mode" }, modeNew, h("span", {}, "Create a new folder named after the project inside the location")),
+        h("label", { class: "np-mode" }, modeUse, h("span", {}, "Use the location itself as the project folder (existing code)"))),
+      preview,
+      h("div", { class: "field" }, h("label", {}, "Default provider", prov),
+        disabled.length ? h("p", { class: "muted" }, `${disabled.map(routeName).join(", ")} (separately billed API) needs a monthly operating limit in Evidence → Spend controls before it can be chosen.`) : null),
+      h("div", { class: "actions" }, okBtn, h("button", { class: "btn ghost", value: "cancel", formnovalidate: true }, "Cancel")));
+    d.onclose = () => {
+      if (opener && opener.isConnected && opener.focus) opener.focus();
+      if (d.returnValue !== "ok") return resolve(null);
+      const base = loc.value.trim().replace(/[\\/]+$/, "");
+      resolve({ name: name.value.trim(), root: finalPath(), base, provider_default: prov.value, create_missing: !modeUse.checked });
+    };
+    d.returnValue = ""; d.showModal(); name.focus(); lookup(); paint();
+  });
 }
 async function projectSettings() {
   const p = S.project; if (!p) return;

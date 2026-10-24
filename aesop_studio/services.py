@@ -104,11 +104,26 @@ class Services:
         self.sup = sup
 
     # ---------- projects ----------
-    def create_project(self, name: str, root: str, provider: str | None = None) -> dict:
+    def create_project(self, name: str, root: str, provider: str | None = None, create_missing: bool = False) -> dict:
         name = (name or "").strip()[:120]
         if not name:
             raise ValueError("project name required")
-        resolved = validate_root(root)
+        made = None
+        rp = Path(root or "")
+        if create_missing and rp.is_absolute() and not rp.exists():
+            if not rp.parent.is_dir():
+                raise ValueError(f"the folder above it does not exist: {rp.parent}")
+            rp.mkdir()  # one level only; validated right after, removed again if refused
+            made = rp
+        try:
+            resolved = validate_root(root)
+        except Exception:
+            if made is not None:
+                try:
+                    made.rmdir()
+                except OSError:
+                    pass
+            raise
         pid = new_id("prj")
         now = time.time()
         self.s.x("INSERT INTO projects(id,name,root,provider_default,transfer_policy,created,updated) "
@@ -325,6 +340,51 @@ class Services:
                           "left off, keep its decisions and facts unless the user changes them, and don't re-introduce "
                           "yourself or repeat earlier answers.]")
         return out
+
+    def folder_suggestions(self, q: str) -> dict:
+        """Folder lookup for the New project dialog: existing directories matching what the owner has typed.
+
+        Empty text returns sensible starting places; otherwise the siblings of the typed partial path. Hidden,
+        system and credential folders are never listed. Listing is read-only and loopback-only."""
+        from .security import _CREDENTIAL_DIRS  # noqa: PLC0415
+        home = Path.home()
+        hidden = {d.lower() for d in _CREDENTIAL_DIRS} | {"appdata", "application data", "$recycle.bin",
+                                                         "system volume information", "windows", "program files",
+                                                         "program files (x86)", "programdata"}
+        q = (q or "").strip().strip('"')
+        if not q:
+            starters = [home / "Claude" / "Projects", home / "Projects", home / "source" / "repos", home / "Documents",
+                        home / "Desktop", home / "Downloads"]
+            roots = {Path(r["root"]).parent for r in self.s.q("SELECT root FROM projects WHERE archived=0 ORDER BY updated DESC LIMIT 20")}
+            out = []
+            for d in list(roots) + starters:
+                if d.is_dir() and str(d) not in out:
+                    out.append(str(d))
+            return {"dirs": out[:12], "exists": False, "parent_exists": False}
+        qp = Path(q)
+        if not qp.is_absolute():
+            return {"dirs": [], "exists": False, "parent_exists": False}
+        ends_sep = q.endswith(("\\", "/"))
+        parent, partial = (qp, "") if ends_sep or qp.is_dir() else (qp.parent, qp.name.lower())
+        if ends_sep or qp.is_dir():
+            partial = ""
+        dirs = []
+        try:
+            if parent.is_dir():
+                for child in sorted(parent.iterdir(), key=lambda c: c.name.lower()):
+                    n = child.name
+                    if not n.lower().startswith(partial) or n.startswith((".", "$", "~")) or n.lower() in hidden:
+                        continue
+                    try:
+                        if child.is_dir() and not child.is_symlink():
+                            dirs.append(str(child))
+                    except OSError:
+                        continue
+                    if len(dirs) >= 25:
+                        break
+        except OSError:
+            pass
+        return {"dirs": dirs, "exists": qp.is_dir(), "parent_exists": qp.parent.is_dir()}
 
     def typing_corpus(self, pid: str) -> list[str]:
         """The owner's recent messages in this project, newest first: the only source the composer's predictive

@@ -111,3 +111,36 @@ class TestTypingCorpus(TestPlan):
         texts = self.svc.typing_corpus(pid)
         self.assertEqual(texts, ["Fix the renege detection in scoring.py",
                                  "what do you think about the bidding engine design?"])
+
+
+class TestNewProjectFolders(TestPlan):
+    def test_create_missing_makes_one_level_and_refuses_bad_roots(self):
+        base = self.tmp / "work"
+        base.mkdir()
+        p = self.svc.create_project("Bid Whist VR", str(base / "Bid Whist VR"), "simulated", create_missing=True)
+        self.assertTrue((base / "Bid Whist VR").is_dir())
+        self.assertEqual(Path(p["root"]).name, "Bid Whist VR")
+        with self.assertRaises(ValueError):   # parent missing: nothing is created
+            self.svc.create_project("X", str(self.tmp / "nope" / "deeper"), "simulated", create_missing=True)
+        self.assertFalse((self.tmp / "nope").exists())
+        with self.assertRaises(Exception):    # a refused root is removed again after being made
+            self.svc.create_project("Home", str(Path.home() / ".ssh" / "zz-aesop-test"), "simulated", create_missing=True)
+        self.assertFalse((Path.home() / ".ssh" / "zz-aesop-test").exists())
+        with self.assertRaises(Exception):    # without the flag, a missing folder is still refused
+            self.svc.create_project("Y", str(base / "missing"), "simulated")
+
+    def test_folder_suggestions(self):
+        base = self.tmp / "look"
+        for n in ("alpha", "alps", "beta", ".hidden", "$sys"):
+            (base / n).mkdir(parents=True)
+        (base / "alpha.txt").write_text("not a dir", encoding="utf-8")
+        r = self.svc.folder_suggestions(str(base / "al"))
+        self.assertEqual([Path(x).name for x in r["dirs"]], ["alpha", "alps"])
+        self.assertFalse(r["exists"]); self.assertTrue(r["parent_exists"])
+        r = self.svc.folder_suggestions(str(base) + "\\")
+        self.assertEqual([Path(x).name for x in r["dirs"]], ["alpha", "alps", "beta"])  # hidden/system skipped
+        self.assertTrue(self.svc.folder_suggestions(str(base / "alpha"))["exists"])
+        self.assertEqual(self.svc.folder_suggestions("relative/path")["dirs"], [])
+        starters = self.svc.folder_suggestions("")["dirs"]
+        self.assertTrue(all(Path(x).is_dir() for x in starters))
+        self.assertIn(str(self.tmp), starters)  # parent of this test's own project is offered first
