@@ -384,6 +384,14 @@ class Supervisor:
                 msg = redact(f"{type(e).__name__}: {e}")[:400]
                 # an HTTP error reply means the call was refused before any work; a network failure is unknown
                 billed = 0 if (not metered or str(e).startswith("HTTP 4")) else None
+                if str(e).startswith(("HTTP 401", "HTTP 403")):  # the key itself was refused: stop offering the route
+                    research_routes.mark_rejected(route_id)
+                    try:
+                        providers.refresh(self.store)
+                    except Exception:  # noqa: BLE001 - the refresh is a courtesy; the failure is still recorded
+                        pass
+                    msg = (f"{providers.display_name(route_id)} rejected the API key (invalid or inactive). "
+                           f"{research_routes.key_problem(route_id) or ''} Nothing was charged.").strip()
                 return self._end(tid, "FAILED" if billed == 0 else "EFFECT_UNKNOWN", lid, billed, error=msg)
             text = out["text"][:MAX_OUTPUT_BYTES]
             Path(out_path).parent.mkdir(parents=True, exist_ok=True)

@@ -26,8 +26,37 @@ PPLX_PRICE_NOTE = "Perplexity Sonar: $1/M tokens in+out + per-request fee (docs.
 PPLX_MAX_TOKENS = 1200
 
 
+PLACEHOLDER_RE = re.compile(r"your[-_ ]?(new[-_ ]?)?key|key[-_ ]?here|<key>|xxxx|example", re.I)
+_REJECTED: dict[str, str] = {}  # route -> fingerprint of the key the provider refused (until the key changes)
+
+
 def key(route_id: str) -> str:
-    return researcher._key({"firecrawl": "FIRECRAWL_API_KEY", "perplexity": "PERPLEXITY_API_KEY"}[route_id])
+    v = researcher._key({"firecrawl": "FIRECRAWL_API_KEY", "perplexity": "PERPLEXITY_API_KEY"}[route_id]).strip().strip("'\"")
+    return "" if PLACEHOLDER_RE.search(v) else v
+
+
+def _fp(v: str) -> str:
+    import hashlib
+    return hashlib.sha256(v.encode("utf-8")).hexdigest()[:16]
+
+
+def key_problem(route_id: str) -> str | None:
+    """Why the key cannot be used, in plain words (never the value)."""
+    raw = researcher._key({"firecrawl": "FIRECRAWL_API_KEY", "perplexity": "PERPLEXITY_API_KEY"}[route_id]).strip()
+    name = "FIRECRAWL_API_KEY" if route_id == "firecrawl" else "PERPLEXITY_API_KEY"
+    if not raw:
+        return f"Set {name} in your Windows user environment to enable"
+    if PLACEHOLDER_RE.search(raw):
+        return f"{name} holds the example text from the instructions, not a real key; set it again with your key"
+    if _REJECTED.get(route_id) == _fp(key(route_id)):
+        return f"The provider rejected this key (invalid or inactive); set a valid {name}"
+    return None
+
+
+def mark_rejected(route_id: str) -> None:
+    k = key(route_id)
+    if k:
+        _REJECTED[route_id] = _fp(k)
 
 
 def _clean_page(md: str) -> str:
@@ -107,7 +136,7 @@ def perplexity_messages(history: list[dict], question: str) -> list[dict]:
 
 
 def status() -> dict:
-    return {rid: bool(key(rid)) for rid in ("firecrawl", "perplexity")}
+    return {rid: key_problem(rid) is None for rid in ("firecrawl", "perplexity")}
 
 
 def run(route_id: str, payload: dict) -> dict:

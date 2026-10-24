@@ -329,7 +329,7 @@ def probe(store=None) -> dict[str, dict]:
              auth_status="api_key" if have["firecrawl"] else "missing", last_verified_at=now,
              incremental_cost_status="Firecrawl plan credits (no $ per call)",
              evidence=("FIRECRAWL_API_KEY present (value never shown)" if have["firecrawl"]
-                       else "Set FIRECRAWL_API_KEY in your Windows user environment to enable"))
+                       else research_routes.key_problem("firecrawl") or "Set FIRECRAWL_API_KEY to enable"))
     routes["firecrawl"] = r
     r = _base("perplexity", "research API", "api.perplexity.ai", ["chat"], "api_key", "metered",
               "Answers with citations (Sonar), using the recent conversation. Metered per call: each call reserves "
@@ -338,7 +338,7 @@ def probe(store=None) -> dict[str, dict]:
              auth_status="api_key" if have["perplexity"] else "missing", last_verified_at=now,
              incremental_cost_status=f"metered; {research_routes.PPLX_PRICE_NOTE}",
              evidence=("PERPLEXITY_API_KEY present (value never shown)" if have["perplexity"]
-                       else "Set PERPLEXITY_API_KEY in your Windows user environment to enable"))
+                       else research_routes.key_problem("perplexity") or "Set PERPLEXITY_API_KEY to enable"))
     routes["perplexity"] = r
 
     if os.environ.get("AESOP_SIMULATED_ROUTE") == "1":
