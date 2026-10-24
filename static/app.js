@@ -1871,6 +1871,70 @@ function autosize(ta) {
 function ssGet(k) { try { return sessionStorage.getItem(k); } catch { return null; } }
 function ssSet(k, v) { try { if (v) sessionStorage.setItem(k, v); else sessionStorage.removeItem(k); } catch { /* optional */ } }
 const chatChips = {}; // cid -> Set of attachment ids chosen in the composer
+// ---------- conservative predictive text (owner request): completes only from your own past messages ----------
+const predictOn = () => { try { return localStorage.getItem("aesop.predict") !== "0"; } catch { return true; } };
+function predictFrom(corpus, text) {
+  if (!text || text.length < 5) return "";
+  const t = text.toLowerCase();
+  for (const c of corpus) {  // whole-message continuation: strongest, most conservative match
+    if (c.length > text.length + 2 && c.toLowerCase().startsWith(t)) return c.slice(text.length);
+  }
+  const tail = text.slice(-30).toLowerCase();
+  if (tail.trim().length < 8 || !/\S\s+\S/.test(tail)) return "";
+  for (const c of corpus) {  // mid-sentence continuation of a phrase you have written before
+    const i = c.toLowerCase().indexOf(tail);
+    if (i < 0 || i + tail.length >= c.length) continue;
+    let sug = c.slice(i + tail.length, i + tail.length + 80);
+    const stop = sug.search(/[.!?\n]/);
+    if (stop >= 0) sug = sug.slice(0, stop + 1);
+    if (sug.length > 60) { const cut = sug.slice(0, 60).lastIndexOf(" "); sug = cut > 10 ? sug.slice(0, cut) : sug.slice(0, 60); }
+    if (sug.trim().length >= 3) return sug;
+  }
+  return "";
+}
+function attachPredict(ta, pid) {
+  const wrap = h("div", { class: "predwrap" });
+  ta.replaceWith(wrap); wrap.append(ta);
+  const typed = h("span", { class: "pt-typed" }); const ghost = h("span", { class: "pt-ghost" });
+  const mirror = h("div", { class: "pred-mirror", "aria-hidden": "true" }, typed, ghost);
+  wrap.prepend(mirror);
+  const hint = h("span", { class: "pred-hint", "aria-hidden": "true", hidden: true }, h("kbd", {}, "Tab"));
+  wrap.append(hint);
+  let corpus = [], sug = "", dismissed = "";
+  api("GET", `/api/projects/${pid}/typing-corpus`).then((r) => { corpus = r.texts || []; }).catch(() => {});
+  const sync = () => {
+    const cs = getComputedStyle(ta);
+    for (const k of ["font", "lineHeight", "letterSpacing", "padding"]) mirror.style[k] = cs[k];
+    mirror.scrollTop = ta.scrollTop;
+  };
+  const clear = () => { sug = ""; ghost.textContent = ""; typed.textContent = ""; hint.hidden = true; };
+  const compute = () => {
+    if (!predictOn() || document.activeElement !== ta) return clear();
+    const v = ta.value;
+    if (!v || v === dismissed || ta.selectionStart !== v.length || ta.selectionEnd !== v.length) return clear();
+    sug = predictFrom(corpus, v);
+    if (!sug) return clear();
+    typed.textContent = v; ghost.textContent = sug; hint.hidden = false; sync();
+  };
+  ta.addEventListener("input", () => { if (ta.value !== dismissed) dismissed = ""; compute(); });
+  ta.addEventListener("scroll", () => { mirror.scrollTop = ta.scrollTop; });
+  ta.addEventListener("click", compute);
+  ta.addEventListener("keyup", (e) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) compute(); });
+  ta.addEventListener("blur", clear);
+  ta.addEventListener("focus", compute);
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Tab" && sug && !e.shiftKey && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      ta.value += sug; clear();
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      ta.selectionStart = ta.selectionEnd = ta.value.length;
+    } else if (e.key === "Escape" && sug) {
+      e.preventDefault(); e.stopPropagation();
+      dismissed = ta.value; clear();
+    }
+  });
+  return { el: wrap, refreshCorpus: (texts) => { corpus = texts || corpus; } };
+}
 // ---------- photos, files and folders in chat ----------
 // Photos are sized for the provider that will read them: the most pixels it can actually use, no more (beyond
 // that it shrinks the image itself, so extra pixels only cost upload time). Claude (Claude Code): long edge
@@ -2023,6 +2087,7 @@ async function renderChat() {
   const ta = h("textarea", { "aria-label": "Message", placeholder: "Ask something about this project…" });
   ta.value = ssGet(draftKey) || "";
   ta.addEventListener("input", () => ssSet(draftKey, ta.value));
+  const predict = attachPredict(ta, pid);
   const chosen = () => [...chips].filter((id) => atts.some((a) => a.id === id));
   const photos = chatPhotos[cid] || (chatPhotos[cid] = []);
   const files = chatFiles[cid] || (chatFiles[cid] = []);
@@ -2205,6 +2270,7 @@ async function renderChat() {
       for (const x of files.filter((y) => fids.includes(y.id) || y.state === "unreadable" || y.state === "error")) files.splice(files.indexOf(x), 1);
       try { atts = (await api("GET", `/api/projects/${pid}/attachments`)).filter((x) => x.extract_status === "extracted"); } catch { /* list refreshes on next view */ }
       chips.clear(); drawTray(); drawProjectPick();
+      api("GET", `/api/projects/${pid}/typing-corpus`).then((r) => predict.refreshCorpus(r.texts)).catch(() => {});
       banner("Saved locally and submitted to provider.", "ok");
       if (gen === S.viewGen) { S.msgSig = ""; drawMsgs(); }
     } catch (e) {
@@ -2265,9 +2331,13 @@ async function renderChat() {
     lastProv = last ? last.provider : null; showHandoff();
   }
   provSel.addEventListener("change", showHandoff);
-  const composer = h("div", { class: "composer" }, ta, tray, trayNote, attachRow,
+  const composer = h("div", { class: "composer" }, predict.el, tray, trayNote, attachRow,
     h("div", { class: "cfoot" },
-      h("div", { class: "row chat-prow" }, provSel, h("span", { class: "chip", id: "composerRoute" }), handoff, h("span", { class: "hint" }, h("kbd", {}, "Ctrl"), h("kbd", {}, "Enter"), " send")),
+      h("div", { class: "row chat-prow" }, provSel, h("span", { class: "chip", id: "composerRoute" }), handoff, h("span", { class: "hint" }, h("kbd", {}, "Ctrl"), h("kbd", {}, "Enter"), " send"),
+        (() => { const b = h("button", { type: "button", class: "linkish predtog", title: "Ghost-text suggestions from your own past messages (Tab accepts, Esc dismisses). Nothing is sent anywhere." });
+          const paint = () => { b.textContent = predictOn() ? "✦ predict on" : "predict off"; b.classList.toggle("off", !predictOn()); };
+          b.onclick = () => { try { localStorage.setItem("aesop.predict", predictOn() ? "0" : "1"); } catch { /* */ } paint(); ta.focus(); };
+          paint(); return b; })()),
       h("div", { class: "row" }, btn("Preview context", preview, "ghost", "eye"), sendBtn)));
   root.append(msgsEl, h("div", { class: "composer-dock" }, composer));
   // drop photos, files or whole folders anywhere on the chat

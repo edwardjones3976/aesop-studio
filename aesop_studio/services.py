@@ -326,6 +326,22 @@ class Services:
                           "yourself or repeat earlier answers.]")
         return out
 
+    def typing_corpus(self, pid: str) -> list[str]:
+        """The owner's recent messages in this project, newest first: the only source the composer's predictive
+        text draws from (local and instant; no provider ever sees a keystroke)."""
+        self.project(pid)
+        rows = self.s.q("SELECT m.content FROM messages m JOIN conversations c ON c.id=m.conversation_id "
+                        "WHERE c.project_id=? AND m.role='user' AND m.status='saved' "
+                        "ORDER BY m.created DESC LIMIT 400", (pid,))
+        out, seen = [], set()
+        for r in rows:
+            t = " ".join((r["content"] or "").split())[:500]
+            k = t.lower()
+            if len(t) >= 8 and k not in seen:
+                seen.add(k)
+                out.append(t)
+        return out
+
     def build_context(self, pid: str, cid: str | None, text: str, attachment_ids: list[str], provider: str,
                       before: float | None = None) -> str:
         """Exactly what will be sent to the provider. Shown to the owner before sending."""

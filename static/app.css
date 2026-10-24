@@ -1053,3 +1053,13 @@ dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
 .pitem .fdel { opacity: 0; }
 .pitem:hover .fdel, .pitem:focus-within .fdel { opacity: 1; }
 .plan-act h4 { margin: 10px 0 6px; font-size: 13px; color: var(--text-2); }
+/* predictive ghost text in the composer */
+.predwrap { position: relative; display: flex; flex-direction: column; min-width: 0; }
+.predwrap textarea { position: relative; z-index: 1; background: none; }
+.pred-mirror { position: absolute; inset: 0; z-index: 0; overflow: hidden; white-space: pre-wrap; overflow-wrap: break-word; word-break: break-word; pointer-events: none; }
+.pt-typed { color: transparent; }
+.pt-ghost { color: var(--text-3); opacity: .85; }
+.pred-hint { position: absolute; right: 6px; bottom: 6px; z-index: 2; pointer-events: none; opacity: .75; }
+.predtog { min-height: 0; padding: 0 4px; font-size: 12px; color: var(--text-3); }
+.predtog.off { opacity: .6; }
+.predtog:hover { color: var(--sky); }

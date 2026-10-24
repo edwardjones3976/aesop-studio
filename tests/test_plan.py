@@ -94,3 +94,20 @@ class TestPlan(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTypingCorpus(TestPlan):
+    def test_corpus_is_owner_messages_only_dedup_newest_first(self):
+        pid = self.p["id"]
+        c = self.svc.new_conversation(pid)
+        rows = [("u1", "user", "What do you think about the bidding engine design?", "saved", 1),
+                ("a1", "assistant", "An answer that must never be suggested back", "generated", 2),
+                ("u2", "user", "what do you think about the bidding engine design?", "saved", 3),  # dup, case-insens
+                ("u3", "user", "Fix the renege detection in scoring.py", "saved", 4),
+                ("u4", "user", "short", "saved", 5)]  # under 8 chars: dropped
+        for mid, role, content, status, t in rows:
+            self.store.x("INSERT INTO messages(id,conversation_id,role,content,status,provider,created,meta) "
+                         "VALUES(?,?,?,?,?,NULL,?, '{}')", (mid, c["id"], role, content, status, t))
+        texts = self.svc.typing_corpus(pid)
+        self.assertEqual(texts, ["Fix the renege detection in scoring.py",
+                                 "what do you think about the bidding engine design?"])

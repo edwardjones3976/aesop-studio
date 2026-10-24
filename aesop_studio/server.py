@@ -547,6 +547,10 @@ class Handler(BaseHTTPRequestHandler):
         team.watch(self.app.store, self.app.sup, self.app.svc, tid)
         self.json(self.app.sup.get(tid), 202)
 
+    @route("GET", r"/api/projects/(\w+)/typing-corpus")
+    def typing_corpus(self, sess, pid):
+        self.json({"texts": self.app.svc.typing_corpus(pid)})
+
     @route("GET", r"/api/projects/(\w+)/plan")
     def plan_list(self, sess, pid):
         self.app.svc.project(pid)
