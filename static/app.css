@@ -940,3 +940,19 @@ dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
 .projrow { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 8px; border-radius: var(--r-sm); font-size: 13px; cursor: pointer; color: var(--text); }
 .projrow:hover { background: var(--panel); }
 .projrow .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* build + review */
+.rv-row { align-items: center; gap: 8px 10px; flex-wrap: wrap; }
+.rv-row .faint { font-size: 12.5px; flex: 1 1 260px; }
+.rvbox { margin-top: 12px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--r-panel); background: var(--sunken); display: flex; flex-direction: column; gap: 10px; }
+.rvbox:empty { display: none; }
+.rvhead { display: flex; align-items: center; gap: 8px; }
+.rvhead h4 { margin: 0; font-size: 15px; }
+.rvhead .ico { color: var(--sky); }
+.rvverdict { display: flex; align-items: center; gap: 10px; }
+.pill.warn { background: var(--amber-bg); color: var(--amber); }
+.rvissues { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.rvissue label { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--panel); font-size: 13.5px; line-height: 1.5; cursor: pointer; }
+.rvsev { flex: none; padding: 0 7px; border-radius: 99px; font-size: 11px; font-weight: 700; text-transform: uppercase; background: var(--raised); color: var(--text-2); }
+.sev-high .rvsev { background: var(--red-bg); color: var(--red); }
+.sev-medium .rvsev { background: var(--amber-bg); color: var(--amber); }
+.rvbox textarea { min-height: 52px; font: inherit; font-size: 13.5px; }

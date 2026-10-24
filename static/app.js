@@ -1,4 +1,8 @@
 "use strict";
+// The DOM prints a skipped child (null/undefined/false) as text ("null"); drop them everywhere, as h() already does.
+for (const P of [Element.prototype, DocumentFragment.prototype]) for (const m of ["replaceChildren", "append", "prepend"]) {
+  const orig = P[m]; P[m] = function (...kids) { return orig.apply(this, kids.filter((k) => k !== null && k !== undefined && k !== false)); };
+}
 // All untrusted text is rendered with textContent via h(); never assign raw HTML.
 const S = { csrf: "", routes: {}, projects: [], project: null, tab: "chat", conv: null, convTitle: "", global: null, poll: null,
   streams: {}, streamUpd: {}, streamConv: null, chatGen: 0, msgSig: "", taskSel: null, preview: null,
@@ -2124,6 +2128,19 @@ async function renderAgent(selected) {
   try { ack = await api("GET", `/api/projects/${pid}/agent-ack`); } catch (e) { ack = { agent_ack: false, statement: `Could not load the agent acknowledgement: ${e.message}` }; }
   if (gen !== S.viewGen) return;
   let ackOk = !!ack.agent_ack;
+  let rv = { reviewers: [], builder: S.project.provider_default, max_rounds: 3 };
+  try { rv = await api("GET", `/api/projects/${pid}/reviewers`); } catch { /* reviewing stays optional */ }
+  if (gen !== S.viewGen) return;
+  const rvKey = "aesop.build.reviewer." + pid;
+  let rvPick = null; try { rvPick = localStorage.getItem(rvKey); } catch { /* optional */ }
+  if (rvPick === null) rvPick = rv.reviewers.find((r) => r === "claude" || r === "codex") || rv.reviewers[0] || "";
+  if (rvPick && !rv.reviewers.includes(rvPick)) rvPick = "";
+  const rvSel = h("select", { id: "buildReviewer", class: "chat-prov", "aria-describedby": "buildReviewerHelp",
+    onchange: (e) => { try { localStorage.setItem(rvKey, e.target.value); } catch { /* optional */ } } },
+    h("option", { value: "" }, "No review"),
+    ...rv.reviewers.map((r) => h("option", { value: r, selected: r === rvPick }, `${routeName(r)} reviews it`)));
+  const rvRow = h("div", { class: "row rv-row" }, h("label", { for: "buildReviewer", class: "faint" }, "Second opinion"), rvSel,
+    h("span", { class: "faint", id: "buildReviewerHelp" }, `When the build finishes, another AI reviews the change (read-only). Fixes go back only when you say so; at most ${rv.max_rounds} rounds.`));
   const blockNote = h("div");
   const draftKey = "aesop.draft.build." + pid;
   const ta = h("textarea", { "aria-label": "Agent task", placeholder: "Describe a bounded coding task to run inside the project folder…" });
@@ -2135,7 +2152,7 @@ async function renderAgent(selected) {
     const raw = ta.value; if (!raw.trim()) { ta.focus(); return; }
     starting = true; startBtn.disabled = true; startBtn.setAttribute("aria-busy", "true");
     try {
-      const t = await api("POST", `/api/projects/${pid}/tasks`, { prompt: raw });
+      const t = await api("POST", `/api/projects/${pid}/tasks`, { prompt: raw, reviewer: rvSel.value || null });
       if (ta.value === raw) ssSet(draftKey, "");
       banner(`Task ${t.id} ${t.state}.`, t.state === "BLOCKED_OWNER" ? "bad" : "ok");
       if (t.state === "BLOCKED_OWNER" && /awaiting repair review/i.test(t.error || "")) {
@@ -2169,7 +2186,7 @@ async function renderAgent(selected) {
   const pickTask = (id) => {
     S.taskSel = id; setActivity(`Task ${id}`);
     listEl.querySelectorAll(".task").forEach((b) => b.setAttribute("aria-current", b.dataset.id === id ? "true" : "false"));
-    showTask(id, detail);
+    showTask(id, detail, (other) => { if (S.project && S.project.id === pid) { S.taskSel = other; refresh("agent", other); } }, rv);
     if (inspectorVisible() && !["terminal", "changes", "logs"].includes(S.itab)) setItab("terminal");
     if (inspectorVisible()) renderInspector();
   };
@@ -2179,7 +2196,7 @@ async function renderAgent(selected) {
       h("span", { class: "tm" }, statePill(t.state), h("span", {}, routeName(t.provider)), h("span", {}, fmtClock(t.started || t.created)))))));
   $("view").replaceChildren(
     h("div", { class: "composer" }, h("div", { class: "card-head" }, h("div", { class: "ttl" }, icon("terminal"), h("h2", {}, "Run an agent task")), h("span", { id: "buildRouteTag" })),
-      h("p", { class: "muted", id: "buildRouteDesc" }), ackBox, ta, blockNote,
+      h("p", { class: "muted", id: "buildRouteDesc" }), ackBox, ta, rv.reviewers.length ? rvRow : null, blockNote,
       h("div", { class: "cfoot" }, h("span", { class: "hint" }, h("kbd", {}, "Ctrl"), h("kbd", {}, "Enter"), " start"), startBtn)),
     tasks.length ? h("div", { class: "grid2" }, section("Recent tasks", `${tasks.length} shown`, listEl), detail)
       : empty("terminal", "No agent tasks yet", "Describe a bounded task above. Each run records its state, output, exit code and changed files."));
@@ -2192,7 +2209,7 @@ async function renderAgent(selected) {
   }
 }
 // Built once and updated in place, so polling never destroys the control that has keyboard focus.
-function showTask(tid, el) {
+function showTask(tid, el, openTask, rv) {
   const title = h("h3", {}, `Task ${tid}`); const pill = h("span");
   const cancelBtn = abtn("Cancel", () => guard(async () => { const c = await api("POST", `/api/tasks/${tid}/cancel`); banner(c.note, ""); }), "danger sm", "stop");
   const saveBtn = abtn("Save result", () => guard(async () => { const a = await api("POST", `/api/tasks/${tid}/save`); S.preview = a && a.id; banner("Task result saved to project.", "ok"); }), "sm", "bookmark");
@@ -2205,8 +2222,10 @@ function showTask(tid, el) {
   const views = h("div", { class: "row" }, h("button", { type: "button", class: "linkish", onclick: (e) => openInspector("terminal", e.currentTarget) }, icon("terminal", "sm"), "View output"),
     h("button", { type: "button", class: "linkish", onclick: (e) => openInspector("changes", e.currentTarget) }, icon("diff", "sm"), "View changes"));
   facts.hidden = true; chLine.hidden = true;
+  const review = h("section", { class: "rvbox", "aria-label": "Review", "aria-live": "polite" });
   el.replaceChildren(h("div", { class: "card" }, h("div", { class: "card-head" }, h("div", { class: "ttl" }, title, pill), h("div", { class: "row" }, cancelBtn, saveBtn)),
-    h("div", { class: "section" }, loading, facts, errBox, chLine, views)));
+    h("div", { class: "section" }, loading, facts, errBox, chLine, views)), review);
+  reviewPanel(tid, review, openTask, rv);
   let wasDone = null; let errSig = null; let pillState = null;
   const upd = () => {
     const mine = W.tid === tid; const t = mine ? W.task : null;
@@ -2229,6 +2248,83 @@ function showTask(tid, el) {
   };
   W.hooks.build = (c) => { if (S.tab === "agent" && !S.global && el.isConnected) upd(c); };
   watchTask(tid); upd();
+}
+
+// ---------- build + review (two AIs working together; the owner decides every next step) ----------
+const RV_LABEL = { approve: ["Approved", "ok"], changes: ["Changes requested", "warn"], unclear: ["Review not structured", "info"] };
+function reviewPanel(tid, box, openTask, rv) {
+  let timer = null; let sig = "";
+  const stop = () => { clearTimeout(timer); timer = null; };
+  const tick = async () => {
+    if (!box.isConnected) return stop();
+    let r; try { r = await api("GET", `/api/tasks/${tid}/review`); } catch { timer = setTimeout(tick, 5000); return; }
+    let t = null; try { t = (await api("GET", `/api/tasks/${tid}`)).task; } catch { /* shown without task state */ }
+    const s2 = JSON.stringify([r, t && t.state]);
+    if (s2 !== sig) { sig = s2; draw(r, t); }
+    if (["WAITING_FOR_BUILD", "REVIEWING"].includes(r.state)) timer = setTimeout(tick, 3000);
+  };
+  const reviewerPick = (cur) => {
+    const sel = h("select", { class: "chat-prov", "aria-label": "Reviewer" }, ...((rv && rv.reviewers) || []).map((x) => h("option", { value: x, selected: x === cur }, routeName(x))));
+    return sel;
+  };
+  const again = (sel, label) => abtn(label || "Review", async () => {
+    try { await api("POST", `/api/tasks/${tid}/review`, { reviewer: sel.value }); banner(`${routeName(sel.value)} will review this change.`, "ok"); sig = ""; tick(); }
+    catch (e) { banner(e.message, "bad"); }
+  }, "sm", "eye");
+  const put = (...kids) => box.replaceChildren(...kids.filter(Boolean)); // DOM would print a skipped piece as "null"
+  const draw = (r, t) => {
+    const who = r.reviewer ? routeName(r.reviewer) : "The reviewer";
+    const head = h("div", { class: "rvhead" }, icon("users"), h("h4", {}, "Second opinion"), r.round > 1 ? h("span", { class: "faint" }, `round ${r.round} of ${(rv && rv.max_rounds) || 3}`) : null);
+    const done = t && ["COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED", "BLOCKED_OWNER", "EFFECT_UNKNOWN"].includes(t.state);
+    if (r.state === "NONE" || r.state === "NO_REVIEW") {
+      if (!(t && t.state === "COMPLETED") || !(rv && rv.reviewers.length)) { box.replaceChildren(); box.hidden = true; return; }
+      const sel = reviewerPick(rv.reviewers[0]);
+      box.hidden = false; put(head, h("p", { class: "muted" }, "No review yet. Ask another AI to check this change (read-only):"), h("div", { class: "row" }, sel, again(sel)));
+      return;
+    }
+    box.hidden = false;
+    if (r.state === "WAITING_FOR_BUILD") { put(head, h("p", { class: "muted" }, done ? `${who} is about to review…` : `${who} reviews the change as soon as the build finishes.`)); return; }
+    if (r.state === "REVIEWING") { put(head, h("p", { class: "muted" }, `${who} is reviewing the change (${r.change_kind || "changes"}, ${Number(r.change_chars || 0).toLocaleString()} chars)…`)); return; }
+    if (r.state !== "DONE") {
+      const sel = reviewerPick(r.reviewer);
+      const fix = r.state === "BLOCKED" ? abtn(`Allow files to ${who}`, async () => {
+        const pol = { ...(S.project.transfer_policy || {}), [r.reviewer]: true };
+        const up = await api("PATCH", `/api/projects/${S.project.id}`, { transfer_policy: pol });
+        S.project = { ...S.project, ...up, transfer_policy: up.transfer_policy || pol };
+        await api("POST", `/api/tasks/${tid}/review`, { reviewer: r.reviewer }); sig = ""; tick();
+      }, "sm") : null;
+      put(head, h("div", { class: "note " + (r.state === "SKIPPED" ? "" : "bad") }, icon(r.state === "SKIPPED" ? "info" : "alert"), h("span", {}, r.note || r.state.toLowerCase())),
+        h("div", { class: "row" }, fix, r.state !== "SKIPPED" ? sel : null, r.state !== "SKIPPED" ? again(sel, "Review again") : null));
+      return;
+    }
+    const [lbl, tone_] = RV_LABEL[r.verdict] || RV_LABEL.unclear;
+    const checks = (r.issues || []).map((it, n) => {
+      const cb = h("input", { type: "checkbox", id: `rvi-${tid}-${n}` }); cb.checked = it.severity !== "low";
+      return { cb, li: h("li", { class: "rvissue sev-" + it.severity }, h("label", { for: `rvi-${tid}-${n}` }, cb,
+        h("span", { class: "rvsev" }, it.severity),
+        h("span", {}, h("strong", {}, `${it.file || "general"}${it.line ? ":" + it.line : ""} `), it.problem, it.fix ? h("span", { class: "faint" }, ` — fix: ${it.fix}`) : null))) };
+    });
+    const note = h("textarea", { rows: "2", placeholder: "Anything to add for the builder (optional)", "aria-label": "Note for the builder" });
+    const builder = t ? routeName(t.provider) : "the builder";
+    const last = r.round >= ((rv && rv.max_rounds) || 3);
+    const sendBtn = abtn(`Send fixes to ${builder}`, async () => {
+      const picked = checks.map((c, n) => (c.cb.checked ? n : -1)).filter((n) => n >= 0);
+      try { const out = await api("POST", `/api/tasks/${tid}/fixes`, { issues: picked, note: note.value });
+        banner(`Sent ${picked.length} issue${picked.length === 1 ? "" : "s"} to ${builder} as task ${out.task.id}.`, "ok"); openTask(out.task.id); }
+      catch (e) { banner(e.message, "bad"); }
+    }, "primary sm", "send");
+    const acceptBtn = abtn(r.accepted_at ? "Accepted" : "Accept", async () => { await api("POST", `/api/tasks/${tid}/accept`); sig = ""; tick(); }, "sm", "check");
+    acceptBtn.disabled = !!r.accepted_at;
+    put(head,
+      h("div", { class: "rvverdict" }, h("span", { class: "pill " + tone_ }, lbl), h("span", { class: "faint" }, `by ${who}`)),
+      r.summary ? h("p", {}, r.summary) : null,
+      checks.length ? h("ul", { class: "rvissues" }, ...checks.map((c) => c.li)) : h("p", { class: "muted" }, "No issues listed."),
+      r.fix_task ? h("p", {}, h("button", { type: "button", class: "linkish", onclick: () => openTask(r.fix_task) }, `Fixes sent as task ${r.fix_task} →`)) : null,
+      !r.fix_task && !last && r.verdict !== "approve" ? note : null,
+      h("div", { class: "row" }, !r.fix_task && !last && (checks.length || r.verdict !== "approve") ? sendBtn : null, acceptBtn,
+        last && !r.fix_task ? h("span", { class: "faint" }, "Last automatic round reached: review it yourself before going on.") : null));
+  };
+  tick();
 }
 
 // ---------- model-assisted proposals (derivations) ----------

@@ -15,7 +15,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backup, deletion, derive, evidence, followup, lanes, ledger, providers, researcher, roundtable, roundtable_compare
+from . import backup, deletion, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare
 from .security import MAX_UPLOAD_BYTES, ScopeError, redact
 from .services import Conflict, Services
 from .sessions import SESSION_DAYS, Sessions
@@ -66,6 +66,7 @@ class App:
         from .roundtable_live import Broker
         self.broker = Broker(self.store, self.sup)
         self.reconciled += self.broker.reconcile()
+        team.resume(self.store, self.sup, self.svc)
         providers.refresh(self.store)
         # The mission permit is the owner's switch (Evidence -> Spend controls). It survives restarts (owner request
         # 2026-10-23: "switch all API routes to on"); a fresh install starts off, and the $165 mission ceiling
@@ -455,9 +456,44 @@ class Handler(BaseHTTPRequestHandler):
             raise Conflict(f"this project uses {p['provider_default']}; confirm switching to {prov} explicitly")
         if not (b.get("prompt") or "").strip():
             raise ValueError("task prompt is empty")
+        reviewer = b.get("reviewer") or None
+        if reviewer and reviewer not in team.reviewers(self.app.store, prov):
+            raise ValueError(f"{reviewer} can't review right now; pick another reviewer or none")
         tid = self.app.sup.create(p, prov, b["prompt"].strip(), mode="agent",
                                   timeout=max(30, min(3600, int(b.get("timeout", 900)))))
+        if reviewer:
+            team.plan(self.app.store, tid, reviewer)
+            team.watch(self.app.store, self.app.sup, self.app.svc, tid)
         self.json(self.app.sup.get(tid), 202)
+
+    @route("GET", r"/api/projects/(\w+)/reviewers")
+    def task_reviewers(self, sess, pid):
+        p = self.app.svc.project(pid)
+        self.json({"builder": p["provider_default"], "reviewers": team.reviewers(self.app.store, p["provider_default"]),
+                   "max_rounds": team.MAX_ROUNDS})
+
+    @route("GET", r"/api/tasks/(\w+)/review")
+    def task_review(self, sess, tid):
+        self._task(tid)
+        self.json(team.get(self.app.store, tid) or {"state": "NONE"})
+
+    @route("POST", r"/api/tasks/(\w+)/review")
+    def task_review_again(self, sess, tid):
+        self._task(tid)
+        self.json(team.retry(self.app.store, self.app.sup, self.app.svc, tid, self.body().get("reviewer")), 202)
+
+    @route("POST", r"/api/tasks/(\w+)/fixes")
+    def task_fixes(self, sess, tid):
+        self._task(tid)
+        b = self.body()
+        picked = b.get("issues")
+        self.json(team.send_fixes(self.app.store, self.app.sup, self.app.svc, tid,
+                                  [int(x) for x in picked] if isinstance(picked, list) else None, b.get("note") or ""), 202)
+
+    @route("POST", r"/api/tasks/(\w+)/accept")
+    def task_accept(self, sess, tid):
+        self._task(tid)
+        self.json(team.accept(self.app.store, tid))
 
     def _task(self, tid):
         t = self.app.sup.get(tid)
