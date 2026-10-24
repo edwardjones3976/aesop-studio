@@ -378,11 +378,16 @@ class Broker:
         self._set_speaker(rt_id, s, "researcher", state="working", since=time.time(), query=query[:120])
 
         def go():
+            sr = researcher.study_request(query)
             try:
-                res = researcher.research(self.store, query)
+                if sr:  # a reference study: local static inspection with R.E.A., minutes rather than seconds
+                    res = self._study(s, sr[0], sr[1], asked_by)
+                else:
+                    res = researcher.research(self.store, query)
             except Exception as e:  # noqa: BLE001 - a lookup failure is a gap, never a crash
                 res = {"ok": False, "query": query, "results": [], "error": type(e).__name__, "latency_s": None}
-            self._event(rt_id, "research" if res["ok"] else "gap", researcher.render(res, asked_by),
+            text = res.pop("text", None) or researcher.render(res, asked_by)
+            self._event(rt_id, "research" if res["ok"] else "gap", text,
                         speaker="researcher", phase="research", latency=res.get("latency_s"), reply_to=reply)
             with self.lock:
                 s["rinflight"] -= 1
@@ -394,6 +399,31 @@ class Broker:
 
         threading.Thread(target=go, daemon=True).start()
         return {"queued": True, "query": query, "lookups_left": st["cap"] - st["lookups"]}
+
+    def _study(self, s, ref_name, topic, asked_by) -> dict:
+        """Run one reference study for the room and wait for it (bounded by the study's own timeout)."""
+        from . import study  # noqa: PLC0415
+        svc = getattr(self, "svc", None)
+        if svc is None:
+            return {"ok": False, "query": f"study {ref_name} {topic}", "results": [], "latency_s": 0,
+                    "error": "reference studies are not wired into this room"}
+        want = ref_name.lower()
+        ref = next((r for r in study.refs(self.store) if r["name"].lower() == want), None) or \
+            next((r for r in study.refs(self.store) if r["name"].lower().startswith(want)), None)
+        if not ref:
+            names = ", ".join(r["name"] for r in study.refs(self.store)) or "none registered"
+            return {"ok": False, "query": f"study {ref_name} {topic}", "results": [], "latency_s": 0,
+                    "error": f"no registered reference app called {ref_name!r} (registered: {names})"}
+        t0 = time.time()
+        st = study.start(self.store, self.sup, svc, s["project"]["id"], ref["id"], topic)
+        end = t0 + study.STUDY_TIMEOUT + 90
+        while time.time() < end and st["state"] == "RUNNING":
+            time.sleep(2.0)
+            st = study.get(self.store, st["id"])
+        ok = st["state"] == "DONE"
+        return {"ok": ok, "query": f"study {ref['name']} {topic}", "results": st["findings"] if ok else [],
+                "latency_s": round(time.time() - t0, 1), "error": st.get("error") or ("still running" if not ok else None),
+                "text": f"**Research for {asked_by}:** " + study.render(st)}
 
     def ask_research(self, rt_id, query, asked_by="Owner") -> dict:
         """Owner-initiated lookup during a live session; the result joins the timeline like any other."""

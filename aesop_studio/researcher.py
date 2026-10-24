@@ -25,6 +25,8 @@ SESSION_CAP = 8          # research calls per roundtable session (default; the d
 DAILY_CAP = 60           # research calls per day across Studio
 REQUEST_RE = re.compile(r"^\s*(?:[-*>]\s*)?(?:\**RESEARCH\s*[:\-]\s*\**|@Researcher\b[,:]?)\s*(.+?)\s*$", re.I | re.M)
 BACKENDS = ("firecrawl", "perplexity")
+# `RESEARCH: study <reference> <topic>` asks for a reference study (R.E.A., local static inspection) instead of a web search
+STUDY_RE = re.compile(r"^\s*study\s+(?:of\s+)?(?:\"([^\"]+)\"|'([^']+)'|([^\s:]+))\s*:?\s+(.+)$", re.I)
 _ENDPOINT = {"firecrawl": "https://api.firecrawl.dev/v2/search", "perplexity": "https://api.perplexity.ai/search"}
 _KEY = {"firecrawl": "FIRECRAWL_API_KEY", "perplexity": "PERPLEXITY_API_KEY"}
 DISPLAY = {"firecrawl": "Firecrawl", "perplexity": "Perplexity"}
@@ -66,6 +68,16 @@ def requests_in(text: str) -> list[str]:
         if len(q) >= 4 and q.lower() not in (x.lower() for x in out):
             out.append(q[:MAX_QUERY])
     return out
+
+
+def study_request(query: str) -> tuple[str, str] | None:
+    """(reference name, topic) when a research line asks for a reference study, else None."""
+    m = STUDY_RE.match(query or "")
+    if not m:
+        return None
+    name = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+    topic = " ".join(m.group(4).split()).strip()
+    return (name, topic) if name and len(topic) >= 3 else None
 
 
 def _post(url: str, body: dict, key: str) -> dict:

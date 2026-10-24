@@ -16,7 +16,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backup, browse_agent, browser as browser_mod, deletion, plan, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare
+from . import backup, browse_agent, study, browser as browser_mod, deletion, plan, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare
 from .security import MAX_UPLOAD_BYTES, ScopeError, redact
 from .services import Conflict, Services
 from .sessions import SESSION_DAYS, Sessions
@@ -68,6 +68,7 @@ class App:
         self.drive = browse_agent.Drive(self.store, self.sup, self.browser)
         from .roundtable_live import Broker
         self.broker = Broker(self.store, self.sup)
+        self.broker.svc = self.svc  # lets the room's Researcher run reference studies (study.start needs services)
         self.reconciled += self.broker.reconcile()
         team.resume(self.store, self.sup, self.svc)
         providers.refresh(self.store)
@@ -586,6 +587,37 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/projects/(\w+)/plan/draft")
     def plan_draft(self, sess, pid):
         self.json(plan.draft(self.app.store, self.app.sup, self.app.svc, pid), 202)
+
+    # ---- reference studies (R.E.A.) ----
+    @route("GET", r"/api/study/refs")
+    def study_refs(self, sess):
+        self.json(study.status(self.app.store))
+
+    @route("POST", r"/api/study/refs")
+    def study_ref_add(self, sess):
+        b = self.body()
+        self.json(study.add_ref(self.app.store, b.get("path") or "", b.get("name") or "", b.get("note") or ""), 201)
+
+    @route("POST", r"/api/study/refs/(\w+)/delete")
+    def study_ref_delete(self, sess, rid):
+        self.json(study.remove_ref(self.app.store, rid))
+
+    @route("POST", r"/api/study/ack")
+    def study_ack(self, sess):
+        on = bool(self.body().get("ack"))
+        study.set_ack(self.app.store, on)
+        self.json({"ack": on})
+
+    @route("POST", r"/api/projects/(\w+)/study")
+    def study_start(self, sess, pid):
+        b = self.body()
+        self.json(study.start(self.app.store, self.app.sup, self.app.svc, pid, b.get("ref_id") or "",
+                              b.get("topic") or "", b.get("provider") or None), 202)
+
+    @route("GET", r"/api/projects/(\w+)/studies")
+    def study_list(self, sess, pid):
+        self.app.svc.project(pid)
+        self.json({"studies": study.list_studies(self.app.store, pid)})
 
     @route("GET", r"/api/projects/(\w+)/reviewers")
     def task_reviewers(self, sess, pid):

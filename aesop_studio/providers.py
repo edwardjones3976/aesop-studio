@@ -374,6 +374,7 @@ def display_name(route_id: str) -> str:
 
 def _named(routes: dict) -> dict:
     for rid, r in routes.items():
+        r["id"] = rid
         r["display_name"], r["family"] = DISPLAY.get(rid, (rid, rid))
         if rid in ("grok", "zai"):
             # Capabilities come from the installed adapter, including for cached verification records.
@@ -397,25 +398,42 @@ def cached(store: Store) -> dict[str, dict]:
     return routes
 
 
+STUDY_ROUTES = ("claude", "codex", "simulated")   # CLIs that can load a per-run MCP server and a read-only sandbox
+
+
 def usable(route: dict, mode: str) -> bool:
+    if mode == "study":  # a reference study is a read-only agent run with the R.E.A. MCP server attached
+        return route["state"] in ("READY_INCLUDED", "READY_METERED", "SIMULATED") and "agent" in route["supported_modes"] \
+            and route.get("id") in STUDY_ROUTES
     return (route["state"] in ("READY_INCLUDED", "READY_METERED", "SIMULATED")
             and mode in route["supported_modes"])
 
 
 def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | None = None,
-               prompt: str | None = None, images: list[str] | None = None) -> list[str]:
-    """argv list (no shell). The prompt is always passed on stdin, never concatenated into a command."""
+               prompt: str | None = None, images: list[str] | None = None, study: dict | None = None) -> list[str]:
+    """argv list (no shell). The prompt is always passed on stdin, never concatenated into a command.
+
+    mode "study" (reference study): read-only sandbox, no shell/edit tools, and the R.E.A. MCP server attached from
+    the explicit config in `study["mcp_config"]` so the run never depends on the owner's global registrations."""
+    if mode == "study" and not (study and study.get("mcp_config") and study.get("ref_path")):
+        raise RuntimeError("a study needs its MCP config and reference path")
     if route_id == "codex":
         cmd = _codex_cmd()
         if not cmd:
             raise RuntimeError("codex unavailable")
-        sandbox = "read-only" if mode == "chat" else "workspace-write"
+        sandbox = "read-only" if mode in ("chat", "study") else "workspace-write"
         argv = cmd + ["exec"]
         for img in images or []:  # each -i before the other flags, so the variadic option never eats them
             argv += ["-i", str(Path(cwd) / img)]
         argv += ["--skip-git-repo-check", "--color", "never", "-s", sandbox, "-C", cwd, "-o", out_file]
         if mode == "chat":
             argv.append("--ephemeral")
+        if mode == "study":
+            from .study import REA_ARGS, REA_COMMAND  # noqa: PLC0415
+            args_toml = "[" + ", ".join(json.dumps(a) for a in REA_ARGS) + "]"
+            argv += ["--ephemeral", "-c", f"mcp_servers.rea.command={json.dumps(REA_COMMAND)}",
+                     "-c", f"mcp_servers.rea.args={args_toml}", "-c", "mcp_servers.rea.startup_timeout_sec=60",
+                     "--add-dir", study["ref_path"]]
         if model:
             argv += ["-m", model]
         return argv + ["-"]
@@ -426,6 +444,10 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         argv = cmd + ["-p", "--output-format", "text", "--no-session-persistence"]
         if mode == "chat":  # with photos, only Read (confined to this task's own folder) is enabled
             argv += ["--tools", "Read" if images else "", "--strict-mcp-config"]
+        elif mode == "study":  # read-only inspection: file reads plus the rea MCP tools, nothing that writes or runs
+            argv += ["--mcp-config", study["mcp_config"], "--strict-mcp-config", "--add-dir", study["ref_path"],
+                     "--permission-mode", "default", "--allowedTools", "Read", "Glob", "Grep", "mcp__rea",
+                     "--disallowedTools", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]
         else:
             argv += ["--permission-mode", "acceptEdits",
                      "--disallowedTools", "Bash(rm:*)", "Bash(del:*)", "Bash(Remove-Item:*)", "WebFetch"]

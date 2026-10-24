@@ -656,6 +656,17 @@ class Services:
                   time.time()))
         return self.s.one("SELECT * FROM sources WHERE id=?", (sid,))
 
+    def add_study_source(self, pid: str, ref: dict, topic: str) -> dict:
+        """A private notebook source for a reference study: the app folder inspected, never its contents."""
+        self.project(pid)
+        sid = new_id("src")
+        self.s.x("INSERT INTO sources(id,project_id,kind,title,publisher,locator,retrieved_at,version,status,excerpt,"
+                 "private,created) VALUES(?,?,?,?,?,?,?,?,?,?,1,?)",
+                 (sid, pid, "study", f"{ref['name']}: {topic}"[:300], "reference study (R.E.A., static)",
+                  f"study:{ref['target']}"[:500], time.time(), ref.get("kind"), "read",
+                  f"Static inspection of {ref['name']} ({ref.get('kind')}) for: {topic}"[:1500], time.time()))
+        return self.s.one("SELECT * FROM sources WHERE id=?", (sid,))
+
     def add_finding(self, pid: str, claim: str, source_id: str | None, locator: str, limitation: str = "") -> dict:
         self.project(pid)
         status = "unsupported"

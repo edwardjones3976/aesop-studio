@@ -1842,6 +1842,8 @@ function inspPlan(body, pid, gen) {
       catch (e) { banner(e.message, "bad"); }
     }, "ghost sm", "sparkle");
     draftBtn.title = "The project's provider reads the recent conversation and proposes next steps (added unchecked).";
+    const studyBtn = abtn("Study a reference", async () => { const r = await studyDialog(pid); if (r) { sig = ""; load(); } }, "ghost sm", "search");
+    studyBtn.title = "A provider inspects a registered reference app (Cursor, VS Code, Perplexity…) with R.E.A. and files evidence-backed steps here.";
     const nextId = (items.find((i) => i.status === "doing") || items.find((i) => i.status === "todo") || {}).id;
     const row = (it) => {
       const cb = h("input", { type: "checkbox", "aria-label": `Done: ${it.content}` });
@@ -1862,10 +1864,19 @@ function inspPlan(body, pid, gen) {
     body.replaceChildren(h("div", { class: "planv" },
       h("div", { class: "plan-head" },
         h("div", { class: "ttl" }, icon("check"), h("h3", {}, "Plan"), items.length ? h("span", { class: "faint" }, `${done} of ${items.length} done`) : null),
-        h("div", { class: "row" }, draftBtn, done ? abtn("Clear done", () => post("POST", `/api/projects/${pid}/plan/clear-done`), "ghost sm", "trash") : null)),
+        h("div", { class: "row" }, studyBtn, draftBtn, done ? abtn("Clear done", () => post("POST", `/api/projects/${pid}/plan/clear-done`), "ghost sm", "trash") : null)),
       addIn,
       items.length ? h("ol", { class: "plist" }, ...items.map(row))
         : h("p", { class: "muted" }, "No steps yet. Add one above, let the provider draft some from the chat, or start a Build task — builds file their own steps and tick them off."),
+      (d.studies || []).length ? h("div", { class: "studies" }, h("h4", {}, "Reference studies"),
+        ...(d.studies || []).map((st) => h("details", { class: `study st-${st.state.toLowerCase()}` },
+          h("summary", {}, h("span", { class: `pill ${st.state === "DONE" ? "ok" : st.state === "FAILED" ? "bad" : ""}` }, st.state === "RUNNING" ? "studying…" : st.state.toLowerCase()),
+            h("strong", {}, st.ref_name), h("span", { class: "muted" }, ` — ${st.topic}`), h("span", { class: "faint" }, ` · ${routeName(st.provider)}`)),
+          st.error ? h("p", { class: "note bad" }, st.error) : null,
+          st.findings.length ? h("ol", { class: "sfind" }, ...st.findings.map((f) => h("li", {}, h("span", {}, f.claim),
+            f.evidence ? h("small", { class: "mono" }, ` ${f.evidence}`) : null, f.limitation ? h("small", { class: "faint" }, ` (${f.limitation})`) : null))) : null,
+          st.steps.length ? h("p", { class: "muted" }, `${st.steps.length} step${st.steps.length === 1 ? "" : "s"} added to the plan.`) : null,
+          st.report ? h("details", { class: "sreport" }, h("summary", {}, "Full report"), h("pre", {}, st.report)) : null))) : null,
       h("div", { class: "plan-act" }, h("h4", {}, "Recent activity"),
         (d.activity || []).length ? h("div", { class: "ilist" }, ...(d.activity || []).map((a) => h("div", { class: "ilog" },
           h("span", { class: "lt" }, stamp(a.at)), h("span", { class: "lm" }, a.text))))
@@ -1873,7 +1884,7 @@ function inspPlan(body, pid, gen) {
   };
   const load = async () => {
     let d;
-    try { d = await api("GET", `/api/projects/${pid}/plan`); } catch (e) { if (live() && !sig) body.replaceChildren(h("div", { class: "note bad" }, icon("alert"), h("span", {}, e.message))); return; }
+    try { d = await api("GET", `/api/projects/${pid}/plan`); d.studies = (await api("GET", `/api/projects/${pid}/studies`)).studies; } catch (e) { if (live() && !sig) body.replaceChildren(h("div", { class: "note bad" }, icon("alert"), h("span", {}, e.message))); return; }
     if (!live()) return;
     const s2 = JSON.stringify(d);
     if (s2 === sig) return;
@@ -1884,6 +1895,60 @@ function inspPlan(body, pid, gen) {
   clearInterval(timer);
   timer = setInterval(() => { if (!live()) { clearInterval(timer); return; } if (!document.hidden) load(); }, 3000);
   load();
+}
+// Reference study: pick a registered app (or register a folder), say what to study, pick who studies it.
+async function studyDialog(pid, topicPrefill = "") {
+  const d = $("dlg");
+  if (d.open) { banner("Finish or cancel the open dialog first."); return null; }
+  let st;
+  try { st = await api("GET", "/api/study/refs"); } catch (e) { banner(e.message, "bad"); return null; }
+  if (!st.providers.length) { banner("No study-capable provider is ready (Claude Code or Codex).", "bad"); return null; }
+  return new Promise((resolve) => {
+    const f = $("dlgForm"); const opener = document.activeElement;
+    const refSel = h("select", { name: "ref" }, ...st.refs.map((r) => h("option", { value: r.id }, `${r.name} (${r.kind})`)),
+      ...st.candidates.map((c) => h("option", { value: "cand:" + c.path }, `Register ${c.name} — ${c.path}`)),
+      h("option", { value: "__add" }, "Register another folder…"));
+    const list = h("datalist", { id: "dirlist" });
+    const pathIn = h("input", { name: "path", list: "dirlist", autocomplete: "off", spellcheck: "false", placeholder: "C:\\…\\Programs\\SomeApp" });
+    const nameIn = h("input", { name: "name", placeholder: "Short name, e.g. Cursor" });
+    const addBox = h("div", { class: "field np-add", hidden: true }, h("label", {}, "Folder to register", pathIn, list), h("label", {}, "Name", nameIn));
+    let timer = null, seq = 0;
+    pathIn.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { const my = ++seq; api("GET", `/api/fs/dirs?q=${encodeURIComponent(pathIn.value)}`).then((r) => { if (my === seq) list.replaceChildren(...(r.dirs || []).map((p) => h("option", { value: p }))); }).catch(() => {}); }, 120); });
+    refSel.addEventListener("change", () => { addBox.hidden = refSel.value !== "__add"; });
+    if (!st.refs.length && !st.candidates.length) { refSel.value = "__add"; addBox.hidden = false; }
+    const topic = h("input", { name: "topic", required: true, maxlength: "200", value: topicPrefill, placeholder: "e.g. chat composer: drafts, attachments, retry and edit" });
+    const prov = h("select", { name: "provider" }, ...st.providers.map((r) => h("option", { value: r }, routeName(r))));
+    if (S.project && st.providers.includes(S.project.provider_default)) prov.value = S.project.provider_default;
+    const ackBox = h("input", { type: "checkbox", name: "ack", required: !st.ack });
+    const ack = st.ack ? null : h("label", { class: "rt-ack" }, ackBox, h("span", {}, st.ack_statement));
+    const okBtn = h("button", { class: "btn primary", value: "ok" }, "Start study");
+    f.replaceChildren(h("h2", { id: "dlgTitle" }, "Study a reference app"),
+      h("p", { class: "muted" }, "A provider inspects the app statically with R.E.A. (never runs it, copies nothing) and files evidence-backed findings and plan steps for Studio."
+        + (st.rea_installed ? "" : " R.E.A. is not registered for Claude Code yet; the study attaches its own copy (first run downloads it).")),
+      h("div", { class: "field" }, h("label", {}, "Reference app", refSel)), addBox,
+      h("div", { class: "field" }, h("label", {}, "What to study", topic)),
+      h("div", { class: "field" }, h("label", {}, "Who studies it", prov)),
+      ack,
+      h("div", { class: "actions" }, okBtn, h("button", { class: "btn ghost", value: "cancel", formnovalidate: true }, "Cancel")));
+    d.onclose = async () => {
+      if (opener && opener.isConnected && opener.focus) opener.focus();
+      if (d.returnValue !== "ok") return resolve(null);
+      try {
+        let refId = refSel.value;
+        if (refId === "__add" || refId.startsWith("cand:")) {
+          const path = refId === "__add" ? pathIn.value.trim() : refId.slice(5);
+          const name = refId === "__add" ? nameIn.value.trim() : (st.candidates.find((c) => c.path === path) || {}).name;
+          if (!path) { banner("Type the folder to register.", "bad"); return resolve(null); }
+          refId = (await api("POST", "/api/study/refs", { path, name })).id;
+        }
+        if (!st.ack) await api("POST", "/api/study/ack", { ack: true });
+        const r = await api("POST", `/api/projects/${pid}/study`, { ref_id: refId, topic: topic.value.trim(), provider: prov.value });
+        banner(`${routeName(r.provider)} is studying ${r.ref_name}: ${r.topic}. Findings land in the Plan tab.`, "ok");
+        resolve(r);
+      } catch (e) { banner(e.message, "bad"); resolve(null); }
+    };
+    d.returnValue = ""; d.showModal(); topic.focus();
+  });
 }
 function inspTerminal(body, tid, auto) {
   const pre = h("pre", { "aria-live": "off", tabindex: "0", "aria-label": "Task output" });
@@ -2324,6 +2389,7 @@ async function renderChat() {
     const stale = photos.filter((x) => x.state === "ready" && x.target !== want && x.orig.type !== "image/gif");
     if (stale.length) { sendBtn.disabled = true; await Promise.all(stale.map((x) => uploadPhoto(x, provider))); sendBtn.disabled = false; pics = readyPhotos(); }
     if (pics.length > PHOTO_PARTS_MAX) { banner(`Too many photo parts (${pics.length}); remove a long screenshot or two.`, "bad"); return; }
+    if (/^\/study\b/i.test(raw.trim())) { const t = raw.trim().replace(/^\/study\s*/i, ""); ta.value = ""; grow(); ssSet(draftKey, ""); setItab("plan"); renderInspector(); studyDialog(pid, t); return; }
     const text = raw.trim() || (pics.length ? `Please look at the attached photo${pics.length > 1 ? "s" : ""}.` : fids.length ? "Please look at the attached files." : "");
     if (!text) { ta.focus(); return; }
     sending = true; sendBtn.disabled = true; sendBtn.setAttribute("aria-busy", "true");

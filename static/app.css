@@ -1070,3 +1070,12 @@ dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
 .np-preview { font-size: 13px; padding: 8px 10px; border-radius: var(--r-sm); background: var(--sunken); border: 1px solid var(--border); color: var(--text-2); overflow-wrap: anywhere; font-family: var(--mono); font-size: 12.5px; }
 .np-preview.ok { border-color: rgba(128, 225, 203, .45); color: var(--mint); }
 .np-preview.bad { border-color: rgba(255, 143, 143, .45); color: var(--red); }
+/* reference studies (Plan tab) */
+.studies h4 { margin: 10px 0 6px; font-size: 13px; color: var(--text-2); }
+.study { border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--sunken); padding: 6px 10px; margin-bottom: 6px; font-size: 13px; }
+.study summary { cursor: pointer; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.study.st-running summary .pill { color: var(--text-2); }
+.sfind { margin: 6px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.sfind small.mono { font-family: var(--mono); color: var(--text-3); font-size: 11.5px; overflow-wrap: anywhere; }
+.sreport pre { white-space: pre-wrap; font-size: 12px; max-height: 320px; overflow: auto; margin: 4px 0 0; }
+.np-add { display: flex; flex-direction: column; gap: 6px; }

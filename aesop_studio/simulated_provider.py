@@ -46,6 +46,15 @@ elif "Return ONLY JSON: {\"summary\"" in prompt:  # summarize fixture
     mids = _re.findall(r'<message id="([^"]+)"', prompt)
     reply = _json.dumps({"summary": "The team chose SQLite for notes.", "source_ids": mids[:1] + ["msg_bogus"],
                          "open_questions": ["Backup cadence?"]})
+if "REFERENCE STUDY" in prompt:  # reference-study fixture: a short report, then the fenced JSON contract
+    reply = ("## Observed behavior\nThe composer keeps drafts per conversation.\n\n## Evidence\n"
+             "renderer/composer.js registers an IPC channel 'draft:save'.\n\n## Limitations\nMinified bundle.\n\n"
+             "```json\n" + _json.dumps({"findings": [
+                 {"claim": "Drafts are saved per conversation on every keystroke", "evidence": "renderer/composer.js -> ipc draft:save",
+                  "limitation": "bundle is minified"},
+                 {"claim": "Attachments are previewed before send", "evidence": "renderer/attach.js", "limitation": ""}],
+                 "steps": ["Keep an unsent draft per conversation in localStorage", "Show attachment previews before send"]})
+             + "\n```")
 if "JSON array of plan items" in prompt:  # plan-draft fixture
     reply = _json.dumps([{"step": "Wire the scoring table"}, {"step": "Add renege detection"}])
 if os.environ.get("AESOP_SIM_ASK_RESEARCH") == "1" and "Researcher on call" in prompt and "OPENING" in prompt:

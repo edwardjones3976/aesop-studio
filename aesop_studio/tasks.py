@@ -306,7 +306,10 @@ class Supervisor:
 
     # ---- lifecycle ----
     def create(self, project: dict, route_id: str, prompt: str, mode: str = "agent",
-               timeout: int = DEFAULT_TIMEOUT, images: list[str] | None = None, research: dict | None = None) -> str:
+               timeout: int = DEFAULT_TIMEOUT, images: list[str] | None = None, research: dict | None = None,
+               study: dict | None = None) -> str:
+        """mode: "agent" (writes in the project root), "chat" (temp sandbox), or "study" (read-only reference study in
+        Studio's own studies/ folder with the R.E.A. MCP server attached; never counts as the project's writer)."""
         routes = providers.cached(self.store)
         route = routes.get(route_id)
         tid = new_id("task")
@@ -318,7 +321,8 @@ class Supervisor:
                       "VALUES(?,?,?,?,?,?,?,?,?)",
                       (tid, project["id"], route_id, prompt, "CREATED", project["root"] if mode == "agent" else None,
                        out_path, now, json.dumps({"mode": mode, "timeout": timeout,
-                                                  **({"images": images} if images else {})})))
+                                                  **({"images": images} if images else {}),
+                                                  **({"study": study} if study else {})})))
         self.store.event("task_state", project["id"], task_id=tid, state="CREATED", mode=mode)
         if busy:
             self._end(tid, "BLOCKED_OWNER", None, None,
@@ -351,16 +355,20 @@ class Supervisor:
                 before, truncated = snapshot(cwd)
                 Path(out_path + ".before.json").write_text(json.dumps({"entries": before, "truncated": truncated}),
                                                            encoding="utf-8")
+            elif mode == "study":  # Studio's own folder for this study (holds mcp.json); the project is untouched
+                cwd, before, truncated = str(Path((study or {})["folder"])), {}, False
+                Path(cwd).mkdir(parents=True, exist_ok=True)
             else:  # created lazily: only requests that will really launch a CLI get a sandbox directory
                 cwd, before, truncated = tempfile.mkdtemp(prefix=CHAT_DIR_PREFIX), {}, False
             cp = {"mode": mode, "timeout": timeout, "ledger_id": lid, "before_count": len(before),
-                  "snapshot_truncated": truncated, **({"images": images} if images else {})}
+                  "snapshot_truncated": truncated, **({"images": images} if images else {}),
+                  **({"study": study} if study else {})}
             self._set(tid, "RESERVED", checkpoint=json.dumps(cp), cwd=cwd)
         except Exception as e:  # noqa: BLE001 - nothing was dispatched: release the reservation
             self._end(tid, "FAILED", lid, 0, error=f"could not prepare the task: {type(e).__name__}: {str(e)[:200]}")
             return tid
         threading.Thread(target=self._run, args=(tid, route_id, mode, cwd, prompt, out_path, timeout, lid,
-                                                 project.get("model"), images), daemon=True).start()
+                                                 project.get("model"), images, study), daemon=True).start()
         return tid
 
     # ---- research API routes (Firecrawl, Perplexity): one bounded HTTPS call, no subprocess ----
@@ -482,7 +490,7 @@ class Supervisor:
             self._end(tid, "EFFECT_UNKNOWN", lid, None, error=f"bookkeeping failed: {type(e).__name__}")
 
     # ---- CLI routes ----
-    def _run(self, tid, route_id, mode, cwd, prompt, out_path, timeout, lid, model, images=None):
+    def _run(self, tid, route_id, mode, cwd, prompt, out_path, timeout, lid, model, images=None, study=None):
         last_file = out_path + ".last.txt"
         proc = job = timer = None
         try:
@@ -491,9 +499,9 @@ class Supervisor:
                 if rel and route_id in READ_TOOL_IMAGE_ROUTES:
                     prompt += ("\n\n[Attached photos are in your working folder: " + ", ".join(rel)
                                + ". Open each one with the Read tool before you answer.]")
-                argv = providers.build_argv(route_id, mode, cwd, last_file, model, prompt=prompt, images=rel)
+                argv = providers.build_argv(route_id, mode, cwd, last_file, model, prompt=prompt, images=rel, study=study)
             except RuntimeError as e:
-                if mode != "agent":
+                if mode == "chat":
                     _remove_chat_dir(cwd)
                 return self._end(tid, "FAILED", lid, 0, error=str(e))
             meta = {"executable": Path(argv[0]).name,  # never record the prompt (argv-prompt routes) or the cwd
@@ -508,7 +516,7 @@ class Supervisor:
                 if errf:
                     errf.close()  # the child holds its own handle
             except OSError as e:
-                if mode != "agent":
+                if mode == "chat":
                     _remove_chat_dir(cwd)
                 return self._end(tid, "FAILED", lid, 0, error=f"launch failed: {e}")
             job = winjob.contain(proc.pid)  # whole-tree containment, including detached descendants
@@ -616,7 +624,7 @@ class Supervisor:
             if retry:  # recorded before going terminal, so readers following final() never see a dead end
                 cp["retried_as"] = retry
                 err = f"{err}; transient provider error, retried automatically as {retry}"
-            if mode != "agent":
+            if mode == "chat":
                 _remove_chat_dir(cwd)
             self._end(tid, state, lid, 0, exit_code=code, changed_files=changed, error=err, checkpoint=json.dumps(cp))
             if state == "EFFECT_UNKNOWN":
@@ -636,7 +644,7 @@ class Supervisor:
                 t = self.get(tid)
                 if t and t["state"] not in TERMINAL:
                     started = proc is not None
-                    if mode != "agent":
+                    if mode == "chat":
                         _remove_chat_dir(cwd)
                     self._end(tid, "EFFECT_UNKNOWN" if started else "FAILED", lid, None if started else 0,
                               error=f"supervisor error: {type(e).__name__}: {str(e)[:200]}")
@@ -645,7 +653,7 @@ class Supervisor:
             except Exception:  # noqa: BLE001 - last resort; reconcile() repairs anything left behind
                 pass
         finally:
-            if mode != "agent":
+            if mode == "chat":
                 _remove_chat_dir(cwd)
 
     def open_repair(self, tid: str, signature: str, contract: str) -> str:

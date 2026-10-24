@@ -171,6 +171,10 @@ _T = {
     "browse_step": lambda d: f"{providers.display_name(d.get('provider', ''))} browsed: {d.get('action')}",
     "attachment": lambda d: f"File added ({d.get('status')}, {d.get('size', 0)} bytes)",
     "plan_draft": lambda d: f"{providers.display_name(d.get('provider', ''))} drafted {d.get('added')} plan item(s)",
+    "study_started": lambda d: f"{providers.display_name(d.get('provider', ''))} started studying {d.get('ref')}: {d.get('topic')}",
+    "study_done": lambda d: (f"Studied {d.get('ref')} for {d.get('topic')}: {d.get('findings', 0)} finding(s), "
+                             f"{d.get('steps', 0)} step(s) added to the plan" if d.get("ok") else
+                             f"Study of {d.get('ref')} failed: {d.get('error')}"),
     "conversation_deleted": lambda d: f"Conversation deleted ({d.get('messages')} messages)",
     "roundtable_deleted": lambda d: "Roundtable deleted",
     "artifact": lambda d: "Saved to the project",
