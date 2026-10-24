@@ -279,25 +279,27 @@ class Services:
             raise ValueError(f"photos in one message must total under {MAX_IMAGE_BYTES_PER_MESSAGE // 1024 // 1024} MB")
         return files, images
 
-    def research_payload(self, cid: str | None, text: str, provider: str) -> dict:
+    def research_payload(self, cid: str | None, text: str, provider: str, before: float | None = None) -> dict:
         from .research_routes import perplexity_messages
         hist = []
         if cid and provider == "perplexity":
             hist = list(reversed(self.s.q("SELECT role,content,provider FROM messages WHERE conversation_id=? AND status IN "
-                                          "('saved','generated') ORDER BY created DESC LIMIT 8", (cid,))))
+                                          "('saved','generated') AND created < ? ORDER BY created DESC LIMIT 8",
+                                          (cid, before if before is not None else float("inf")))))
         return {"question": text, "messages": perplexity_messages([
             {"role": h["role"], "content": (f"({providers.display_name(h['provider'])} answered:) " if h["role"] == "assistant"
                                             and h["provider"] and h["provider"] != "perplexity" else "") + redact(h["content"])}
             for h in hist], text)}
 
-    def _history(self, cid: str, provider: str) -> list[str]:
+    def _history(self, cid: str, provider: str, before: float | None = None) -> list[str]:
         """The conversation so far, newest kept first within the provider's room, each answer labelled with who
         wrote it, plus a takeover note when another provider answered last, so the next one picks up seamlessly."""
         budget = HISTORY_BUDGET.get(provider, HISTORY_BUDGET["default"])
-        total = self.s.one("SELECT COUNT(*) n FROM messages WHERE conversation_id=? AND status IN ('saved','generated')",
-                           (cid,))["n"]
+        cut = before if before is not None else float("inf")
+        total = self.s.one("SELECT COUNT(*) n FROM messages WHERE conversation_id=? AND status IN ('saved','generated') "
+                           "AND created < ?", (cid, cut))["n"]
         rows = self.s.q("SELECT role,content,provider FROM messages WHERE conversation_id=? AND status IN "
-                        "('saved','generated') ORDER BY created DESC LIMIT ?", (cid, HISTORY_MESSAGES))
+                        "('saved','generated') AND created < ? ORDER BY created DESC LIMIT ?", (cid, cut, HISTORY_MESSAGES))
         kept, used = [], 0
         for h in rows:
             body = redact((h["content"] or "")[:HISTORY_MESSAGE_CHARS])
@@ -324,7 +326,8 @@ class Services:
                           "yourself or repeat earlier answers.]")
         return out
 
-    def build_context(self, pid: str, cid: str | None, text: str, attachment_ids: list[str], provider: str) -> str:
+    def build_context(self, pid: str, cid: str | None, text: str, attachment_ids: list[str], provider: str,
+                      before: float | None = None) -> str:
         """Exactly what will be sent to the provider. Shown to the owner before sending."""
         p = self.project(pid)
         if cid:
@@ -336,7 +339,7 @@ class Services:
             if attachment_ids or images:
                 raise ValueError(f"{providers.display_name(provider)} takes questions and links, not files or photos. "
                                  "Remove the attachments, or ask Codex or Claude Code about them")
-            payload = self.research_payload(cid, text, provider)
+            payload = self.research_payload(cid, text, provider, before)
             if provider == "firecrawl":
                 from .research_routes import URL_RE
                 urls = URL_RE.findall(text)
@@ -383,7 +386,7 @@ class Services:
                              + (f". Not included (no room left for this provider): {', '.join(omitted)}" if omitted else "")
                              + "]")
         if cid:
-            parts.extend(self._history(cid, provider))
+            parts.extend(self._history(cid, provider, before))
         parts.append(f"[user]\n{text}")
         if images:
             parts.append(f"[{len(images)} photo{'s' if len(images) > 1 else ''} attached by the user: "
@@ -434,6 +437,76 @@ class Services:
             self.s.x("UPDATE conversations SET title=? WHERE id=?", (text[:60], cid))
         self.s.x("UPDATE projects SET updated=? WHERE id=?", (now, pid))
         return {"message_id": mid, "task_id": tid}
+
+    def redo(self, pid: str, cid: str, mid: str, provider: str | None = None, text: str | None = None) -> dict:
+        """Retry a failed or interrupted answer, regenerate the latest one, or edit the latest question and resend.
+
+        The answer is replaced in place (no duplicates). The provider sees the conversation only up to the question
+        being answered, so a retry never reads its own failed attempt or anything said after it."""
+        p = self.project(pid)
+        self._conv(pid, cid)
+        m = self.s.one("SELECT * FROM messages WHERE id=? AND conversation_id=?", (mid, cid))
+        if not m:
+            raise KeyError("message not in this conversation")
+        if m["role"] == "assistant":
+            a = m
+            u = self.s.one("SELECT * FROM messages WHERE conversation_id=? AND role='user' AND created<? "
+                           "ORDER BY created DESC LIMIT 1", (cid, a["created"]))
+        else:
+            u = m
+            a = self.s.one("SELECT * FROM messages WHERE conversation_id=? AND role='assistant' AND created>? "
+                           "ORDER BY created LIMIT 1", (cid, u["created"]))
+        if not u:
+            raise ValueError("there is no question to resend for this answer")
+        if a and a["status"] == "submitted":
+            raise Conflict("this answer is still on its way; wait for it to finish before retrying")
+        last_user = self.s.one("SELECT id FROM messages WHERE conversation_id=? AND role='user' ORDER BY created DESC LIMIT 1",
+                               (cid,))
+        latest = last_user and last_user["id"] == u["id"]
+        if text is not None:
+            text = text.strip()
+            if not text:
+                raise ValueError("message is empty")
+            if not latest:
+                raise ValueError("only your most recent message can be edited; ask again below instead")
+        elif a and a["status"] == "generated" and not latest:
+            raise ValueError("only the latest answer can be regenerated; failed answers can be retried anywhere")
+        route = provider or (a["provider"] if a else None) or p["provider_default"]
+        if not route:
+            raise ValueError("choose a provider first")
+        question = text if text is not None else u["content"]
+        umeta = json.loads(u["meta"] or "{}")
+        atts = umeta.get("attachments") or []
+        context = self.build_context(pid, cid, question, atts, route, before=u["created"])
+        _, images = self.split_images(pid, atts)
+        image_paths = [str(self.s.data_dir / x["stored_path"]) for x in images]
+        prev = {"provider": a["provider"], "status": a["status"]} if a else None
+        ameta = {"context_chars": len(context), "context_sha256": _sha(context),
+                 "retry_of": prev, "retries": (json.loads(a["meta"] or "{}").get("retries", 0) + 1) if a else 0}
+        with self.s.tx() as c:
+            if text is not None and text != u["content"]:
+                umeta["edited_at"] = time.time()
+                c.execute("UPDATE messages SET content=?, meta=? WHERE id=?", (text, json.dumps(umeta), u["id"]))
+            if a:
+                aid = a["id"]
+                c.execute("UPDATE messages SET content='', status='submitted', provider=?, meta=? WHERE id=?",
+                          (route, json.dumps(ameta), aid))
+            else:
+                aid = new_id("msg")
+                c.execute("INSERT INTO messages(id,conversation_id,role,content,status,provider,created,meta) "
+                          "VALUES(?,?,?,?,?,?,?,?)", (aid, cid, "assistant", "", "submitted", route, u["created"] + 0.001,
+                                                      json.dumps(ameta)))
+        try:
+            tid = self.sup.create(p, route, context, mode="chat", timeout=300, images=image_paths or None,
+                                  research=self.research_payload(cid, question, route, u["created"])
+                                  if route in RESEARCH_ROUTES else None)
+        except Exception as e:
+            self.s.x("UPDATE messages SET content=?, status='failed' WHERE id=?",
+                     (f"Request not dispatched: {redact(str(e))[:300]}", aid))
+            raise
+        self._link_task(aid, tid)
+        self.s.event("chat_redo", pid, message_id=aid, provider=route, edited=text is not None)
+        return {"message_id": aid, "task_id": tid}
 
     def _link_task(self, mid: str, tid: str) -> None:
         with self.s.tx() as c:

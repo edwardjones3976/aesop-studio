@@ -409,6 +409,11 @@ class Handler(BaseHTTPRequestHandler):
     def msgs(self, sess, pid, cid):
         self.json(self.app.svc.messages(pid, cid))
 
+    @route("POST", r"/api/projects/(\w+)/conversations/(\w+)/messages/(\w+)/redo")
+    def message_redo(self, sess, pid, cid, mid):
+        b = self.body()
+        self.json(self.app.svc.redo(pid, cid, mid, b.get("provider") or None, b.get("text")), 202)
+
     @route("POST", r"/api/projects/(\w+)/conversations/(\w+)/preview")
     def preview(self, sess, pid, cid):
         b = self.body()

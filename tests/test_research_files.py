@@ -176,3 +176,46 @@ class TestHandoff(Base):
         self.assertIn("turn 39", ctx)       # the newest turns are the ones kept
         self.assertNotIn("turn 0 ", ctx)
         self.assertLess(len(ctx), 24_000)   # fits Grok's argv-prompt limit
+
+
+class TestRedo(Base):
+    def _answer(self, text, route="simulated"):
+        r = self.svc.send(self.p["id"], self.c["id"], text, [], route)
+        self.wait(r["task_id"])
+        return [m for m in self.svc.messages(self.p["id"], self.c["id"]) if m["id"] == r["message_id"]][0]
+
+    def test_retry_failed_regenerate_latest_edit_latest(self):
+        bad = self._answer("first question", route="grok")    # Grok can't run in tests: the answer fails
+        self.assertEqual(bad["status"], "failed")
+        r = self.svc.redo(self.p["id"], self.c["id"], bad["id"], "simulated", None)
+        self.assertEqual(r["message_id"], bad["id"])           # replaced in place, no duplicate answer
+        prompt = self.sup.get(r["task_id"])["prompt"]
+        self.assertNotIn("Request failed", prompt)             # the failed attempt is not in the context
+        self.assertEqual(prompt.count("first question"), 1)    # the question appears once, not twice
+        self.wait(r["task_id"])
+        n = len(self.svc.messages(self.p["id"], self.c["id"]))
+        good = self._answer("second question")
+        self.assertEqual(good["status"], "generated")
+        with self.assertRaises(ValueError):                    # an older good answer can't be regenerated
+            msgs = self.svc.messages(self.p["id"], self.c["id"])
+            self.svc.redo(self.p["id"], self.c["id"], msgs[1]["id"], None, None)
+        r = self.svc.redo(self.p["id"], self.c["id"], good["id"], None, None)     # regenerate the latest
+        self.assertIn("second question", self.sup.get(r["task_id"])["prompt"])
+        self.wait(r["task_id"])
+        user = [m for m in self.svc.messages(self.p["id"], self.c["id"]) if m["role"] == "user"]
+        r = self.svc.redo(self.p["id"], self.c["id"], user[-1]["id"], None, "second question, edited")
+        self.assertIn("second question, edited", self.sup.get(r["task_id"])["prompt"])
+        self.wait(r["task_id"])
+        msgs = self.svc.messages(self.p["id"], self.c["id"])
+        self.assertEqual(len(msgs), n + 2)                     # still one question + one answer per exchange
+        self.assertEqual([m for m in msgs if m["role"] == "user"][-1]["content"], "second question, edited")
+        with self.assertRaises(ValueError):                    # only the most recent message can be edited
+            self.svc.redo(self.p["id"], self.c["id"], user[0]["id"], None, "rewrite history")
+
+    def test_cannot_redo_while_waiting(self):
+        r = self.svc.send(self.p["id"], self.c["id"], "SLEEP a while", [], "simulated")
+        from aesop_studio.services import Conflict
+        with self.assertRaises(Conflict):
+            self.svc.redo(self.p["id"], self.c["id"], r["message_id"], None, None)
+        self.sup.cancel(r["task_id"])
+        self.wait(r["task_id"])

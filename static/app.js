@@ -2083,6 +2083,35 @@ async function renderChat() {
   const scroller = $("main");
   const nearBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
   const toBottom = () => { scroller.scrollTop = scroller.scrollHeight; };
+  let lastIds = {};
+  const redo = async (m, body, label) => {
+    try {
+      await api("POST", `/api/projects/${pid}/conversations/${cid}/messages/${m.id}/redo`, body);
+      banner(label, "ok"); if (gen === S.viewGen) { S.msgSig = ""; drawMsgs(); }
+    } catch (e) { banner(e.message, "bad"); }
+  };
+  const pickProvider = async (title, current) => {
+    const v = await dialog(title, [{ name: "provider", label: "Provider", type: "select", value: current || messageProvider(),
+      options: usable.map(([id]) => ({ value: id, label: routeName(id) })) }], "Send");
+    return v && v.provider;
+  };
+  const redoActions = (m) => {
+    if (m.status === "submitted") return null;
+    const bits = [];
+    if (m.role === "assistant" && m.status !== "generated") {
+      bits.push(h("button", { type: "button", class: "linkish msave", onclick: () => redo(m, { provider: m.provider }, `Retrying with ${routeName(m.provider)}…`) }, icon("send", "sm"), "Retry"));
+      bits.push(h("button", { type: "button", class: "linkish msave", onclick: async () => { const pv = await pickProvider("Retry this answer with…", m.provider); if (pv) redo(m, { provider: pv }, `Retrying with ${routeName(pv)}…`); } }, "Retry with…"));
+    } else if (m.role === "assistant" && m.id === lastIds.asst) {
+      bits.push(h("button", { type: "button", class: "linkish msave", title: "Ask again for a new answer (replaces this one)", onclick: async () => { const pv = await pickProvider("Regenerate this answer with…", m.provider); if (pv) redo(m, { provider: pv }, `Regenerating with ${routeName(pv)}…`); } }, icon("send", "sm"), "Regenerate"));
+    } else if (m.role === "user" && m.id === lastIds.user) {
+      bits.push(h("button", { type: "button", class: "linkish msave", title: "Change your message and send it again (replaces the answer)", onclick: async () => {
+        const v = await dialog("Edit and resend", [{ name: "text", label: "Your message", type: "textarea", value: m.content, tall: true },
+          { name: "provider", label: "Provider", type: "select", value: messageProvider(), options: usable.map(([id]) => ({ value: id, label: routeName(id) })) }], "Resend");
+        if (v && v.text && v.text.trim()) redo(m, { text: v.text, provider: v.provider }, `Resent to ${routeName(v.provider)}…`);
+      } }, icon("note", "sm"), "Edit"));
+    }
+    return bits.length ? bits : null;
+  };
   function msgView(m) {
     const meta = m.meta || {}; const user = m.role === "user"; const r = S.routes[m.provider];
     const costBits = [];
@@ -2133,7 +2162,7 @@ async function renderChat() {
         h("div", { class: "mhead" },
           h("div", { class: "who" }, h("strong", {}, user ? "You" : routeName(m.provider) || "Assistant"), !user ? routeTag(r) : null,
             user && m.status === "saved" ? null : statePill(m.status), user ? h("span", { class: "mdot" }, "saved locally") : null),
-          h("span", { class: "macts" }, save,
+          h("span", { class: "macts" }, save, redoActions(m),
             m.role === "assistant" && m.status === "generated" && URLS_IN(m.content).length ? h("button", { type: "button", class: "linkish msave", title: "Fetch the pages this answer cites into the research notebook", onclick: () => guard(() => addLinksAsSources(pid, m.content)) }, icon("link", "sm"), "Add links as sources") : null,
             m.role === "assistant" && m.status === "generated" ? h("button", { type: "button", class: "linkish msave", title: "Prefill a finding in the research notebook", onclick: () => saveAsFinding(pid, m.content) }, icon("note", "sm"), "Save as finding") : null)),
         body,
@@ -2159,6 +2188,7 @@ async function renderChat() {
     if (sig !== S.msgSig) {
       const stick = !S.msgSig || nearBottom();
       S.msgSig = sig; S.streamUpd = {};
+      lastIds = { user: (msgs.filter((x) => x.role === "user").pop() || {}).id, asst: (msgs.filter((x) => x.role === "assistant").pop() || {}).id };
       msgsEl.replaceChildren(...(msgs.length ? msgs.map(msgView) : [h("div", { class: "empty" }, h("div", { class: "eico" }, icon("sparkle")), h("div", { class: "et" }, h("strong", {}, "Ask your first question"),
         h("p", {}, "Your message is saved locally first, then sent with this project's context. Try one of these:"),
         h("div", { class: "suggest" }, ...SUGGESTIONS.map(([ic, s]) => h("button", { type: "button", onclick: () => { ta.value = s; ssSet(draftKey, s); grow(); ta.focus(); } }, icon(ic), h("span", {}, s))))))]));
