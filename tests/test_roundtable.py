@@ -115,7 +115,7 @@ class TestPlanning(Base):
         rec = self.draft(roster=["a", "b", "c", "e"])
         pf = roundtable.preflight(self.store, rec, disc(*(fake_lane(x) for x in "abce")))
         self.assertFalse(pf["start_allowed"])
-        self.assertTrue(any("switched off" in b for b in pf["block_reasons"]))  # owner switch is off by default
+        self.assertTrue(any("Live sessions are off" in b for b in pf["block_reasons"]))  # owner switch is off by default
         lanes.set_live_authorized(self.store, True)
         pf2 = roundtable.preflight(self.store, rec, disc(*(fake_lane(x) for x in "abce"), gates=False))
         self.assertTrue(pf2["start_allowed"], pf2["block_reasons"])
