@@ -46,6 +46,8 @@ elif "Return ONLY JSON: {\"summary\"" in prompt:  # summarize fixture
     mids = _re.findall(r'<message id="([^"]+)"', prompt)
     reply = _json.dumps({"summary": "The team chose SQLite for notes.", "source_ids": mids[:1] + ["msg_bogus"],
                          "open_questions": ["Backup cadence?"]})
+if "JSON array of plan items" in prompt:  # plan-draft fixture
+    reply = _json.dumps([{"step": "Wire the scoring table"}, {"step": "Add renege detection"}])
 if os.environ.get("AESOP_SIM_ASK_RESEARCH") == "1" and "Researcher on call" in prompt and "OPENING" in prompt:
     reply += "\nRESEARCH: sqlite vs lmdb durability for note storage"
 print(reply, flush=True)

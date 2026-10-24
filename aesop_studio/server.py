@@ -16,7 +16,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backup, browse_agent, browser as browser_mod, deletion, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare
+from . import backup, browse_agent, browser as browser_mod, deletion, plan, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare
 from .security import MAX_UPLOAD_BYTES, ScopeError, redact
 from .services import Conflict, Services
 from .sessions import SESSION_DAYS, Sessions
@@ -538,10 +538,45 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"{reviewer} can't review right now; pick another reviewer or none")
         tid = self.app.sup.create(p, prov, b["prompt"].strip(), mode="agent",
                                   timeout=max(30, min(3600, int(b.get("timeout", 900)))))
+        try:
+            plan.add_for_task(self.app.store, pid, tid, b["prompt"])
+        except ValueError:
+            pass  # a full plan never blocks a build
         # every build gets its tests run by Studio afterwards; a reviewer (optional) then sees the results
         team.plan(self.app.store, tid, reviewer)
         team.watch(self.app.store, self.app.sup, self.app.svc, tid)
         self.json(self.app.sup.get(tid), 202)
+
+    @route("GET", r"/api/projects/(\w+)/plan")
+    def plan_list(self, sess, pid):
+        self.app.svc.project(pid)
+        self.json({"items": plan.list_items(self.app.store, self.app.sup, pid),
+                   "activity": plan.activity(self.app.store, pid)})
+
+    @route("POST", r"/api/projects/(\w+)/plan")
+    def plan_add(self, sess, pid):
+        self.app.svc.project(pid)
+        self.json(plan.add(self.app.store, pid, self.body().get("content") or ""), 201)
+
+    @route("PATCH", r"/api/projects/(\w+)/plan/(\w+)")
+    def plan_update(self, sess, pid, iid):
+        self.app.svc.project(pid)
+        b = self.body()
+        self.json(plan.update(self.app.store, pid, iid, b.get("status"), b.get("content")))
+
+    @route("POST", r"/api/projects/(\w+)/plan/(\w+)/delete")
+    def plan_delete(self, sess, pid, iid):
+        self.app.svc.project(pid)
+        self.json(plan.remove(self.app.store, pid, iid))
+
+    @route("POST", r"/api/projects/(\w+)/plan/clear-done")
+    def plan_clear(self, sess, pid):
+        self.app.svc.project(pid)
+        self.json(plan.clear_done(self.app.store, pid))
+
+    @route("POST", r"/api/projects/(\w+)/plan/draft")
+    def plan_draft(self, sess, pid):
+        self.json(plan.draft(self.app.store, self.app.sup, self.app.svc, pid), 202)
 
     @route("GET", r"/api/projects/(\w+)/reviewers")
     def task_reviewers(self, sess, pid):

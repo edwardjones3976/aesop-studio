@@ -1034,3 +1034,22 @@ dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
 .brconnect > .ico { width: 34px; height: 34px; color: var(--sky); }
 .brconnect h3 { margin: 0; font-size: 16px; }
 .brconnect p { max-width: 420px; margin: 0; }
+/* plan tab */
+.planv { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.plan-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.plan-head .ttl { display: flex; align-items: center; gap: 8px; }
+.plan-head h3 { margin: 0; font-size: 15px; }
+.plan-head .ico { color: var(--mint); }
+.plist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.pitem { display: flex; align-items: flex-start; gap: 8px; padding: 7px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--sunken); font-size: 13.5px; line-height: 1.45; min-width: 0; }
+.pitem.next { border-color: rgba(155, 215, 255, .5); }
+.pitem.s-done .ptext { color: var(--text-3); text-decoration: line-through; }
+.pitem.s-failed { border-color: rgba(255, 143, 143, .4); }
+.pitem input[type=checkbox] { margin-top: 2px; }
+.ptext { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; cursor: text; }
+.pstart { min-height: 0; padding: 0 4px; font-size: 14px; color: var(--sky); }
+.pdot { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--amber); flex: none; animation: fuPulse 1.2s ease-in-out infinite; }
+.tag.psrc { background: var(--sky-bg); color: var(--sky); flex: none; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pitem .fdel { opacity: 0; }
+.pitem:hover .fdel, .pitem:focus-within .fdel { opacity: 1; }
+.plan-act h4 { margin: 10px 0 6px; font-size: 13px; color: var(--text-2); }

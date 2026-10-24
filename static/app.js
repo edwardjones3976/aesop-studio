@@ -310,7 +310,8 @@ function openInspector(tab, opener) {
 function setupShell() {
   decorateIcons();
   S.inspPref = localStorageGet("aesop.inspector") !== "0";
-  const it = localStorageGet("aesop.itab"); if (["preview", "files", "changes", "terminal", "logs", "browser"].includes(it)) S.itab = it;
+  const it = localStorageGet("aesop.itab") === "logs" ? "plan" : localStorageGet("aesop.itab");
+  if (["preview", "files", "changes", "terminal", "plan", "browser"].includes(it)) S.itab = it;
   setupSeparator("explorerSep", "e"); setupSeparator("inspectorSep", "i");
   $("explorerBtn").onclick = (e) => (S.ov && S.ov.name === "explorer" ? closeOverlay() : openOverlay("explorer", e.currentTarget));
   $("explorerClose").onclick = () => closeOverlay();
@@ -1558,11 +1559,11 @@ async function renderInspector() {
   const pid = S.project.id;
   try {
     if (S.itab === "browser") return inspBrowser(body, pid, gen);
+    if (S.itab === "plan") return inspPlan(body, pid, gen);
     if (S.itab === "files") return await inspFiles(body, pid, gen);
     if (S.itab === "preview") return await inspPreview(body, pid, gen);
     const tasks = await api("GET", `/api/projects/${pid}/tasks`);
     if (gen !== inspGen) return;
-    if (S.itab === "logs") return inspLogs(body, tasks);
     const tid = S.taskSel && tasks.some((t) => t.id === S.taskSel) ? S.taskSel : tasks[0] && tasks[0].id;
     if (!tid) {
       body.replaceChildren(S.itab === "terminal"
@@ -1759,12 +1760,65 @@ async function inspPreview(body, pid, gen) {
   body.replaceChildren(h("div", { class: "card-head" }, h("div", { class: "ttl" }, statePill(a.kind)), h("span", { class: "faint" }, a.id === S.preview ? fmtTime(a.created) : "Most recent saved item · " + fmtTime(a.created))),
     h("h2", {}, a.title), h("p", { class: "faint" }, "Shown as plain text. HTML in saved items is never rendered or executed."), h("pre", { class: "out" }, a.content));
 }
-function inspLogs(body, tasks) {
-  body.replaceChildren(h("p", { class: "faint" }, "Recent task states from this project's task records (newest first)."),
-    tasks.length ? h("div", { class: "ilist" }, ...tasks.map((t) => h("div", { class: "ilog" }, h("span", { class: "lt" }, fmtClock(t.ended || t.started || t.created)),
-      h("span", { class: "lm" }, statePill(t.state), h("span", {}, routeName(t.provider)), h("code", {}, t.id), t.exit_code !== null && t.exit_code !== undefined ? h("span", { class: "faint" }, `exit ${t.exit_code}`) : null,
-        t.error ? h("span", { class: "faint" }, t.error) : null))))
-      : empty("list", "No log entries", "Each Build task adds its state, provider, exit code and any error here."));
+// The Plan tab: a live checklist. Build tasks file their own items and follow them (doing -> done/failed); the
+// owner adds, checks, edits; a provider can draft next steps from the conversation. Below it, recent activity.
+function inspPlan(body, pid, gen) {
+  let sig = "", timer = null;
+  const live = () => gen === inspGen && body.isConnected;
+  const stamp = (t) => fmtClock(t);
+  const draw = (d) => {
+    const items = d.items || [];
+    const done = items.filter((i) => i.status === "done").length;
+    const addIn = h("input", { type: "text", class: "grow", maxlength: "400", placeholder: "Add a step and press Enter…", "aria-label": "New plan step" });
+    const post = async (m, path, b) => { try { const r = await api(m, path, b); sig = ""; load(); return r; } catch (e) { banner(e.message, "bad"); } };
+    addIn.addEventListener("keydown", (e) => { if (e.key === "Enter" && addIn.value.trim()) { e.preventDefault(); const v = addIn.value; addIn.value = ""; post("POST", `/api/projects/${pid}/plan`, { content: v }); } });
+    const draftBtn = abtn("Draft from chat", async () => {
+      try { const r = await api("POST", `/api/projects/${pid}/plan/draft`); banner(r.note || `${r.provider} added ${r.added.length} step${r.added.length === 1 ? "" : "s"} to the plan.`, r.added.length ? "ok" : ""); sig = ""; load(); }
+      catch (e) { banner(e.message, "bad"); }
+    }, "ghost sm", "sparkle");
+    draftBtn.title = "The project's provider reads the recent conversation and proposes next steps (added unchecked).";
+    const nextId = (items.find((i) => i.status === "doing") || items.find((i) => i.status === "todo") || {}).id;
+    const row = (it) => {
+      const cb = h("input", { type: "checkbox", "aria-label": `Done: ${it.content}` });
+      cb.checked = it.status === "done";
+      cb.addEventListener("change", () => post("PATCH", `/api/projects/${pid}/plan/${it.id}`, { status: cb.checked ? "done" : "todo" }));
+      const startBtn = it.status === "todo" ? h("button", { type: "button", class: "linkish pstart", title: "Mark in progress", onclick: () => post("PATCH", `/api/projects/${pid}/plan/${it.id}`, { status: "doing" }) }, "▸") : null;
+      return h("li", { class: `pitem s-${it.status}` + (it.id === nextId ? " next" : "") },
+        cb, startBtn,
+        it.status === "doing" ? h("span", { class: "pdot", "aria-label": "in progress", title: "in progress" }) : null,
+        it.status === "failed" ? h("span", { class: "pill bad" }, "failed") : null,
+        h("span", { class: "ptext", ondblclick: async () => {
+          const v = await dialog("Edit step", [{ name: "content", label: "Step", type: "textarea", value: it.content }]);
+          if (v && v.content) post("PATCH", `/api/projects/${pid}/plan/${it.id}`, { content: v.content });
+        } }, it.content),
+        it.source && it.source !== "owner" ? h("span", { class: "tag psrc" }, it.source === "build" ? "build" : it.source) : null,
+        h("button", { type: "button", class: "fdel", "aria-label": `Remove ${it.content}`, onclick: () => post("POST", `/api/projects/${pid}/plan/${it.id}/delete`) }, icon("x", "sm")));
+    };
+    body.replaceChildren(h("div", { class: "planv" },
+      h("div", { class: "plan-head" },
+        h("div", { class: "ttl" }, icon("check"), h("h3", {}, "Plan"), items.length ? h("span", { class: "faint" }, `${done} of ${items.length} done`) : null),
+        h("div", { class: "row" }, draftBtn, done ? abtn("Clear done", () => post("POST", `/api/projects/${pid}/plan/clear-done`), "ghost sm", "trash") : null)),
+      addIn,
+      items.length ? h("ol", { class: "plist" }, ...items.map(row))
+        : h("p", { class: "muted" }, "No steps yet. Add one above, let the provider draft some from the chat, or start a Build task — builds file their own steps and tick them off."),
+      h("div", { class: "plan-act" }, h("h4", {}, "Recent activity"),
+        (d.activity || []).length ? h("div", { class: "ilist" }, ...(d.activity || []).map((a) => h("div", { class: "ilog" },
+          h("span", { class: "lt" }, stamp(a.at)), h("span", { class: "lm" }, a.text))))
+          : h("p", { class: "faint" }, "Project activity (builds, reviews, tests, roundtables, research) appears here."))));
+  };
+  const load = async () => {
+    let d;
+    try { d = await api("GET", `/api/projects/${pid}/plan`); } catch (e) { if (live() && !sig) body.replaceChildren(h("div", { class: "note bad" }, icon("alert"), h("span", {}, e.message))); return; }
+    if (!live()) return;
+    const s2 = JSON.stringify(d);
+    if (s2 === sig) return;
+    const typing = body.contains(document.activeElement) && document.activeElement.tagName === "INPUT" && document.activeElement.value;
+    if (typing) return; // never yank the keyboard out of the owner's hands mid-word
+    sig = s2; draw(d);
+  };
+  clearInterval(timer);
+  timer = setInterval(() => { if (!live()) { clearInterval(timer); return; } if (!document.hidden) load(); }, 3000);
+  load();
 }
 function inspTerminal(body, tid, auto) {
   const pre = h("pre", { "aria-live": "off", tabindex: "0", "aria-label": "Task output" });
@@ -2452,7 +2506,7 @@ async function renderAgent(selected) {
     S.taskSel = id; setActivity(`Task ${id}`);
     listEl.querySelectorAll(".task").forEach((b) => b.setAttribute("aria-current", b.dataset.id === id ? "true" : "false"));
     showTask(id, detail, (other) => { if (S.project && S.project.id === pid) { S.taskSel = other; refresh("agent", other); } }, rv);
-    if (inspectorVisible() && !["terminal", "changes", "logs"].includes(S.itab)) setItab("terminal");
+    if (inspectorVisible() && !["terminal", "changes", "plan"].includes(S.itab)) setItab("terminal");
     if (inspectorVisible()) renderInspector();
   };
   listEl.append(...tasks.map((t) => h("button", { class: "task", type: "button", "data-id": t.id, "aria-current": "false", onclick: () => pickTask(t.id) },
