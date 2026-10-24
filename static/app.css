@@ -1049,7 +1049,8 @@ dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
 .ptext { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; cursor: text; }
 .pstart { min-height: 0; padding: 0 4px; font-size: 14px; color: var(--sky); }
 .pdot { width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--amber); flex: none; animation: fuPulse 1.2s ease-in-out infinite; }
-.tag.psrc { background: var(--sky-bg); color: var(--sky); flex: none; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag.psrc { background: var(--sky-bg); color: var(--sky); flex: none; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; line-height: 18px; }
+.pitem .ptext { flex: 1 1 60%; min-width: 120px; }
 .pitem .fdel { opacity: 0; }
 .pitem:hover .fdel, .pitem:focus-within .fdel { opacity: 1; }
 .plan-act h4 { margin: 10px 0 6px; font-size: 13px; color: var(--text-2); }
