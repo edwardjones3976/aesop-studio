@@ -172,6 +172,23 @@ class TestRunThrough(StudyBase):
             time.sleep(0.2)
 
 
+class TestIntake(StudyBase):
+    def test_finish_reads_printed_output_when_result_file_is_empty(self):
+        """Claude Code prints its answer (task log); only Codex writes the result file."""
+        ref = study.add_ref(self.store, str(self.app_root), "Ref App")
+        study.set_ack(self.store, True)
+        st = study.start(self.store, self.sup, self.svc, self.p["id"], ref["id"], "composer")
+        end = time.time() + 30
+        while time.time() < end and study.get(self.store, st["id"])["state"] == "RUNNING":
+            time.sleep(0.2)
+        t = dict(self.sup.get(st["task_id"]))
+        t["checkpoint"] = json.dumps({**json.loads(t["checkpoint"]), "result": ""})
+        self.store.x("UPDATE studies SET state='RUNNING', findings='[]', steps='[]' WHERE id=?", (st["id"],))
+        out = study.finish(self.store, self.sup, self.svc, self.p["id"], st["id"], t, ref, "composer", "simulated")
+        self.assertEqual(out["state"], "DONE")
+        self.assertEqual(len(out["findings"]), 2)
+
+
 class TestRoomHook(unittest.TestCase):
     def test_study_request_grammar(self):
         self.assertEqual(researcher.study_request("study Cursor chat composer drafts"), ("Cursor", "chat composer drafts"))

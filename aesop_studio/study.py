@@ -244,7 +244,8 @@ def finish(store: Store, sup, svc, pid: str, sid: str, task: dict | None, ref: d
         store.x("UPDATE studies SET state='FAILED', error=?, ended=? WHERE id=?", (str(err)[:400], time.time(), sid))
         store.event("study_done", pid, ref=ref["name"], topic=topic, ok=False, error=str(err)[:160])
         return get(store, sid)
-    text = (json.loads(task["checkpoint"] or "{}").get("result") or "")
+    # Codex writes its answer to the result file; Claude Code prints it, so it lives in the task output log
+    text = (json.loads(task["checkpoint"] or "{}").get("result") or "") or sup.output(task["id"])[0]
     d = parse(text)
     src_id = None
     try:

@@ -447,7 +447,7 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         elif mode == "study":  # read-only inspection: file reads plus the rea MCP tools, nothing that writes or runs
             argv += ["--mcp-config", study["mcp_config"], "--strict-mcp-config", "--add-dir", study["ref_path"],
                      "--permission-mode", "default", "--allowedTools", "Read", "Glob", "Grep", "mcp__rea",
-                     "--disallowedTools", "Bash", "Edit", "Write", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]
+                     "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Task"]
         else:
             argv += ["--permission-mode", "acceptEdits",
                      "--disallowedTools", "Bash(rm:*)", "Bash(del:*)", "Bash(Remove-Item:*)", "WebFetch"]
