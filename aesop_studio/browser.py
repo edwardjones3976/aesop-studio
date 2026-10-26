@@ -259,8 +259,10 @@ class Browser:
         self.error = ""
         self.cdp_url = f"http://127.0.0.1:{CDP_PORT}"
 
-        # v2 Extension Bridge state
-        self.pairing_token: str = secrets.token_urlsafe(32)
+        # v2 Extension Bridge state (persistent token in data_dir when provided)
+        self.data_dir: Path | None = Path(data_dir).resolve() if data_dir else None
+        self.token_path: Path | None = (self.data_dir / "browser_pairing.token") if self.data_dir else None
+        self.pairing_token: str = self._load_or_create_token()
         self.ext_last_seen: float = 0.0
         self.ext_cmd_q: queue.Queue = queue.Queue()
         self.ext_pending: dict[str, dict] = {}
@@ -271,6 +273,53 @@ class Browser:
         self.state_seq: int = 0
 
     # ---- Pairing & Extension Bridge ----
+    def _load_or_create_token(self) -> str:
+        if self.token_path is not None:
+            try:
+                if self.token_path.is_file() and not self.token_path.is_symlink():
+                    existing = self.token_path.read_text(encoding="utf-8").strip()
+                    if len(existing) >= 24:
+                        return existing
+            except OSError:
+                pass
+        tok = secrets.token_urlsafe(32)
+        self._write_token_file(tok)
+        return tok
+
+    def _write_token_file(self, token: str) -> None:
+        if self.token_path is None:
+            return
+        try:
+            self.token_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.token_path.with_suffix(".tmp")
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, (token + "\n").encode("utf-8"))
+            finally:
+                os.close(fd)
+            try:
+                os.chmod(tmp, 0o600)
+            except OSError:
+                pass
+            os.replace(tmp, self.token_path)
+            try:
+                os.chmod(self.token_path, 0o600)
+            except OSError:
+                pass
+            if os.name == "nt":
+                user = os.environ.get("USERNAME")
+                domain = os.environ.get("USERDOMAIN")
+                principal = f"{domain}\\{user}" if domain and user else user
+                if principal:
+                    subprocess.run(
+                        ["icacls", str(self.token_path), "/inheritance:r", "/grant:r", f"{principal}:(R,W)"],
+                        capture_output=True,
+                        timeout=5,
+                        creationflags=NEW_GROUP,
+                    )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
     def verify_token(self, token: str | None) -> bool:
         tok = str(token or "").strip()
         return bool(tok) and hmac.compare_digest(self.pairing_token, tok)
@@ -278,6 +327,7 @@ class Browser:
     def rotate_token(self) -> str:
         with self.ext_lock:
             self.pairing_token = secrets.token_urlsafe(32)
+            self._write_token_file(self.pairing_token)
             return self.pairing_token
 
     def pairing_info(self, port: int = 8765) -> dict:

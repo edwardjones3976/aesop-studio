@@ -108,6 +108,43 @@ class TestExtensionBridgeAndSafety(unittest.TestCase):
         self.assertFalse(self.b.verify_token(tok))
         self.assertTrue(self.b.verify_token(new_tok))
 
+    def test_pairing_token_persistence_across_restarts_and_rotation(self):
+        from aesop_studio.browser import Browser
+        td = Path(tempfile.mkdtemp(prefix="aesop-tok-"))
+        try:
+            b1 = Browser(td)
+            tok1 = b1.pairing_token
+            self.assertTrue(len(tok1) >= 24)
+            self.assertIsNotNone(b1.token_path)
+            self.assertTrue(b1.token_path.is_file())
+            self.assertEqual(b1.token_path.read_text(encoding="utf-8").strip(), tok1)
+
+            # Simulating Studio restart on the same data_dir preserves the exact token
+            b2 = Browser(td)
+            self.assertEqual(b2.pairing_token, tok1)
+            self.assertTrue(b2.verify_token(tok1))
+
+            # Rotating the token updates both memory and the persistent file
+            tok_rot = b2.rotate_token()
+            self.assertNotEqual(tok_rot, tok1)
+            self.assertEqual(b2.token_path.read_text(encoding="utf-8").strip(), tok_rot)
+
+            b3 = Browser(td)
+            self.assertEqual(b3.pairing_token, tok_rot)
+            self.assertFalse(b3.verify_token(tok1))
+            self.assertTrue(b3.verify_token(tok_rot))
+        finally:
+            shutil.rmtree(td, ignore_errors=True)
+
+    def test_js_pairing_security_suite(self):
+        import subprocess
+        node_bin = shutil.which("node")
+        if not node_bin:
+            self.skipTest("node not on PATH")
+        script = Path(__file__).resolve().parent / "js" / "test_pairing.mjs"
+        r = subprocess.run([node_bin, str(script)], capture_output=True, text=True, timeout=15)
+        self.assertEqual(r.returncode, 0, msg=f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}")
+
     def test_bridge_push_sanitizes_urls_secrets_and_passwords(self):
         res = self.b.bridge_push({
             "url": "https://github.com/example/repo?access_token=ghp_abcdefghijklmnopqrstuvwxyz1234",
@@ -391,6 +428,18 @@ class TestBrowserHttpRoutes(unittest.TestCase):
         st, _, raw = self.req("GET", "/api/browser/pairing", headers={"Cookie": cookie})
         self.assertEqual(st, 200)
         tok = json.loads(raw)["pairing_token"]
+        self.assertTrue(self.srv.app.browser.token_path.is_file())
+        self.assertEqual(self.srv.app.browser.token_path.read_text(encoding="utf-8").strip(), tok)
+        # Rotate via HTTP endpoint and verify persistence to disk
+        st, _, raw_rot = self.req("POST", "/api/browser/pairing/rotate", {}, {
+            "Cookie": cookie,
+            "Origin": f"http://127.0.0.1:{self.port}",
+            "X-CSRF-Token": csrf,
+            "Content-Type": "application/json",
+        })
+        self.assertEqual(st, 200)
+        tok = json.loads(raw_rot)["pairing_token"]
+        self.assertEqual(self.srv.app.browser.token_path.read_text(encoding="utf-8").strip(), tok)
         # External web Origin is rejected even if token were known
         st, _, _ = self.req("POST", "/api/browser/bridge/push", {"url": "https://x.org"}, {
             "X-Aesop-Bridge-Token": tok,

@@ -3,28 +3,40 @@
 // with pairing-token authentication. Never reads cookies, storage, or password values.
 "use strict";
 
+const PAIR_RATE_LIMIT_MS = 1000;
+
 let state = {
   port: 8765,
   token: "",
+  confirmed: false,
   paired: false,
   targetTabId: null,
   lastError: "",
   polling: false,
   pushTimer: null,
+  pendingPair: null,
+  lastPairAttemptAt: 0,
 };
 
-chrome.storage.local.get(["port", "token", "targetTabId"], (res) => {
+chrome.storage.local.get(["port", "token", "confirmed", "targetTabId", "pendingPair"], (res) => {
   if (res.port) state.port = Number(res.port) || 8765;
-  if (res.token) state.token = String(res.token);
+  if (res.token && res.confirmed === true) {
+    state.token = String(res.token);
+    state.confirmed = true;
+  }
   if (res.targetTabId) state.targetTabId = Number(res.targetTabId);
-  if (state.token) {
+  if (res.pendingPair && typeof res.pendingPair === "object" && res.pendingPair.port && res.pendingPair.token) {
+    state.pendingPair = res.pendingPair;
+    updateActionBadge();
+  }
+  if (state.confirmed && state.token) {
     startBridgeLoop();
   }
 });
 
 chrome.alarms.create("aesop-keepalive", { periodInMinutes: 0.4 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "aesop-keepalive" && state.token && !state.polling) {
+  if (alarm.name === "aesop-keepalive" && state.confirmed && state.token && !state.polling) {
     startBridgeLoop();
   }
 });
@@ -33,8 +45,22 @@ function saveState() {
   chrome.storage.local.set({
     port: state.port,
     token: state.token,
+    confirmed: state.confirmed,
     targetTabId: state.targetTabId,
+    pendingPair: state.pendingPair,
   });
+}
+
+function updateActionBadge() {
+  if (!chrome.action || !chrome.action.setBadgeText) return;
+  if (state.pendingPair && state.pendingPair.port) {
+    chrome.action.setBadgeText({ text: "1" });
+    if (chrome.action.setBadgeBackgroundColor) {
+      chrome.action.setBadgeBackgroundColor({ color: "#FF916C" });
+    }
+  } else {
+    chrome.action.setBadgeText({ text: "" });
+  }
 }
 
 function isStudioUrl(url) {
@@ -568,7 +594,7 @@ function waitForTabLoad(tabId, timeoutMs = 8000) {
 }
 
 async function studioFetch(path, method = "GET", body = null) {
-  if (!state.token) throw new Error("Missing pairing token");
+  if (!state.confirmed || !state.token || !state.port) throw new Error("Missing confirmed pairing token");
   const headers = {
     "X-Aesop-Bridge-Token": state.token,
   };
@@ -587,7 +613,7 @@ async function studioFetch(path, method = "GET", body = null) {
 }
 
 async function pushCurrentTabState() {
-  if (!state.token) return;
+  if (!state.confirmed || !state.token || !state.port) return;
   try {
     const tab = await getTargetTab(false);
     const payload = tab
@@ -602,10 +628,10 @@ async function pushCurrentTabState() {
 }
 
 async function startBridgeLoop() {
-  if (state.polling || !state.token) return;
+  if (state.polling || !state.confirmed || !state.token || !state.port) return;
   state.polling = true;
   await pushCurrentTabState();
-  while (state.token && state.polling) {
+  while (state.confirmed && state.token && state.polling) {
     try {
       const res = await studioFetch("/api/browser/bridge/poll?wait=1", "GET");
       state.paired = true;
@@ -646,15 +672,224 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   } catch (_e) {}
 });
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+function parseLoopbackHttpOrigin(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") return null;
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol !== "http:") return null;
+    if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") return null;
+    const port = u.port ? Number(u.port) : 80;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+    return {
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port,
+      origin: `http://127.0.0.1:${port}`,
+    };
+  } catch (_e) {
+    return null;
+  }
+}
+
+function validatePairSender(sender, msg) {
+  const myId = chrome && chrome.runtime && chrome.runtime.id;
+  if (!sender || typeof sender !== "object" || !myId || sender.id !== myId) {
+    return { ok: false, error: "untrusted sender id" };
+  }
+  const tabUrl = sender.tab && typeof sender.tab.url === "string" ? sender.tab.url : "";
+  const originUrl = typeof sender.origin === "string" ? sender.origin : "";
+  if (!tabUrl && !originUrl) {
+    return { ok: false, error: "missing sender tab origin" };
+  }
+  const parsedTab = tabUrl ? parseLoopbackHttpOrigin(tabUrl) : null;
+  const parsedOrigin = originUrl ? parseLoopbackHttpOrigin(originUrl) : null;
+  if (tabUrl && !parsedTab) {
+    return { ok: false, error: "untrusted sender tab url" };
+  }
+  if (originUrl && !parsedOrigin) {
+    return { ok: false, error: "untrusted sender origin" };
+  }
+  if (
+    parsedTab &&
+    parsedOrigin &&
+    (parsedTab.port !== parsedOrigin.port || parsedTab.hostname !== parsedOrigin.hostname)
+  ) {
+    return { ok: false, error: "sender tab and origin mismatch" };
+  }
+  const derived = parsedOrigin || parsedTab;
+  if (msg && msg.port !== undefined && msg.port !== null && msg.port !== "") {
+    if (Number(msg.port) !== derived.port) {
+      return { ok: false, error: "port does not match sender origin" };
+    }
+  }
+  return { ok: true, port: derived.port, origin: derived.origin };
+}
+
+function isExtensionUiSender(sender) {
+  const myId = chrome && chrome.runtime && chrome.runtime.id;
+  if (!sender || typeof sender !== "object" || !myId || sender.id !== myId) {
+    return false;
+  }
+  if (sender.tab) {
+    return false;
+  }
+  return true;
+}
+
+function notifyPendingPair(pending) {
+  updateActionBadge();
+  if (chrome.notifications && chrome.notifications.create) {
+    try {
+      chrome.notifications.create("aesop-pair-confirm", {
+        type: "basic",
+        iconUrl:
+          "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        title: "Aesop Studio Browser Bridge",
+        message: pending.prompt,
+        buttons: [{ title: "Confirm Pairing" }, { title: "Reject" }],
+        requireInteraction: true,
+      });
+    } catch (_e) {}
+  }
+}
+
+async function approvePendingPair() {
+  if (!state.pendingPair) {
+    return { ok: false, error: "no pending pairing confirmation" };
+  }
+  const pending = state.pendingPair;
+  state.pendingPair = null;
+  state.port = pending.port;
+  state.token = pending.token;
+  state.confirmed = true;
+  state.lastPairAttemptAt = 0;
+  saveState();
+  updateActionBadge();
+  await pushCurrentTabState();
+  if (!state.polling) startBridgeLoop();
+  return { ok: state.paired, paired: state.paired, confirmed: true, port: state.port, error: state.lastError };
+}
+
+function rejectPendingPair() {
+  state.pendingPair = null;
+  saveState();
+  updateActionBadge();
+  return { ok: true, cancelled: true };
+}
+
+if (chrome.notifications && chrome.notifications.onButtonClicked) {
+  chrome.notifications.onButtonClicked.addListener((notifId, btnIdx) => {
+    if (notifId !== "aesop-pair-confirm") return;
+    if (btnIdx === 0) {
+      approvePendingPair();
+    } else {
+      rejectPendingPair();
+    }
+    if (chrome.notifications.clear) {
+      chrome.notifications.clear("aesop-pair-confirm");
+    }
+  });
+}
+
+async function handlePairRequest(msg, sender) {
+  const check = validatePairSender(sender, msg);
+  if (!check.ok) {
+    return { ok: false, error: check.error };
+  }
+  const originPort = check.port;
+  const token = String((msg && msg.token) || "").trim();
+  if (!token) {
+    return { ok: false, error: "missing pairing token" };
+  }
+
+  // Ignore AESOP_PAIR messages while a confirmation is pending
+  if (state.pendingPair) {
+    return {
+      ok: false,
+      pending: true,
+      port: state.pendingPair.port,
+      prompt: state.pendingPair.prompt,
+      error: "confirmation already pending",
+    };
+  }
+
+  // Rate-limit AESOP_PAIR attempts
+  const now = Date.now();
+  if (state.lastPairAttemptAt > 0 && now - state.lastPairAttemptAt < PAIR_RATE_LIMIT_MS) {
+    return {
+      ok: false,
+      rateLimited: true,
+      error: "rate limited",
+    };
+  }
+  state.lastPairAttemptAt = now;
+
+  // Silent re-pair is allowed ONLY for the exact SAME port AND SAME token already confirmed
+  if (state.confirmed && state.port === originPort && state.token === token) {
+    await pushCurrentTabState();
+    if (!state.polling) startBridgeLoop();
+    return { ok: state.paired, paired: state.paired, confirmed: true, port: state.port, error: state.lastError };
+  }
+
+  // First pairing, any port change, or any token change requires explicit owner confirmation in extension UI
+  const prompt = `Pair with Aesop Studio at 127.0.0.1:${originPort}?`;
+  state.pendingPair = {
+    port: originPort,
+    token,
+    origin: check.origin,
+    prompt,
+    requestedAt: now,
+  };
+  saveState();
+  notifyPendingPair(state.pendingPair);
+  return {
+    ok: false,
+    pendingConfirmation: true,
+    port: originPort,
+    prompt,
+    error: "owner confirmation required in extension",
+  };
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return false;
   if (msg.type === "AESOP_PAIR") {
-    state.port = Number(msg.port || 8765) || 8765;
-    state.token = String(msg.token || "").trim();
+    handlePairRequest(msg, sender).then((res) => sendResponse(res));
+    return true;
+  }
+  if (msg.type === "AESOP_CONFIRM_PAIR") {
+    if (!isExtensionUiSender(sender)) {
+      sendResponse({ ok: false, error: "confirmation must come from extension UI" });
+      return false;
+    }
+    if (msg.approve) {
+      approvePendingPair().then((res) => sendResponse(res));
+      return true;
+    }
+    sendResponse(rejectPendingPair());
+    return false;
+  }
+  if (msg.type === "AESOP_MANUAL_PAIR") {
+    if (!isExtensionUiSender(sender)) {
+      sendResponse({ ok: false, error: "manual pairing must come from extension UI" });
+      return false;
+    }
+    const port = Number(msg.port || 8765);
+    const token = String(msg.token || "").trim();
+    if (!Number.isInteger(port) || port < 1 || port > 65535 || !token) {
+      sendResponse({ ok: false, error: "invalid port or token" });
+      return false;
+    }
+    state.pendingPair = null;
+    state.port = port;
+    state.token = token;
+    state.confirmed = true;
+    state.lastPairAttemptAt = 0;
     saveState();
+    updateActionBadge();
     pushCurrentTabState().then(() => {
       if (!state.polling) startBridgeLoop();
-      sendResponse({ ok: state.paired, port: state.port, error: state.lastError });
+      sendResponse({ ok: state.paired, confirmed: true, port: state.port, error: state.lastError });
     });
     return true;
   }
@@ -662,16 +897,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     listBrowseableTabs().then((tabs) => {
       sendResponse({
         paired: state.paired,
+        confirmed: state.confirmed,
         port: state.port,
         hasToken: !!state.token,
         targetTabId: state.targetTabId,
         lastError: state.lastError,
+        pendingPair: state.pendingPair
+          ? {
+              port: state.pendingPair.port,
+              origin: state.pendingPair.origin,
+              prompt: state.pendingPair.prompt,
+            }
+          : null,
         tabs,
       });
     });
     return true;
   }
   if (msg.type === "AESOP_USE_TAB") {
+    if (!isExtensionUiSender(sender)) {
+      sendResponse({ ok: false, error: "untrusted sender" });
+      return false;
+    }
     state.targetTabId = Number(msg.tabId) || null;
     saveState();
     pushCurrentTabState().then(() => {
@@ -681,3 +928,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   return false;
 });
+
+globalThis.__aesopBridgeTest = {
+  state,
+  PAIR_RATE_LIMIT_MS,
+  parseLoopbackHttpOrigin,
+  validatePairSender,
+  handlePairRequest,
+  approvePendingPair,
+  rejectPendingPair,
+};

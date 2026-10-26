@@ -116,7 +116,7 @@ The Inspector **Browser** tab connects directly to your normal Chrome browser so
 
 1. Open `chrome://extensions` in your normal Chrome and turn on **Developer mode** (top-right).
 2. Click **Load unpacked** and select the `extension/` folder inside this repository.
-3. Open Aesop Studio in Chrome and select the **Browser** tab in the right Inspector — the extension auto-pairs over `127.0.0.1` using a per-instance 192-bit pairing token (`X-Aesop-Bridge-Token`). (If Studio is open in another browser, copy the pairing code from the Browser panel into the extension popup.)
+3. Open Aesop Studio in Chrome, select the **Browser** tab in the right Inspector, and click **Confirm Pairing** once in the extension popup or notification (`"Pair with Aesop Studio at 127.0.0.1:<port>?"`). Studio stores its 256-bit pairing token (`X-Aesop-Bridge-Token`) persistently in `browser_pairing.token` inside the Studio data directory (user-only permissions), so subsequent Studio restarts on the same port reconnect automatically without another click, while any port or token change asks for confirmation in the extension UI.
 
 Capabilities and safety guarantees:
 - **Live viewport (`<= 1 s`) & DOM hotspots:** interactive `[#ref]` element overlays let you or a provider click buttons/links by semantic reference, switch/open/close tabs, search in-page (`Find`), or inspect the **Structure view** (headings, interactive elements, forms, and main text).

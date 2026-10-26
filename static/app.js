@@ -1642,12 +1642,15 @@ async function renderInspector() {
 }
 // The Browser tab mirrors and drives a tab in the OWNER'S own Chrome (their profile, logins, extensions). There is
 // no separate Studio browser: when Chrome isn't connected yet, the panel shows one connect action and nothing else.
-async function publishBrowserPairing() {
+async function publishBrowserPairing(force = false) {
   try {
     const p = await api("GET", "/api/browser/pairing");
     if (p && p.pairing_token) {
-      document.documentElement.dataset.aesopBridge = JSON.stringify({ port: p.port, token: p.pairing_token });
-      window.postMessage({ type: "AESOP_STUDIO_PAIR", port: p.port, token: p.pairing_token }, window.location.origin);
+      const next = JSON.stringify({ port: p.port, token: p.pairing_token });
+      if (force || document.documentElement.dataset.aesopBridge !== next) {
+        document.documentElement.dataset.aesopBridge = next;
+        window.postMessage({ type: "AESOP_STUDIO_PAIR", port: p.port, token: p.pairing_token }, window.location.origin);
+      }
     }
     return p;
   } catch { return null; }
@@ -1667,10 +1670,10 @@ function inspBrowser(body, pid, gen) {
       catch { banner(`Extension folder: ${extDir}`, "ok"); }
     }, "primary sm", "folder");
     const pairNow = abtn("Check & pair extension", async () => {
-      await publishBrowserPairing();
+      await publishBrowserPairing(true);
       const s = await api("GET", "/api/browser");
       if (s && s.connected) { banner("Connected to your Chrome via Extension Bridge.", "ok"); inspBrowser(body, pid, gen); }
-      else banner("Waiting for extension. Load the unpacked folder in chrome://extensions or click its toolbar icon.", "warn");
+      else banner("Click the Aesop Studio Bridge extension icon in Chrome to confirm pairing (1 click).", "warn");
     }, "sm", "refresh");
     const copyCode = pairCode ? btn("Copy pairing code", async () => {
       try { await navigator.clipboard.writeText(pairCode); banner("Copied pairing code to clipboard.", "ok"); }
@@ -1690,7 +1693,7 @@ function inspBrowser(body, pid, gen) {
       h("ol", { class: "brsteps-setup" },
         h("li", {}, "Open ", h("code", {}, "chrome://extensions"), " in your normal Chrome and enable ", h("strong", {}, "Developer mode"), " (top-right)."),
         h("li", {}, "Click ", h("strong", {}, "Load unpacked"), " and select: ", h("code", { class: "brpath" }, extDir)),
-        h("li", {}, "Keep this Studio tab open (or click the extension icon) — it pairs automatically using a loopback pairing token.")),
+        h("li", {}, "Click the extension icon (or notification) to confirm ", h("strong", {}, `Pair with Aesop Studio at 127.0.0.1:${(pair && pair.port) || window.location.port || 8765}?`), " once. Subsequent Studio restarts on the same port reconnect automatically.")),
       h("div", { class: "row wrap" }, copyExt, pairNow, copyCode),
       st && st.chrome_found !== false ? h("div", { class: "brfallback" },
         h("span", { class: "faint" }, "Or use the isolated CDP fallback window (separate Chrome profile): "), goFallback) : null));
@@ -1698,7 +1701,7 @@ function inspBrowser(body, pid, gen) {
     autoTimer = setInterval(async () => {
       if (!live()) { clearInterval(autoTimer); return; }
       try {
-        await publishBrowserPairing();
+        await publishBrowserPairing(false);
         const s = await api("GET", "/api/browser");
         if (s && s.connected && live()) { clearInterval(autoTimer); inspBrowser(body, pid, gen); }
       } catch { /* wait */ }

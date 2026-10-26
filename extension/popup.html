@@ -67,13 +67,39 @@
     border-color: #3A4D63;
     color: #EEF4FA;
   }
+  .confirm-box {
+    border: 1px solid #FF916C;
+    border-radius: 8px;
+    background: #172331;
+    padding: 10px;
+    margin-bottom: 10px;
+  }
+  .confirm-prompt {
+    font-weight: 600;
+    margin: 0 0 8px;
+    color: #EEF4FA;
+  }
+  .confirm-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .confirm-actions button {
+    margin-bottom: 0;
+  }
 </style>
 </head>
 <body>
   <h1><span id="dot" class="dot"></span><span id="statusTitle">Aesop Studio Bridge</span></h1>
   <p id="statusNote" class="muted">Checking Studio connection…</p>
+  <div id="confirmBox" class="confirm-box" hidden>
+    <p id="confirmPrompt" class="confirm-prompt">Pair with Aesop Studio at 127.0.0.1:8765?</p>
+    <div class="confirm-actions">
+      <button id="confirmApproveBtn" type="button">Confirm Pairing</button>
+      <button id="confirmRejectBtn" class="secondary" type="button">Reject</button>
+    </div>
+  </div>
   <button id="useTabBtn" class="secondary" type="button">Share Active Tab with Studio</button>
-  <label for="pairIn">Pairing code (auto-detected when Studio is open)</label>
+  <label for="pairIn">Pairing code (or confirm prompt above)</label>
   <input id="pairIn" type="text" placeholder="127.0.0.1:8765#token">
   <button id="pairBtn" type="button">Pair with Studio</button>
   <script src="popup.js"></script>

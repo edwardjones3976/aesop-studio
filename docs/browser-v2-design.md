@@ -20,10 +20,12 @@ Browser v2 replaces the single-track CDP screenshot loop with a three-part archi
 A Manifest V3 extension (**Aesop Studio Browser Bridge**) runs directly inside the owner's everyday Chrome profile:
 
 - **Zero re-sign-in, zero Chrome restart:** Because the extension runs in the normal Chrome profile, the owner's existing Google, GitHub, and other logins work immediately in place.
-- **Automatic & 1-click pairing with cryptographic token authentication:**
-  - On startup, Studio generates a 256-bit `pairing_token` (`secrets.token_urlsafe(32)`).
+- **Origin-locked & owner-confirmed pairing with persistent cryptographic token authentication:**
+  - Studio creates a 256-bit `pairing_token` (`secrets.token_urlsafe(32)`) once in its data directory (`browser_pairing.token`, user-only `0600`-equivalent permissions) so normal Studio restarts keep the same token, while `POST /api/browser/pairing/rotate` rotates it on demand.
   - Every extension request to `/api/browser/bridge/*` must present `X-Aesop-Bridge-Token: <pairing_token>`, verified with `hmac.compare_digest`. Unauthenticated localhost callers and cross-origin pages are rejected (`403 Forbidden`).
-  - When the owner opens Aesop Studio in Chrome, Studio's authenticated UI publishes a loopback pairing handshake (`data-aesop-bridge` / `window.postMessage` of type `AESOP_STUDIO_PAIR`) that the extension's loopback content script (`content_pair.js`) picks up automatically. The owner can also pair with one click from the Browser panel or the extension popup.
+  - In `extension/background.js`, `AESOP_PAIR` never trusts a page-supplied port: it requires `sender.id === chrome.runtime.id`, requires a loopback `http://127.0.0.1:<port>` or `http://localhost:<port>` origin from `sender.origin` / `sender.tab.url`, and rejects any message whose `port` differs from the sender tab's origin.
+  - First pairing, any port change, or any token change requires one explicit owner confirmation click in the extension UI (`"Pair with Aesop Studio at 127.0.0.1:<port>?"` via the extension popup or `chrome.notifications` button), and never silently switches an existing pairing to a different port. While a confirmation is pending, subsequent `AESOP_PAIR` messages are ignored, and pairing requests are rate-limited.
+  - Silent re-pairing is permitted **only** when both the sender origin's `port` AND the `token` match the already-confirmed pairing (so restarting Studio on the same port reconnects seamlessly without re-prompting).
 - **No credentials or cookies leave Chrome:** The extension never requests `cookies` permission, never reads `document.cookie`, `localStorage`, or `sessionStorage`, and blanks out all password inputs before building DOM snapshots.
 - **Dual-transport resilience:** `Browser` (`aesop_studio/browser.py`) prioritizes the Extension Bridge whenever paired and active, while retaining automatic fallback to the Playwright worker (including worktree-aware `.venv` discovery and enhanced DOM snapshot commands in `browser_worker.py`) when running in legacy/CDP environments.
 
@@ -57,7 +59,7 @@ Instead of 2.5-second blind PNG polling:
 
 ## 3. Defense-in-Depth Safety Guarantees
 
-1. **Loopback-Only + Pairing Token:** Server binds `127.0.0.1` only. All `/api/browser/bridge/*` routes require `X-Aesop-Bridge-Token` matching `Browser.pairing_token` via `hmac.compare_digest`.
+1. **Loopback-Only + Origin-Locked, Owner-Confirmed Pairing Token:** Server binds `127.0.0.1` only. All `/api/browser/bridge/*` routes require `X-Aesop-Bridge-Token` matching the persistent `Browser.pairing_token` (`browser_pairing.token` in the data directory, user-only permissions) via `hmac.compare_digest`. The extension derives the port strictly from `sender.origin` / `sender.tab.url` (`sender.id === chrome.runtime.id`), requires explicit owner confirmation in the extension UI (`"Pair with Aesop Studio at 127.0.0.1:<port>?"`) on first pairing or any port/token change, ignores `AESOP_PAIR` while a confirmation is pending, and rate-limits pairing requests.
 2. **Hard Refusals on Passwords, CAPTCHAs, and Purchases:** Enforced in `browse_agent.py`, `browser.py`, `browser_worker.py`, and `extension/content.js`:
    - Agents cannot type into or fill password fields (`input[type=password]`, `autocomplete=current-password|new-password`, or password-labelled inputs).
    - Agents cannot interact with CAPTCHA challenges (`recaptcha`, `hcaptcha`, `cf-turnstile`, `captcha`).
