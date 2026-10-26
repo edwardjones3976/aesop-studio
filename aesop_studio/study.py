@@ -246,6 +246,15 @@ def _watch(store, sup, svc, pid, sid, tid, ref, topic, route) -> None:
     finish(store, sup, svc, pid, sid, t, ref, topic, route)
 
 
+_FINISH_LOCKS: dict[str, threading.Lock] = {}
+_FINISH_LOCKS_GUARD = threading.Lock()
+
+
+def _finish_lock(pid: str) -> threading.Lock:
+    with _FINISH_LOCKS_GUARD:
+        return _FINISH_LOCKS.setdefault(pid, threading.Lock())
+
+
 def finish(store: Store, sup, svc, pid: str, sid: str, task: dict | None, ref: dict, topic: str, route: str) -> dict:
     if not task or task["state"] != "COMPLETED":
         err = (task or {}).get("error") or (task or {}).get("state") or "no task record"
@@ -264,14 +273,18 @@ def finish(store: Store, sup, svc, pid: str, sid: str, task: dict | None, ref: d
     except Exception as e:  # noqa: BLE001 - the notebook is a bonus; the study record is the source of truth
         store.event("study_notebook_error", pid, error=f"{type(e).__name__}: {str(e)[:120]}")
     added = 0
-    existing = {r["content"].lower() for r in plan.list_items(store, sup, pid)}
-    for s in d["steps"]:
-        if s.lower() not in existing:
-            try:
-                plan.add(store, pid, s, source=f"Study: {ref['name']}"[:40])
-                added += 1
-            except ValueError:
-                break  # plan full
+    # Ruling R-1 (Fix B, Foreman 2026-10-26): the snapshot-then-insert below is serialized per project, so
+    # studies finishing at once cannot both add the same step. plan.add itself stays permissive for owner input.
+    with _finish_lock(pid):
+        existing = {r["content"].lower() for r in plan.list_items(store, sup, pid)}
+        for s in d["steps"]:
+            if s.lower() not in existing:
+                try:
+                    plan.add(store, pid, s, source=f"Study: {ref['name']}"[:40])
+                    added += 1
+                    existing.add(s.lower())
+                except ValueError:
+                    break  # plan full
     store.x("UPDATE studies SET state='DONE', findings=?, steps=?, report=?, ended=? WHERE id=?",
             (json.dumps(d["findings"]), json.dumps(d["steps"]), d["report"], time.time(), sid))
     store.event("study_done", pid, ref=ref["name"], topic=topic, ok=True, findings=len(d["findings"]),

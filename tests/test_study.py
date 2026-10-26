@@ -234,6 +234,25 @@ class TestStressFixes(StudyBase):
         self.assertEqual(rows[0]["state"], "DONE")
         self.assertEqual(len(rows[0]["findings"]), 2)
 
+    def test_concurrent_finishes_do_not_duplicate_plan_steps(self):
+        """Ruling R-1 (Fix B): twenty studies finishing at once with the same steps leave one row per step."""
+        from concurrent.futures import ThreadPoolExecutor
+        ref = study.add_ref(self.store, str(self.app_root), "Ref App")
+        study.set_ack(self.store, True)
+        st = study.start(self.store, self.sup, self.svc, self.p["id"], ref["id"], "composer")
+        end = time.time() + 30
+        while time.time() < end and study.get(self.store, st["id"])["state"] == "RUNNING":
+            time.sleep(0.2)
+        for i in plan.list_items(self.store, self.sup, self.p["id"]):
+            self.store.x("DELETE FROM plan_items WHERE id=?", (i["id"],))
+        t = self.sup.get(st["task_id"])
+        with ThreadPoolExecutor(max_workers=20) as ex:
+            list(ex.map(lambda _: study.finish(self.store, self.sup, self.svc, self.p["id"], st["id"], t, ref,
+                                               "composer", "simulated"), range(20)))
+        contents = [i["content"] for i in plan.list_items(self.store, self.sup, self.p["id"])]
+        self.assertEqual(len(contents), 2)
+        self.assertEqual(len(set(c.lower() for c in contents)), 2)
+
     def test_start_refuses_non_study_capable_provider_explicitly(self):
         ref = study.add_ref(self.store, str(self.app_root), "Ref App")
         study.set_ack(self.store, True)
