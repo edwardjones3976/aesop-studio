@@ -18,7 +18,9 @@ function updateUI(st) {
   if (st && st.paired) {
     dot.className = "dot ok";
     title.textContent = `Connected (127.0.0.1:${st.port})`;
-    note.textContent = "Your normal Chrome profile and logins are linked to Aesop Studio.";
+    note.textContent = st.lastError
+      ? `Last error: ${st.lastError}`
+      : "Your normal Chrome profile and logins are linked to Aesop Studio.";
   } else if (st && st.pendingPair && st.pendingPair.port) {
     dot.className = "dot";
     title.textContent = "Confirmation required";

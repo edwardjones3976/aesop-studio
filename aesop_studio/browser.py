@@ -229,9 +229,12 @@ def _sanitize_snapshot(raw: dict) -> dict:
                 "active": bool(tb.get("active")),
                 "selected": bool(tb.get("selected")),
             })
+    last_err = redact(str(raw.get("lastError") or raw.get("last_error") or raw.get("error") or "")[:300])
     return {
         "ok": bool(raw.get("ok", True)),
         "error": redact(str(raw.get("error") or "")[:300]),
+        "last_error": last_err,
+        "lastError": last_err,
         "url": url,
         "title": title,
         "vw": vw,
@@ -257,6 +260,7 @@ class Browser:
         self.q: queue.Queue = queue.Queue()
         self.last = {"url": "", "title": ""}
         self.error = ""
+        self.last_error = ""
         self.cdp_url = f"http://127.0.0.1:{CDP_PORT}"
 
         # v2 Extension Bridge state (persistent token in data_dir when provided)
@@ -346,20 +350,35 @@ class Browser:
         snap = _sanitize_snapshot(raw)
         with self.ext_lock:
             self.ext_last_seen = time.time()
-            # Keep previous elements/text if a lightweight update omitted them
-            if not snap["elements"] and self.ext_state.get("elements") and snap["url"] == self.ext_state.get("url"):
-                if "elements" not in raw:
+            if not snap["url"] and self.ext_state.get("url") and "url" not in raw:
+                snap["url"] = self.ext_state["url"]
+            if not snap["title"] and self.ext_state.get("title") and "title" not in raw:
+                snap["title"] = self.ext_state["title"]
+            # Keep previous structural fields if a lightweight capture update omitted them
+            if snap["url"] == self.ext_state.get("url"):
+                if not snap["elements"] and self.ext_state.get("elements") and "elements" not in raw:
                     snap["elements"] = self.ext_state["elements"]
-            if not snap["text"] and self.ext_state.get("text") and snap["url"] == self.ext_state.get("url"):
-                if "text" not in raw:
+                if not snap["text"] and self.ext_state.get("text") and "text" not in raw:
                     snap["text"] = self.ext_state["text"]
                     snap["main_text"] = self.ext_state.get("main_text", "")
+                if not snap["headings"] and self.ext_state.get("headings") and "headings" not in raw:
+                    snap["headings"] = self.ext_state["headings"]
+                if not snap["forms"] and self.ext_state.get("forms") and "forms" not in raw:
+                    snap["forms"] = self.ext_state["forms"]
+                if not snap["links"] and self.ext_state.get("links") and "links" not in raw:
+                    snap["links"] = self.ext_state["links"]
+                if "scrollY" not in raw and "scrollY" in self.ext_state:
+                    snap["scrollY"] = self.ext_state["scrollY"]
+                    snap["docH"] = self.ext_state.get("docH", snap["vh"])
             if not snap["tabs"] and self.ext_state.get("tabs") and "tabs" not in raw:
                 snap["tabs"] = self.ext_state["tabs"]
             self.ext_state = snap
             if snap["url"] or snap["title"]:
                 self.last = {"url": snap["url"], "title": snap["title"]}
             self.error = snap["error"]
+            raw_last_err = str(raw.get("lastError") or raw.get("last_error") or snap.get("error") or "").strip()
+            if raw_last_err:
+                self.last_error = redact(raw_last_err[:300])
             self.state_seq += 1
             png_b64 = raw.get("png")
             if isinstance(png_b64, str) and png_b64:
@@ -381,9 +400,11 @@ class Browser:
         snap = self._ingest_ext_state(payload or {})
         return {"ok": True, "state_seq": self.state_seq, "frame_seq": self.frame_seq, "url": snap["url"]}
 
-    def bridge_poll(self, wait_s: float = 1.5) -> dict:
+    def bridge_poll(self, wait_s: float = 1.5, last_error: str = "") -> dict:
         with self.ext_lock:
             self.ext_last_seen = time.time()
+            if last_error:
+                self.last_error = redact(str(last_error)[:300])
         try:
             cmd = self.ext_cmd_q.get(timeout=max(0.01, min(5.0, float(wait_s))))
             return {"ok": True, "cmd": cmd}
@@ -430,7 +451,7 @@ class Browser:
 
     def status(self) -> dict:
         ext_conn = self.extension_connected()
-        cdp_conn = _port_open()
+        cdp_conn = False if ext_conn else _port_open()
         avail = self.available()
         return {
             "available": avail,
@@ -443,7 +464,9 @@ class Browser:
             "chrome_found": chrome_exe() is not None,
             "url": self.last.get("url", ""),
             "title": self.last.get("title", ""),
-            "error": self.error,
+            "error": self.error or self.last_error,
+            "last_error": self.last_error,
+            "lastError": self.last_error,
             "frame_seq": self.frame_seq,
             "state_seq": self.state_seq,
             "tabs": self.ext_state.get("tabs", []),
@@ -555,6 +578,18 @@ class Browser:
             if not url.lower().startswith(("http://", "https://")):
                 return {"ok": False, "error": "only http(s) pages are allowed", **self.last}
             args["url"] = url
+
+        if op in ("click_ref", "fill_ref") and "ref" in args:
+            ref_num = int(args.get("ref") or 0)
+            target = next(
+                (e for e in (self.ext_state.get("elements") or []) if int(e.get("ref") or 0) == ref_num),
+                None,
+            )
+            if target:
+                if target.get("href") and "href" not in args:
+                    args["href"] = target["href"]
+                if target.get("label") and "label" not in args:
+                    args["label"] = target["label"]
 
         cmd_id = f"cmd_{secrets.token_hex(6)}"
         ev = threading.Event()

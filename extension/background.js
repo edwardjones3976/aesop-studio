@@ -4,6 +4,15 @@
 "use strict";
 
 const PAIR_RATE_LIMIT_MS = 1000;
+const MIN_CAPTURE_INTERVAL_MS = 500;
+const RETRY_BACKOFF_MS = 150;
+
+let captureInFlight = null;
+let queuedCapture = null;
+let lastCaptureAt = 0;
+let pendingPushTarget = null;
+let deferredPushPromise = null;
+let commandInFlight = false;
 
 let state = {
   port: 8765,
@@ -208,9 +217,48 @@ function pageScript(payload) {
     return tag;
   };
 
+  const resolveAnchor = (node) => {
+    if (!node) return null;
+    if (
+      node.tagName &&
+      node.tagName.toLowerCase() === "a" &&
+      (node.href || (node.getAttribute && node.getAttribute("href")))
+    ) {
+      return node;
+    }
+    if (node.closest) {
+      const parentA = node.closest("a[href]");
+      if (parentA) return parentA;
+    }
+    if (node.querySelector) {
+      const childA = node.querySelector("a[href]");
+      if (childA) return childA;
+    }
+    return null;
+  };
+
+  const resolveHref = (node) => {
+    const a = resolveAnchor(node) || node;
+    if (!a) return "";
+    const raw = String(a.href || (a.getAttribute && a.getAttribute("href")) || "").trim();
+    if (!raw) return "";
+    if (/^https?:\/\//i.test(raw)) return raw;
+    if (/^(javascript:|mailto:|tel:|data:|vbscript:)/i.test(raw)) return "";
+    try {
+      const base = window.location && window.location.href ? window.location.href : "https://localhost/";
+      const resolved = new URL(raw, base).href;
+      return /^https?:\/\//i.test(resolved) ? resolved : "";
+    } catch (_e) {
+      return "";
+    }
+  };
+
   const collectSnapshot = () => {
     const vw = window.innerWidth || 1366;
     const vh = window.innerHeight || 854;
+    for (const old of document.querySelectorAll("[data-aesop-ref]")) {
+      old.removeAttribute("data-aesop-ref");
+    }
     const headings = [...document.querySelectorAll("h1, h2, h3, h4")]
       .slice(0, 35)
       .map((h) => ({
@@ -244,14 +292,14 @@ function pageScript(payload) {
       const style = window.getComputedStyle(el);
       if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
       if (rect.bottom < -200 || rect.top > vh + 600) continue;
-      const ref = refSeq++;
-      el.setAttribute("data-aesop-ref", String(ref));
       const pw = isPasswordField(el);
       const cap = isCaptchaNode(el);
       const pur = isPurchaseTrigger(el) || isPaymentField(el);
       const label = labelFor(el);
-      const href = el.tagName === "A" && el.href && el.href.startsWith("http") ? el.href : "";
+      const href = resolveHref(el);
       if (!label && !href && !["input", "textarea", "select"].includes(el.tagName.toLowerCase())) continue;
+      const ref = refSeq++;
+      el.setAttribute("data-aesop-ref", String(ref));
       elements.push({
         ref,
         role: roleFor(el),
@@ -323,10 +371,34 @@ function pageScript(payload) {
   };
 
   const findByRef = (ref) => {
+    const wantHref = payload.href && /^https?:\/\//i.test(String(payload.href)) ? String(payload.href) : "";
+    const wantLabel = String(payload.label || "").trim().toLowerCase();
     let el = document.querySelector(`[data-aesop-ref="${CSS.escape(String(ref))}"]`);
+    if (el && wantHref) {
+      const elHref = resolveHref(el);
+      if (elHref && elHref !== wantHref) {
+        el = null;
+      }
+    }
+    if (!el && wantHref) {
+      for (const a of document.querySelectorAll("a[href]")) {
+        if (resolveHref(a) === wantHref) {
+          el = a;
+          break;
+        }
+      }
+    }
     if (!el) {
       collectSnapshot();
       el = document.querySelector(`[data-aesop-ref="${CSS.escape(String(ref))}"]`);
+    }
+    if (!el && wantLabel) {
+      for (const cand of document.querySelectorAll("a[href], button, [role='link'], [role='button']")) {
+        if (labelFor(cand).toLowerCase() === wantLabel) {
+          el = cand;
+          break;
+        }
+      }
     }
     return el;
   };
@@ -355,12 +427,44 @@ function pageScript(payload) {
     if (op === "click_ref") {
       const el = findByRef(payload.ref);
       if (!el) return { ok: false, error: `element ref #${payload.ref} not found on page`, ...collectSnapshot() };
-      const err = guardAgentTarget(el, false);
+      const anchor = resolveAnchor(el);
+      const targetEl = anchor || el;
+      const err = guardAgentTarget(el, false) || (anchor ? guardAgentTarget(anchor, false) : null);
       if (err) return { ok: false, error: err, ...collectSnapshot() };
-      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-      el.focus && el.focus();
-      el.click();
-      return collectSnapshot();
+      const preClickUrl = window.location.href;
+      const targetHref =
+        resolveHref(targetEl) ||
+        (payload.href && /^https?:\/\//i.test(String(payload.href)) ? String(payload.href) : "");
+      if (targetEl.scrollIntoView) {
+        targetEl.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      }
+      if (targetEl.focus) targetEl.focus();
+      const rect = targetEl.getBoundingClientRect
+        ? targetEl.getBoundingClientRect()
+        : { left: 0, top: 0, width: 0, height: 0 };
+      const cx = Math.round(rect.left + (rect.width || 0) / 2);
+      const cy = Math.round(rect.top + (rect.height || 0) / 2);
+      if (typeof MouseEvent === "function" && targetEl.dispatchEvent) {
+        for (const evType of ["pointerdown", "mousedown", "pointerup", "mouseup"]) {
+          targetEl.dispatchEvent(
+            new MouseEvent(evType, { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window })
+          );
+        }
+      }
+      if (typeof targetEl.click === "function") {
+        targetEl.click();
+      } else if (typeof MouseEvent === "function" && targetEl.dispatchEvent) {
+        targetEl.dispatchEvent(
+          new MouseEvent("click", { bubbles: true, cancelable: true, clientX: cx, clientY: cy, view: window })
+        );
+      }
+      if (targetEl !== el && typeof el.click === "function") {
+        try {
+          el.click();
+        } catch (_e) {}
+      }
+      const snap = collectSnapshot();
+      return { ...snap, clicked_href: targetHref, pre_click_url: preClickUrl };
     }
     if (op === "fill_ref") {
       const el = findByRef(payload.ref);
@@ -474,11 +578,133 @@ function pageScript(payload) {
   }
 }
 
-async function captureAndSnapshot(tab, op = "snapshot", extra = {}) {
-  if (!tab || !tab.id) {
-    return { ok: false, error: "no active browser tab", tabs: await listBrowseableTabs() };
+function runImmediateCapture(windowId) {
+  if (captureInFlight) return captureInFlight;
+  lastCaptureAt = Date.now();
+  const p = (async () => {
+    try {
+      const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+      if (dataUrl && typeof dataUrl === "string" && dataUrl.startsWith("data:image/png;base64,")) {
+        return dataUrl.slice("data:image/png;base64,".length);
+      }
+      return "";
+    } catch (e) {
+      const msg = String(e && e.message ? e.message : e).slice(0, 240);
+      state.lastError = msg;
+      lastCaptureAt = Date.now();
+      return "";
+    } finally {
+      lastCaptureAt = Date.now();
+      captureInFlight = null;
+    }
+  })();
+  captureInFlight = p;
+  return p;
+}
+
+function captureVisibleTabCoalesced(windowId) {
+  if (captureInFlight) {
+    return captureInFlight;
   }
-  let snap = { ok: true, url: tab.url || "", title: tab.title || "", vw: 1366, vh: 854, elements: [], headings: [], links: [], forms: [], text: "", main_text: "" };
+  const now = Date.now();
+  const elapsed = now - lastCaptureAt;
+  if (lastCaptureAt === 0 || elapsed >= MIN_CAPTURE_INTERVAL_MS) {
+    return runImmediateCapture(windowId);
+  }
+  if (queuedCapture) {
+    queuedCapture.windowId = windowId;
+    return queuedCapture.promise;
+  }
+  const waitMs = Math.max(1, MIN_CAPTURE_INTERVAL_MS - elapsed);
+  let resolveQueued;
+  const promise = new Promise((resolve) => {
+    resolveQueued = resolve;
+  });
+  const entry = { windowId, promise, timer: null };
+  entry.timer = setTimeout(() => {
+    const winId = entry.windowId;
+    queuedCapture = null;
+    runImmediateCapture(winId).then(resolveQueued);
+  }, waitMs);
+  queuedCapture = entry;
+  return promise;
+}
+
+function scheduleCoalescedCapturePush(tabHint = null, snapHint = null) {
+  pendingPushTarget = { tab: tabHint, snap: snapHint };
+  if (deferredPushPromise) return deferredPushPromise;
+  deferredPushPromise = (async () => {
+    try {
+      const target = pendingPushTarget || {};
+      const tab = target.tab && target.tab.id ? target.tab : await getTargetTab(false);
+      if (!tab || !tab.id) return "";
+      let png = await captureVisibleTabCoalesced(tab.windowId);
+      if (!png && state.lastError) {
+        png = await captureVisibleTabCoalesced(tab.windowId);
+      }
+      if (!png) return "";
+      if (!state.confirmed || !state.token || !state.port) return png;
+      const latest = pendingPushTarget || target;
+      const latestTab = latest.tab && latest.tab.id ? latest.tab : tab;
+      const latestSnap = latest.snap || {};
+      const tabs = await listBrowseableTabs();
+      await studioFetch("/api/browser/bridge/push", "POST", {
+        ok: true,
+        ...latestSnap,
+        url: latestSnap.url || latestTab.url || "",
+        title: latestSnap.title || latestTab.title || "",
+        png,
+        tabs,
+        tab_id: latestTab.id,
+        lastError: state.lastError || "",
+        last_error: state.lastError || "",
+      });
+      state.paired = true;
+      return png;
+    } catch (e) {
+      state.lastError = String(e && e.message ? e.message : e).slice(0, 240);
+      return "";
+    } finally {
+      deferredPushPromise = null;
+    }
+  })();
+  return deferredPushPromise;
+}
+
+function resetCaptureState() {
+  if (queuedCapture && queuedCapture.timer) {
+    clearTimeout(queuedCapture.timer);
+  }
+  captureInFlight = null;
+  queuedCapture = null;
+  lastCaptureAt = 0;
+  pendingPushTarget = null;
+  deferredPushPromise = null;
+}
+
+async function captureAndSnapshot(tab, op = "snapshot", extra = {}, opts = {}) {
+  if (!tab || !tab.id) {
+    return {
+      ok: false,
+      error: "no active browser tab",
+      lastError: state.lastError || "",
+      last_error: state.lastError || "",
+      tabs: await listBrowseableTabs(),
+    };
+  }
+  let snap = {
+    ok: true,
+    url: tab.url || "",
+    title: tab.title || "",
+    vw: 1366,
+    vh: 854,
+    elements: [],
+    headings: [],
+    links: [],
+    forms: [],
+    text: "",
+    main_text: "",
+  };
   if (tab.url && /^https?:/i.test(tab.url)) {
     try {
       const results = await chrome.scripting.executeScript({
@@ -490,20 +716,36 @@ async function captureAndSnapshot(tab, op = "snapshot", extra = {}) {
         snap = results[0].result;
       }
     } catch (e) {
-      snap.error = String(e && e.message ? e.message : e).slice(0, 240);
+      const errMsg = String(e && e.message ? e.message : e).slice(0, 240);
+      snap.error = errMsg;
+      state.lastError = errMsg;
     }
   }
   let png = "";
-  try {
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-    if (dataUrl && dataUrl.startsWith("data:image/png;base64,")) {
-      png = dataUrl.slice("data:image/png;base64,".length);
+  if (!opts || !opts.skipCapture) {
+    const now = Date.now();
+    const canCaptureNow =
+      !captureInFlight &&
+      !queuedCapture &&
+      (lastCaptureAt === 0 || now - lastCaptureAt >= MIN_CAPTURE_INTERVAL_MS);
+    if (canCaptureNow || (opts && opts.awaitCapture)) {
+      png = await captureVisibleTabCoalesced(tab.windowId);
+      if (!png && state.lastError) {
+        scheduleCoalescedCapturePush(tab, snap);
+      }
+    } else {
+      scheduleCoalescedCapturePush(tab, snap);
     }
-  } catch (_e) {
-    // Tab might not be the currently visible tab in its window; snapshot still succeeds
   }
   const tabs = await listBrowseableTabs();
-  return { ...snap, png, tabs, tab_id: tab.id };
+  return {
+    ...snap,
+    png,
+    tabs,
+    tab_id: tab.id,
+    lastError: state.lastError || "",
+    last_error: state.lastError || "",
+  };
 }
 
 async function executeCommand(cmd) {
@@ -563,33 +805,77 @@ async function executeCommand(cmd) {
     }
 
     const tab = await getTargetTab(true);
-    const out = await captureAndSnapshot(tab, op, cmd);
-    if (["click", "click_ref", "fill_ref", "key", "back", "forward", "reload"].includes(op)) {
-      await new Promise((r) => setTimeout(r, 180));
-      const refreshed = await chrome.tabs.get(tab.id);
+    const beforeUrl = (tab && tab.url) || "";
+    const needsSettle = ["click", "click_ref", "fill_ref", "key", "back", "forward", "reload"].includes(op);
+    const out = await captureAndSnapshot(tab, op, cmd, { skipCapture: needsSettle });
+    if (needsSettle) {
+      await new Promise((r) => setTimeout(r, 120));
+      let refreshed = await chrome.tabs.get(tab.id);
+      if (op === "click_ref" && out && out.ok !== false) {
+        if (refreshed && refreshed.status === "loading") {
+          await waitForTabLoad(tab.id, 8000);
+          refreshed = await chrome.tabs.get(tab.id);
+        } else if (out.clicked_href && /^https?:\/\//i.test(out.clicked_href)) {
+          const preUrl = out.pre_click_url || beforeUrl;
+          const curUrl = (refreshed && refreshed.url) || out.url || beforeUrl;
+          const sameDocHash =
+            out.clicked_href.includes("#") &&
+            out.clicked_href.split("#")[0] === preUrl.split("#")[0];
+          if (curUrl === preUrl && out.clicked_href !== preUrl && !sameDocHash) {
+            await chrome.tabs.update(tab.id, { url: out.clicked_href });
+            await waitForTabLoad(tab.id, 8000);
+            refreshed = await chrome.tabs.get(tab.id);
+          }
+        }
+      }
       const after = await captureAndSnapshot(refreshed, "snapshot");
-      return { ...after, ok: out.ok !== false, error: out.error || after.error || "" };
+      return {
+        ...after,
+        ok: out.ok !== false,
+        error: out.error || after.error || "",
+        clicked_href: out.clicked_href || "",
+      };
     }
     return out;
   } catch (e) {
-    return { ok: false, error: String(e && e.message ? e.message : e).slice(0, 300) };
+    const errMsg = String(e && e.message ? e.message : e).slice(0, 300);
+    state.lastError = errMsg;
+    return { ok: false, error: errMsg, lastError: errMsg, last_error: errMsg };
   }
 }
 
 function waitForTabLoad(tabId, timeoutMs = 8000) {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(listener);
-      resolve();
-    }, timeoutMs);
-    function listener(tid, info) {
-      if (tid === tabId && info.status === "complete") {
-        clearTimeout(timer);
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      clearTimeout(probeTimer);
+      if (chrome.tabs && chrome.tabs.onUpdated && chrome.tabs.onUpdated.removeListener) {
         chrome.tabs.onUpdated.removeListener(listener);
-        setTimeout(resolve, 120);
+      }
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    function listener(tid, info) {
+      if (tid === tabId && info && info.status === "complete") {
+        setTimeout(finish, 80);
       }
     }
-    chrome.tabs.onUpdated.addListener(listener);
+    if (chrome.tabs && chrome.tabs.onUpdated && chrome.tabs.onUpdated.addListener) {
+      chrome.tabs.onUpdated.addListener(listener);
+    }
+    const probeTimer = setTimeout(async () => {
+      try {
+        const t = await chrome.tabs.get(tabId);
+        if (!t || !t.status || t.status === "complete") {
+          finish();
+        }
+      } catch (_e) {
+        finish();
+      }
+    }, 80);
   });
 }
 
@@ -613,61 +899,93 @@ async function studioFetch(path, method = "GET", body = null) {
 }
 
 async function pushCurrentTabState() {
-  if (!state.confirmed || !state.token || !state.port) return;
+  if (!state.confirmed || !state.token || !state.port || commandInFlight) return;
   try {
     const tab = await getTargetTab(false);
     const payload = tab
       ? await captureAndSnapshot(tab, "snapshot")
-      : { ok: true, url: "", title: "", tabs: await listBrowseableTabs() };
+      : {
+          ok: true,
+          url: "",
+          title: "",
+          tabs: await listBrowseableTabs(),
+          lastError: state.lastError || "",
+          last_error: state.lastError || "",
+        };
     await studioFetch("/api/browser/bridge/push", "POST", payload);
     state.paired = true;
-    state.lastError = "";
   } catch (e) {
-    state.lastError = String(e && e.message ? e.message : e);
+    state.lastError = String(e && e.message ? e.message : e).slice(0, 240);
   }
 }
 
 async function startBridgeLoop() {
   if (state.polling || !state.confirmed || !state.token || !state.port) return;
   state.polling = true;
-  await pushCurrentTabState();
+  if (!state.paired) {
+    pushCurrentTabState();
+  }
   while (state.confirmed && state.token && state.polling) {
     try {
-      const res = await studioFetch("/api/browser/bridge/poll?wait=1", "GET");
+      const errParam = state.lastError ? `&last_error=${encodeURIComponent(state.lastError)}` : "";
+      const res = await studioFetch(`/api/browser/bridge/poll?wait=1${errParam}`, "GET");
       state.paired = true;
-      state.lastError = "";
       if (res && res.cmd && res.cmd.id) {
-        const out = await executeCommand(res.cmd);
-        await studioFetch("/api/browser/bridge/reply", "POST", {
-          cmd_id: res.cmd.id,
-          result: out,
-        });
+        commandInFlight = true;
+        let out;
+        try {
+          out = await executeCommand(res.cmd);
+        } catch (cmdErr) {
+          const msg = String(cmdErr && cmdErr.message ? cmdErr.message : cmdErr).slice(0, 240);
+          state.lastError = msg;
+          out = { ok: false, error: msg, lastError: msg, last_error: msg };
+        } finally {
+          commandInFlight = false;
+        }
+        try {
+          await studioFetch("/api/browser/bridge/reply", "POST", {
+            cmd_id: res.cmd.id,
+            result: out,
+          });
+        } catch (replyErr) {
+          state.lastError = String(replyErr && replyErr.message ? replyErr.message : replyErr).slice(0, 240);
+          await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
+          try {
+            await studioFetch("/api/browser/bridge/reply", "POST", {
+              cmd_id: res.cmd.id,
+              result: { ...out, png: "", lastError: state.lastError, last_error: state.lastError },
+            });
+          } catch (_e2) {}
+        }
       }
     } catch (e) {
-      state.paired = false;
-      state.lastError = String(e && e.message ? e.message : e);
-      await new Promise((r) => setTimeout(r, 1500));
+      state.lastError = String(e && e.message ? e.message : e).slice(0, 240);
+      await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
     }
   }
   state.polling = false;
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (state.paired && tabId === state.targetTabId && changeInfo.status === "complete") {
+  if (state.paired && !commandInFlight && tabId === state.targetTabId && changeInfo.status === "complete") {
     clearTimeout(state.pushTimer);
-    state.pushTimer = setTimeout(() => pushCurrentTabState(), 150);
+    state.pushTimer = setTimeout(() => {
+      if (!commandInFlight) pushCurrentTabState();
+    }, 150);
   }
 });
 
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  if (!state.paired) return;
+  if (!state.paired || commandInFlight) return;
   try {
     const t = await chrome.tabs.get(activeInfo.tabId);
     if (t && !isStudioUrl(t.url)) {
       state.targetTabId = t.id;
       saveState();
       clearTimeout(state.pushTimer);
-      state.pushTimer = setTimeout(() => pushCurrentTabState(), 120);
+      state.pushTimer = setTimeout(() => {
+        if (!commandInFlight) pushCurrentTabState();
+      }, 120);
     }
   } catch (_e) {}
 });
@@ -932,9 +1250,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 globalThis.__aesopBridgeTest = {
   state,
   PAIR_RATE_LIMIT_MS,
+  MIN_CAPTURE_INTERVAL_MS,
+  RETRY_BACKOFF_MS,
   parseLoopbackHttpOrigin,
   validatePairSender,
   handlePairRequest,
   approvePendingPair,
   rejectPendingPair,
+  captureVisibleTabCoalesced,
+  scheduleCoalescedCapturePush,
+  resetCaptureState,
+  captureAndSnapshot,
+  executeCommand,
+  pushCurrentTabState,
+  startBridgeLoop,
+  pageScript,
 };

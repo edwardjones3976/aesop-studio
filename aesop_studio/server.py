@@ -444,16 +444,17 @@ class Handler(BaseHTTPRequestHandler):
 
     @route("POST", r"/api/browser/bridge/push")
     def browser_bridge_push(self, sess):
-        self.json(self.app.browser.bridge_push(self.body(4_000_000)))
+        self.json(self.app.browser.bridge_push(self.body(16_000_000)))
 
     @route("GET", r"/api/browser/bridge/poll")
     def browser_bridge_poll(self, sess):
         wait = float((self.query.get("wait") or ["0.05"])[0])
-        self.json(self.app.browser.bridge_poll(wait))
+        last_err = (self.query.get("last_error") or [""])[0]
+        self.json(self.app.browser.bridge_poll(wait, last_error=last_err))
 
     @route("POST", r"/api/browser/bridge/reply")
     def browser_bridge_reply(self, sess):
-        b = self.body(4_000_000)
+        b = self.body(16_000_000)
         res = b.get("result") if isinstance(b.get("result"), dict) else {}
         self.json(self.app.browser.bridge_reply(str(b.get("cmd_id") or ""), res))
 

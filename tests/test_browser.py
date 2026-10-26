@@ -145,6 +145,65 @@ class TestExtensionBridgeAndSafety(unittest.TestCase):
         r = subprocess.run([node_bin, str(script)], capture_output=True, text=True, timeout=15)
         self.assertEqual(r.returncode, 0, msg=f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}")
 
+    def test_js_capture_rate_and_click_ref_suite(self):
+        import subprocess
+        node_bin = shutil.which("node")
+        if not node_bin:
+            self.skipTest("node not on PATH")
+        script = Path(__file__).resolve().parent / "js" / "test_capture_rate.mjs"
+        r = subprocess.run([node_bin, str(script)], capture_output=True, text=True, timeout=25)
+        self.assertEqual(r.returncode, 0, msg=f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}")
+
+    def test_last_error_surfaced_and_status_skips_cdp_probe_when_extension_connected(self):
+        from unittest.mock import patch
+        self.b.bridge_push({
+            "url": "https://github.com/microsoft/vscode/releases",
+            "title": "Releases · microsoft/vscode",
+            "lastError": "This request exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota.",
+            "elements": [
+                {
+                    "ref": 24,
+                    "role": "link",
+                    "tag": "a",
+                    "label": "1.143.1",
+                    "href": "https://github.com/microsoft/vscode/releases/tag/1.143.1",
+                    "bbox": {"x": 80, "y": 180, "w": 120, "h": 28},
+                },
+            ],
+        })
+        with patch("aesop_studio.browser._port_open", side_effect=AssertionError("must not probe port 9222 when extension is connected")):
+            st = self.b.status()
+        self.assertTrue(st["extension_connected"])
+        self.assertEqual(st["mode"], "extension")
+        self.assertIn("MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND", st["lastError"])
+        self.assertIn("MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND", st["last_error"])
+        self.assertIn("MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND", st["error"])
+
+        # Verify click_ref enriches the queued extension command with href and label for fallback navigation
+        import threading
+        polled_cmds = []
+
+        def ext_worker():
+            polled = self.b.bridge_poll(wait_s=2.0)
+            cmd = polled.get("cmd")
+            if cmd:
+                polled_cmds.append(cmd)
+                self.b.bridge_reply(cmd["id"], {
+                    "ok": True,
+                    "url": cmd.get("href") or "https://github.com/microsoft/vscode/releases/tag/1.143.1",
+                    "title": "Release 1.143.1 · microsoft/vscode",
+                })
+
+        t = threading.Thread(target=ext_worker, daemon=True)
+        t.start()
+        out = self.b.cmd("click_ref", ref=24, agent=True)
+        t.join(timeout=3)
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(polled_cmds), 1)
+        self.assertEqual(polled_cmds[0].get("href"), "https://github.com/microsoft/vscode/releases/tag/1.143.1")
+        self.assertEqual(polled_cmds[0].get("label"), "1.143.1")
+        self.assertEqual(out["url"], "https://github.com/microsoft/vscode/releases/tag/1.143.1")
+
     def test_bridge_push_sanitizes_urls_secrets_and_passwords(self):
         res = self.b.bridge_push({
             "url": "https://github.com/example/repo?access_token=ghp_abcdefghijklmnopqrstuvwxyz1234",

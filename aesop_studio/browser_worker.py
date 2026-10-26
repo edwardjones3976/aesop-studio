@@ -70,9 +70,30 @@ PAGE_HELPER_JS = """
     }
     return tag;
   };
+  const resolveAnchor = (node) => {
+    if (!node) return null;
+    if (node.tagName && node.tagName.toLowerCase() === 'a' && (node.href || (node.getAttribute && node.getAttribute('href')))) return node;
+    if (node.closest) { const pa = node.closest('a[href]'); if (pa) return pa; }
+    if (node.querySelector) { const ca = node.querySelector('a[href]'); if (ca) return ca; }
+    return null;
+  };
+  const resolveHref = (node) => {
+    const a = resolveAnchor(node) || node;
+    if (!a) return '';
+    const raw = String(a.href || (a.getAttribute && a.getAttribute('href')) || '').trim();
+    if (!raw || /^(javascript:|mailto:|tel:|data:|vbscript:)/i.test(raw)) return '';
+    if (/^https?:\\/\\//i.test(raw)) return raw;
+    try {
+      const resolved = new URL(raw, window.location.href).href;
+      return /^https?:\\/\\//i.test(resolved) ? resolved : '';
+    } catch (_e) { return ''; }
+  };
   const collect = () => {
     const vw = window.innerWidth || 1366;
     const vh = window.innerHeight || 854;
+    for (const old of document.querySelectorAll('[data-aesop-ref]')) {
+      old.removeAttribute('data-aesop-ref');
+    }
     const headings = [...document.querySelectorAll('h1, h2, h3, h4')].slice(0, 35).map(h => ({
       level: Number(h.tagName.slice(1)),
       text: String(h.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 160)
@@ -84,11 +105,11 @@ PAGE_HELPER_JS = """
       if (elements.length >= 85) break;
       const rect = el.getBoundingClientRect();
       if (rect.width < 3 || rect.height < 3) continue;
-      const ref = refSeq++;
-      el.setAttribute('data-aesop-ref', String(ref));
-      const href = el.tagName === 'A' && el.href && el.href.startsWith('http') ? el.href : '';
+      const href = resolveHref(el);
       const label = labelFor(el);
       if (!label && !href && !['input', 'textarea', 'select'].includes(el.tagName.toLowerCase())) continue;
+      const ref = refSeq++;
+      el.setAttribute('data-aesop-ref', String(ref));
       elements.push({
         ref,
         role: roleFor(el),
@@ -155,12 +176,18 @@ PAGE_HELPER_JS = """
     let el = document.querySelector(`[data-aesop-ref="${CSS.escape(String(payload.ref))}"]`);
     if (!el) { collect(); el = document.querySelector(`[data-aesop-ref="${CSS.escape(String(payload.ref))}"]`); }
     if (!el) return { ok: false, error: `element ref #${payload.ref} not found`, ...collect() };
-    const err = guard(el);
+    const anchor = resolveAnchor(el);
+    const targetEl = anchor || el;
+    const err = guard(el) || (anchor ? guard(anchor) : null);
     if (err) return { ok: false, error: err, ...collect() };
-    el.scrollIntoView({ block: 'center', inline: 'nearest' });
-    el.focus && el.focus();
+    const preClickUrl = window.location.href;
+    const targetHref = resolveHref(targetEl) || (payload.href && /^https?:\\/\\//i.test(String(payload.href)) ? String(payload.href) : '');
+    targetEl.scrollIntoView({ block: 'center', inline: 'nearest' });
+    targetEl.focus && targetEl.focus();
     if (op === 'click_ref') {
-      el.click();
+      targetEl.click();
+      if (targetEl !== el && el.click) { try { el.click(); } catch (_e) {} }
+      return { ...collect(), clicked_href: targetHref, pre_click_url: preClickUrl };
     } else if ('value' in el) {
       el.value = String(payload.text || '').slice(0, 2000);
       el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -280,6 +307,12 @@ def main(cdp_url: str) -> None:
                     res = p.evaluate(PAGE_HELPER_JS, cmd)
                     if op in ("click_ref", "fill_ref"):
                         p.wait_for_timeout(150); settle(page())
+                        if op == "click_ref" and res.get("ok", True) and res.get("clicked_href"):
+                            cur_u = getattr(page(), "url", "") or ""
+                            pre_u = res.get("pre_click_url") or ""
+                            href_u = str(res.get("clicked_href") or "")
+                            if cur_u == pre_u and href_u.startswith(("http://", "https://")) and href_u != pre_u:
+                                page().goto(href_u, wait_until="domcontentloaded"); settle(page())
                         res2 = page().evaluate(PAGE_HELPER_JS, {"op": "snapshot"})
                         res = {**res2, "ok": res.get("ok", True), "error": res.get("error", "")}
                     reply({**res, "tabs": tabs_list()})
