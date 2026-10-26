@@ -1487,13 +1487,33 @@ function newProjectDialog(usable, disabled) {
 }
 async function projectSettings() {
   const p = S.project; if (!p) return;
+  if ($("dlg").open) { banner("Finish or cancel the open dialog first."); return; }
   const pol = p.transfer_policy || {};
-  const v = await dialog("Project settings", [
+  const pending = dialog("Project settings", [
     { name: "name", label: "Name", value: p.name },
-    { name: "model", label: "Model override (optional)", value: p.model || "", help: "Leave blank to use the provider CLI's default model." },
+    { name: "model", label: "Model", value: p.model || "", help: "Perplexity Orchestrator requires a model from its catalog. For CLI routes, leave blank to use their default." },
     { name: "retention_days", label: "Conversation retention (days)", type: "number", value: String(p.retention_days) },
     ...Object.keys(S.routes).filter((k) => USABLE.includes(S.routes[k].state)).map((k) => ({ name: "tp_" + k, label: `Allow sending attached project files to ${routeName(k)}?`, type: "select", value: pol[k] ? "yes" : "no", options: [{ value: "no", label: "No" }, { value: "yes", label: "Yes" }] })),
   ]);
+  const form = $("dlgForm");
+  const model = form.elements.namedItem("model");
+  const catalog = h("datalist", { id: "orchestratorModels" });
+  model.setAttribute("list", catalog.id);
+  const status = h("p", { class: "muted", role: "status" });
+  const refresh = h("button", { type: "button", class: "btn ghost" }, "Refresh Perplexity models");
+  model.closest(".field").append(catalog, refresh, status);
+  const loadModels = async (force = false) => {
+    refresh.disabled = true; status.textContent = "Loading Perplexity models…";
+    try {
+      const data = await api("GET", `/api/perplexity-orchestrator/models${force ? "?refresh=1" : ""}`);
+      catalog.replaceChildren(...data.models.map((m) => h("option", { value: m.id }, m.id)));
+      status.textContent = `${data.models.length} priced models available. Choose a catalog entry for Orchestrator.`;
+    } catch (e) { status.textContent = e.message; }
+    finally { refresh.disabled = false; }
+  };
+  refresh.onclick = () => loadModels(true);
+  if (S.routes["perplexity-orchestrator"]?.auth_status === "api_key_present") loadModels();
+  const v = await pending;
   if (!v) return;
   const tp = {}; for (const [k, val] of Object.entries(v)) if (k.startsWith("tp_")) tp[k.slice(3)] = val === "yes";
   await guard(async () => {

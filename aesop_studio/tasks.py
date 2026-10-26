@@ -23,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import ledger, openai_api, providers, winjob
+from . import ledger, openai_api, perplexity_api, providers, winjob
 from .security import redact
 from .store import Store, new_id
 
@@ -418,13 +418,21 @@ class Supervisor:
 
     # ---- metered API route (no subprocess; streamed, reserved, settled from real usage) ----
     def _start_api(self, tid, project, route_id, route, prompt, out_path, timeout, images=None) -> str:
-        model = project.get("model") if project.get("model") in openai_api.PRICES else openai_api.DEFAULT_MODEL
-        max_out = openai_api.DEFAULT_MAX_OUTPUT
+        api = perplexity_api if route_id == "perplexity-orchestrator" else openai_api
+        model = project.get("model") if api is perplexity_api else (
+            project.get("model") if project.get("model") in openai_api.PRICES else openai_api.DEFAULT_MODEL)
+        max_out = api.DEFAULT_MAX_OUTPUT
+        rates = None
         try:  # each high-detail image is bounded at IMAGE_TOKEN_BOUND input tokens in the reservation
-            cap = openai_api.max_cost(model, len(prompt.encode("utf-8")) + IMAGE_TOKEN_BOUND * len(images or []),
-                                      max_out)
+            if api is perplexity_api:
+                if not ledger.active_purpose(self.store):
+                    raise ledger.BudgetError("metered route disabled: mission permit off and no monthly operating limit set")
+                rates = api.prices(model)
+                cap = api.max_cost(model, len(prompt.encode("utf-8")), max_out, rates)
+            else:
+                cap = api.max_cost(model, len(prompt.encode("utf-8")) + IMAGE_TOKEN_BOUND * len(images or []), max_out)
             lid = ledger.reserve(self.store, route["provider"], route_id, "metered", cap, task_ref=tid,
-                                 price_source=f"{model}: {openai_api.PRICE_SOURCE}")
+                                 price_source=f"{model}: {api.PRICE_SOURCE}" + (f"; rates={json.dumps(rates)}" if rates else ""))
         except (ledger.BudgetError, openai_api.ApiError) as e:
             self._end(tid, "BLOCKED_OWNER", None, None, error=str(e))
             return tid
@@ -434,11 +442,11 @@ class Supervisor:
         ev = threading.Event()
         with self.lock:
             self.api_cancel[tid] = ev
-        threading.Thread(target=self._run_api, args=(tid, prompt, out_path, timeout, lid, model, max_out, ev, images),
+        threading.Thread(target=self._run_api, args=(tid, prompt, out_path, timeout, lid, model, max_out, ev, images, api, rates),
                          daemon=True).start()
         return tid
 
-    def _run_api(self, tid, prompt, out_path, timeout, lid, model, max_out, ev, images=None):
+    def _run_api(self, tid, prompt, out_path, timeout, lid, model, max_out, ev, images=None, api=openai_api, rates=None):
         def release():
             with self.lock:
                 self.api_cancel.pop(tid, None)
@@ -448,9 +456,10 @@ class Supervisor:
                 release()
                 return self._end(tid, "CANCELLED", lid, 0, error="cancelled before the request was sent")
             self._set(tid, "RUNNING", started=time.time(), argv_meta=json.dumps(
-                {"endpoint": "POST /v1/responses", "model": model, "max_output_tokens": max_out}))
+                {"endpoint": "POST /orchestrator/v1/chat/completions" if api is perplexity_api else "POST /v1/responses",
+                 "model": model, "max_output_tokens": max_out}))
             urls = _data_urls(images) if images else None  # read before sending: a bad photo bills nothing
-            key = openai_api.resolve_key()
+            key = api.resolve_key()
             log = _RedactingLog(out_path)
         except Exception as e:  # noqa: BLE001
             release()
@@ -458,7 +467,7 @@ class Supervisor:
             return self._end(tid, "FAILED", lid, 0, error=redact(msg)[:500])
         try:
             try:
-                r = openai_api.stream(prompt, model, max_out, log.write, ev, timeout, key=key, images=urls)
+                r = api.stream(prompt, model, max_out, log.write, ev, timeout, key=key, images=urls)
             finally:
                 key = None
                 log.close()
@@ -482,7 +491,7 @@ class Supervisor:
                        " before usage was reported; reservation kept as unresolved exposure"
                 cp["cost_usd"] = None
                 return self._end(tid, state, lid, None, error=note, checkpoint=json.dumps(cp))
-            cost = openai_api.actual_cost(model, r["usage"])
+            cost = api.actual_cost(model, r["usage"], rates) if rates is not None else api.actual_cost(model, r["usage"])
             cp.update(usage=r["usage"], cost_usd=cost)
             err = None if r["status"] == "completed" else f"response {r['status']} (output cap {max_out} tokens)"
             self._end(tid, "COMPLETED", lid, cost, exit_code=0, error=err, checkpoint=json.dumps(cp))

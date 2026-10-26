@@ -219,6 +219,14 @@ class Handler(BaseHTTPRequestHandler):
     def routes_refresh(self, sess):
         self.json(providers.refresh(self.app.store))
 
+    @route("GET", r"/api/perplexity-orchestrator/models")
+    def perplexity_models(self, sess):
+        from . import perplexity_api
+        try:
+            self.json({"models": perplexity_api.catalog(refresh=self.query.get("refresh") == ["1"])})
+        except perplexity_api.ApiError as e:
+            self.err(503, str(e))
+
     @route("POST", r"/api/routes/([\w-]+)/verify")
     def route_verify(self, sess, rid):
         """Owner-triggered: one minimal read-only call to a single CLI route proves sign-in and remaining quota."""
