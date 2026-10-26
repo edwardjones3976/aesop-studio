@@ -15,9 +15,10 @@ const SAMPLE_PNG_B64 =
 const SAMPLE_DATA_URL = `data:image/png;base64,${SAMPLE_PNG_B64}`;
 
 let captureCallTimestamps = [];
-let captureDelayMs = 25;
+let captureDelayMs = 20;
 let enforceStrictQuota = false;
 let forceNextCaptureError = null;
+let onMidCaptureHook = null;
 let currentTab = {
   id: 42,
   windowId: 1,
@@ -31,17 +32,19 @@ let mockPageScriptResult = null;
 
 let cmdQueue = [];
 let replyResolvers = new Map();
-let frameSeq = 0;
-let frameWaiters = [];
-let serverLastError = "";
-
-function advanceFrameSeq() {
-  frameSeq += 1;
-  const waiters = frameWaiters.splice(0, frameWaiters.length);
-  for (const w of waiters) w(frameSeq);
-}
-
+let recordedPushes = [];
+let pushWaiters = [];
 let pollFailCount = 0;
+let forceNextPushError = null;
+
+function recordPush(body) {
+  const entry = { at: Date.now(), body };
+  recordedPushes.push(entry);
+  if (body && body.png) {
+    const waiters = pushWaiters.splice(0, pushWaiters.length);
+    for (const w of waiters) w(entry);
+  }
+}
 
 globalThis.chrome = {
   runtime: {
@@ -79,6 +82,11 @@ globalThis.chrome = {
     async captureVisibleTab() {
       const now = Date.now();
       captureCallTimestamps.push(now);
+      if (typeof onMidCaptureHook === "function") {
+        const hook = onMidCaptureHook;
+        onMidCaptureHook = null;
+        hook();
+      }
       if (forceNextCaptureError) {
         const err = forceNextCaptureError;
         forceNextCaptureError = null;
@@ -129,74 +137,6 @@ globalThis.chrome = {
   },
 };
 
-globalThis.fetch = async (url, opts = {}) => {
-  const u = String(url);
-  const body = opts && opts.body ? JSON.parse(opts.body) : null;
-  if (u.includes("/api/browser/bridge/poll")) {
-    const parsed = new URL(u);
-    const le = parsed.searchParams.get("last_error");
-    if (le) serverLastError = le;
-    if (pollFailCount > 0) {
-      pollFailCount -= 1;
-      throw new Error("Simulated transient network failure");
-    }
-    const nextCmd = cmdQueue.shift() || null;
-    if (!nextCmd) {
-      await new Promise((r) => setTimeout(r, 15));
-    }
-    return {
-      ok: true,
-      status: 200,
-      async json() {
-        return { ok: true, cmd: nextCmd };
-      },
-    };
-  }
-  if (u.includes("/api/browser/bridge/push")) {
-    if (body && (body.lastError || body.last_error)) {
-      serverLastError = body.lastError || body.last_error;
-    }
-    if (body && body.png) {
-      advanceFrameSeq();
-    }
-    return {
-      ok: true,
-      status: 200,
-      async json() {
-        return { ok: true, frame_seq: frameSeq };
-      },
-    };
-  }
-  if (u.includes("/api/browser/bridge/reply")) {
-    const res = (body && body.result) || {};
-    if (res.lastError || res.last_error) {
-      serverLastError = res.lastError || res.last_error;
-    }
-    if (res.png) {
-      advanceFrameSeq();
-    }
-    const resolver = replyResolvers.get(body.cmd_id);
-    if (resolver) {
-      replyResolvers.delete(body.cmd_id);
-      resolver(res);
-    }
-    return {
-      ok: true,
-      status: 200,
-      async json() {
-        return { ok: true };
-      },
-    };
-  }
-  return {
-    ok: true,
-    status: 200,
-    async json() {
-      return { ok: true };
-    },
-  };
-};
-
 const bgCode = fs.readFileSync(bgPath, "utf-8");
 vm.runInThisContext(bgCode, { filename: bgPath });
 
@@ -204,72 +144,156 @@ const {
   state,
   MIN_CAPTURE_INTERVAL_MS,
   RETRY_BACKOFF_MS,
-  captureVisibleTabCoalesced,
+  kickFrameLoop,
   resetCaptureState,
   executeCommand,
   startBridgeLoop,
   pageScript,
+  setStudioFetch,
 } = globalThis.__aesopBridgeTest;
+
+setStudioFetch(async (urlPath, _method = "GET", body = null) => {
+  const u = String(urlPath);
+  if (u.includes("/api/browser/bridge/poll")) {
+    if (pollFailCount > 0) {
+      pollFailCount -= 1;
+      throw new Error("Simulated transient network failure");
+    }
+    const nextCmd = cmdQueue.shift() || null;
+    if (!nextCmd) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    return { ok: true, cmd: nextCmd };
+  }
+  if (u.includes("/api/browser/bridge/push")) {
+    if (forceNextPushError) {
+      const err = forceNextPushError;
+      forceNextPushError = null;
+      throw new Error(err);
+    }
+    recordPush(body || {});
+    return { ok: true, frame_seq: recordedPushes.length };
+  }
+  if (u.includes("/api/browser/bridge/reply")) {
+    const res = (body && body.result) || {};
+    const resolver = replyResolvers.get(body.cmd_id);
+    if (resolver) {
+      replyResolvers.delete(body.cmd_id);
+      resolver(res);
+    }
+    return { ok: true };
+  }
+  return { ok: true };
+});
 
 assert.ok(MIN_CAPTURE_INTERVAL_MS >= 500, "MIN_CAPTURE_INTERVAL_MS must respect Chrome ~2/s capture limit");
 assert.ok(RETRY_BACKOFF_MS >= 100 && RETRY_BACKOFF_MS <= 250, "RETRY_BACKOFF_MS must be brief (100-250ms)");
 
-// 1. Coalescing concurrent in-flight captures + rate-limiting rapid follow-up captures
+function assertMaxTwoCapturesPerSecond(timestamps) {
+  for (let i = 0; i < timestamps.length; i++) {
+    const winStart = timestamps[i];
+    const inOneSec = timestamps.filter((t) => t >= winStart && t < winStart + 980);
+    assert.ok(
+      inOneSec.length <= 2,
+      `captureVisibleTab called ${inOneSec.length} times within 1s window starting at ${winStart}`
+    );
+  }
+}
+
+// 1. 10 actions 200 ms apart:
+// (i) every action's reply resolves within 100 ms of being issued (and never includes a png);
+// (ii) the number of pushes with a non-empty png is >= 9 of 10 and each arrives within 1000 ms of its action;
+// (iii) captureVisibleTab is called at most 2x per second.
 {
   resetCaptureState();
   captureCallTimestamps = [];
-  captureDelayMs = 40;
+  recordedPushes = [];
+  pushWaiters = [];
+  captureDelayMs = 20;
   enforceStrictQuota = true;
-
-  // Fire 4 concurrent capture requests at t=0: all 4 must share a single in-flight captureVisibleTab call
-  const [r1, r2, r3, r4] = await Promise.all([
-    captureVisibleTabCoalesced(1),
-    captureVisibleTabCoalesced(1),
-    captureVisibleTabCoalesced(1),
-    captureVisibleTabCoalesced(1),
-  ]);
-  assert.equal(r1, SAMPLE_PNG_B64);
-  assert.equal(r2, SAMPLE_PNG_B64);
-  assert.equal(r3, SAMPLE_PNG_B64);
-  assert.equal(r4, SAMPLE_PNG_B64);
-  assert.equal(captureCallTimestamps.length, 1, "concurrent captures must coalesce into 1 call");
-
-  // Immediately fire 3 more capture requests during the cooldown window: must coalesce into 1 queued call >= MIN_CAPTURE_INTERVAL_MS later
-  const [r5, r6, r7] = await Promise.all([
-    captureVisibleTabCoalesced(1),
-    captureVisibleTabCoalesced(1),
-    captureVisibleTabCoalesced(1),
-  ]);
-  assert.equal(r5, SAMPLE_PNG_B64);
-  assert.equal(r6, SAMPLE_PNG_B64);
-  assert.equal(r7, SAMPLE_PNG_B64);
-  assert.equal(captureCallTimestamps.length, 2, "cooldown burst must coalesce into a single second call");
-  const interval = captureCallTimestamps[1] - captureCallTimestamps[0];
-  assert.ok(
-    interval >= MIN_CAPTURE_INTERVAL_MS - 15,
-    `expected >= ${MIN_CAPTURE_INTERVAL_MS}ms between captures, got ${interval}ms`
-  );
-}
-
-// 2. Quota error records state.lastError without stalling command ack, and popup.js surfaces it when paired
-{
-  resetCaptureState();
   state.confirmed = true;
   state.token = "tok_test_rate_1234567890";
   state.port = 8770;
   state.paired = true;
   state.lastError = "";
-  forceNextCaptureError = "This request exceeds the MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota.";
+  state.captureError = "";
 
+  const ackTimes = [];
+  const frameArrivalTimes = [];
+
+  for (let i = 1; i <= 10; i++) {
+    const pushCountBefore = recordedPushes.filter((p) => p.body && p.body.png).length;
+    const nextPngPushPromise = new Promise((resolve) => {
+      pushWaiters.push(resolve);
+    });
+    const t0 = Date.now();
+    const out = await executeCommand({ op: "scroll", dy: 350 });
+    const ackMs = Date.now() - t0;
+    ackTimes.push(ackMs);
+    assert.equal(out.ok, true);
+    assert.equal(out.png, undefined, "command reply must never include a png");
+    assert.ok(ackMs <= 100, `action ${i} reply must resolve within 100ms, took ${ackMs}ms`);
+
+    const pushEntry =
+      recordedPushes.filter((p) => p.body && p.body.png).length > pushCountBefore
+        ? recordedPushes[recordedPushes.length - 1]
+        : await nextPngPushPromise;
+    const frameMs = pushEntry.at - t0;
+    frameArrivalTimes.push(frameMs);
+    assert.equal(pushEntry.body.png, SAMPLE_PNG_B64);
+    assert.ok(frameMs <= 1000, `action ${i} push must arrive within 1000ms, took ${frameMs}ms`);
+
+    if (i < 10) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+
+  const nonEmptyPngPushes = recordedPushes.filter((p) => p.body && p.body.png === SAMPLE_PNG_B64);
+  assert.ok(
+    nonEmptyPngPushes.length >= 9,
+    `expected >= 9 pushes with non-empty png out of 10 actions, got ${nonEmptyPngPushes.length}`
+  );
+  assert.equal(
+    frameArrivalTimes.filter((ms) => ms <= 1000).length,
+    10,
+    `all pushed frames must arrive within 1000ms of their action, got ${JSON.stringify(frameArrivalTimes)}`
+  );
+  assertMaxTwoCapturesPerSecond(captureCallTimestamps);
+}
+
+// 2. (iv) A capture that throws sets state.captureError (NOT state.lastError), exposes captureError in push & popup,
+// maps unfocused/invisible window errors to "Live view paused: bring the Chrome window to front", and never stalls replies.
+{
+  resetCaptureState();
+  captureCallTimestamps = [];
+  recordedPushes = [];
+  pushWaiters = [];
+  enforceStrictQuota = false;
+  state.confirmed = true;
+  state.token = "tok_test_rate_1234567890";
+  state.port = 8770;
+  state.paired = true;
+  state.lastError = "";
+  state.captureError = "";
+
+  // Case A: Window not visible/focused -> friendly pause message in state.captureError
+  forceNextCaptureError = "Failed to capture tab: window is not visible or focused";
   const t0 = Date.now();
   const out = await executeCommand({ op: "scroll", dy: 400 });
   const elapsedAck = Date.now() - t0;
   assert.equal(out.ok, true);
-  assert.ok(elapsedAck <= 300, `capture error must never delay command ack (took ${elapsedAck}ms)`);
-  assert.match(state.lastError, /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND/);
-  assert.match(out.lastError, /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND/);
+  assert.ok(elapsedAck <= 100, `capture error must never delay command ack (took ${elapsedAck}ms)`);
 
-  // Verify popup.js surfaces state.lastError even when paired === true
+  await globalThis.__aesopBridgeTest.kickFrameLoop();
+  assert.equal(state.captureError, "Live view paused: bring the Chrome window to front");
+  assert.equal(state.lastError, "", "capture failure must go into state.captureError, NOT state.lastError");
+  assert.ok(recordedPushes.length >= 1, "push payload should still be sent with captureError");
+  assert.equal(
+    recordedPushes[recordedPushes.length - 1].body.captureError,
+    "Live view paused: bring the Chrome window to front"
+  );
+
+  // Verify popup.js surfaces state.captureError when paired
   const popupElements = {
     dot: { className: "" },
     statusTitle: { textContent: "" },
@@ -290,81 +314,68 @@ assert.ok(RETRY_BACKOFF_MS >= 100 && RETRY_BACKOFF_MS <= 250, "RETRY_BACKOFF_MS 
     chrome: {
       runtime: {
         sendMessage(_msg, cb) {
-          if (cb) cb({ paired: true, port: 8770, lastError: state.lastError });
+          if (cb)
+            cb({
+              paired: true,
+              port: 8770,
+              lastError: state.lastError,
+              captureError: state.captureError,
+            });
         },
       },
-      tabs: { async query() { return []; } },
+      tabs: {
+        async query() {
+          return [];
+        },
+      },
     },
   });
   const popupCode = fs.readFileSync(popupPath, "utf-8");
   vm.runInContext(popupCode, popupCtx, { filename: popupPath });
-  assert.match(popupElements.statusNote.textContent, /MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND/);
+  assert.equal(popupElements.statusNote.textContent, "Live view paused: bring the Chrome window to front");
+
+  // Case B: Push failure also goes into state.captureError (not state.lastError)
+  resetCaptureState();
+  forceNextPushError = "Push HTTP 503";
+  await executeCommand({ op: "scroll", dy: 200 });
+  await globalThis.__aesopBridgeTest.kickFrameLoop();
+  assert.equal(state.captureError, "Push HTTP 503");
+  assert.equal(state.lastError, "");
 }
 
-// 3. 10 consecutive scroll actions through startBridgeLoop: ack <= 300ms and new frame <= 1000ms
+// 3. (v) A dirty flag set mid-capture produces exactly one more capture and settles cleanly.
 {
   resetCaptureState();
   captureCallTimestamps = [];
-  captureDelayMs = 20;
+  recordedPushes = [];
+  pushWaiters = [];
+  captureDelayMs = 30;
   enforceStrictQuota = true;
   state.confirmed = true;
   state.token = "tok_test_rate_1234567890";
   state.port = 8770;
   state.paired = true;
-  state.lastError = "";
-  state.polling = false;
 
-  const loopPromise = startBridgeLoop();
-  const ackTimes = [];
-  const frameTimes = [];
+  // Set frameDirty = true mid-capture during the first captureVisibleTab call
+  onMidCaptureHook = () => {
+    globalThis.__aesopBridgeTest.frameDirty = true;
+    kickFrameLoop();
+  };
 
-  for (let i = 1; i <= 10; i++) {
-    const startFrame = frameSeq;
-    const cmdId = `cmd_scroll_${i}`;
-    const t0 = Date.now();
-    const ackPromise = new Promise((resolve) => {
-      replyResolvers.set(cmdId, resolve);
-    });
-    const framePromise = new Promise((resolve) => {
-      if (frameSeq > startFrame) {
-        resolve(frameSeq);
-      } else {
-        frameWaiters.push(resolve);
-      }
-    });
-    cmdQueue.push({ id: cmdId, op: "scroll", dy: 350 });
+  globalThis.__aesopBridgeTest.frameDirty = true;
+  await kickFrameLoop();
 
-    await ackPromise;
-    const ackMs = Date.now() - t0;
-    ackTimes.push(ackMs);
-
-    if (frameSeq <= startFrame) {
-      await framePromise;
-    }
-    const frameMs = Date.now() - t0;
-    frameTimes.push(frameMs);
-  }
-
-  // Test brief backoff on a real network error during poll
-  pollFailCount = 1;
-  const errCmdId = "cmd_after_net_err";
-  const tErr0 = Date.now();
-  const errAckPromise = new Promise((resolve) => {
-    replyResolvers.set(errCmdId, resolve);
-  });
-  cmdQueue.push({ id: errCmdId, op: "scroll", dy: 100 });
-  await errAckPromise;
-  const errRecoveryMs = Date.now() - tErr0;
-  assert.ok(errRecoveryMs < 500, `network retry backoff must be brief (<500ms, got ${errRecoveryMs}ms)`);
-
-  state.polling = false;
-  await loopPromise;
-
-  const ackUnder300 = ackTimes.filter((ms) => ms <= 300).length;
-  const frameUnder1000 = frameTimes.filter((ms) => ms <= 1000).length;
-  assert.equal(ackUnder300, 10, `expected all 10 acks <= 300ms, got ${JSON.stringify(ackTimes)}`);
-  assert.ok(frameUnder1000 >= 9, `expected >= 9/10 frames <= 1000ms, got ${JSON.stringify(frameTimes)}`);
-  assert.equal(state.lastError, "Simulated transient network failure");
+  assert.equal(
+    captureCallTimestamps.length,
+    2,
+    `dirty flag set mid-capture must produce exactly 1 follow-up capture (total 2), got ${captureCallTimestamps.length}`
+  );
+  const gap = captureCallTimestamps[1] - captureCallTimestamps[0];
+  assert.ok(
+    gap >= MIN_CAPTURE_INTERVAL_MS - 15,
+    `second capture must wait for ${MIN_CAPTURE_INTERVAL_MS}ms interval, got ${gap}ms`
+  );
+  assert.equal(globalThis.__aesopBridgeTest.frameDirty, false, "frameDirty must be false after loop settles");
 }
 
 // 4. Part B: click_ref clears stale off-viewport refs, activates inner/outer <a href>, and falls back to navigating to href

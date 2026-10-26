@@ -29,14 +29,22 @@ class TestPortClaim(unittest.TestCase):
             make_server(str(self.tmp / "a"), self.port, tries=1)
 
     def test_busy_port_moves_to_the_next_free_one(self):
-        nxt = self.port + 1
-        probe = socket.socket()
-        try:
-            probe.bind(("127.0.0.1", nxt))
-        except OSError:
-            self.skipTest(f"port {nxt} is in use on this machine")
-        finally:
-            probe.close()
+        # Pick a squatter port whose neighbour is also free, so the fall-forward target is deterministic
+        # (a random ephemeral port's neighbour is sometimes taken on a busy machine).
+        for _ in range(20):
+            nxt = self.port + 1
+            probe = socket.socket()
+            try:
+                probe.bind(("127.0.0.1", nxt))
+                break
+            except OSError:
+                self.squat.server_close()
+                self.squat = HTTPServer(("127.0.0.1", 0), SimpleHTTPRequestHandler)
+                self.port = self.squat.server_address[1]
+            finally:
+                probe.close()
+        else:
+            self.skipTest("could not find two adjacent free ports")
         srv = make_server(str(self.tmp / "b"), self.port, tries=2)
         try:
             self.assertEqual(srv.server_address[1], nxt)

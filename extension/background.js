@@ -7,11 +7,15 @@ const PAIR_RATE_LIMIT_MS = 1000;
 const MIN_CAPTURE_INTERVAL_MS = 500;
 const RETRY_BACKOFF_MS = 150;
 
+var frameDirty = false;
 let captureInFlight = null;
-let queuedCapture = null;
 let lastCaptureAt = 0;
-let pendingPushTarget = null;
-let deferredPushPromise = null;
+let frameLoopPromise = null;
+let frameLoopEpoch = 0;
+let frameWaitTimer = null;
+let frameWaitResolve = null;
+let latestTab = null;
+let latestSnapshot = null;
 let commandInFlight = false;
 
 let state = {
@@ -21,6 +25,8 @@ let state = {
   paired: false,
   targetTabId: null,
   lastError: "",
+  captureError: "",
+  frameDirty: false,
   polling: false,
   pushTimer: null,
   pendingPair: null,
@@ -578,23 +584,33 @@ function pageScript(payload) {
   }
 }
 
-function runImmediateCapture(windowId) {
+function formatCaptureError(err) {
+  const raw = String(err && err.message ? err.message : err).slice(0, 240);
+  if (
+    /\b(not\s+visible|invisible|not\s+focused|unfocused|minimized|hidden|occluded|no\s+active\s+web\s+contents|no\s+current\s+window|window.*front|background)\b/i.test(
+      raw
+    )
+  ) {
+    return "Live view paused: bring the Chrome window to front";
+  }
+  return raw;
+}
+
+function runSingleCapture(windowId) {
   if (captureInFlight) return captureInFlight;
   lastCaptureAt = Date.now();
   const p = (async () => {
     try {
       const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
       if (dataUrl && typeof dataUrl === "string" && dataUrl.startsWith("data:image/png;base64,")) {
+        state.captureError = "";
         return dataUrl.slice("data:image/png;base64,".length);
       }
       return "";
     } catch (e) {
-      const msg = String(e && e.message ? e.message : e).slice(0, 240);
-      state.lastError = msg;
-      lastCaptureAt = Date.now();
+      state.captureError = formatCaptureError(e);
       return "";
     } finally {
-      lastCaptureAt = Date.now();
       captureInFlight = null;
     }
   })();
@@ -602,84 +618,107 @@ function runImmediateCapture(windowId) {
   return p;
 }
 
-function captureVisibleTabCoalesced(windowId) {
-  if (captureInFlight) {
-    return captureInFlight;
-  }
-  const now = Date.now();
-  const elapsed = now - lastCaptureAt;
-  if (lastCaptureAt === 0 || elapsed >= MIN_CAPTURE_INTERVAL_MS) {
-    return runImmediateCapture(windowId);
-  }
-  if (queuedCapture) {
-    queuedCapture.windowId = windowId;
-    return queuedCapture.promise;
-  }
-  const waitMs = Math.max(1, MIN_CAPTURE_INTERVAL_MS - elapsed);
-  let resolveQueued;
-  const promise = new Promise((resolve) => {
-    resolveQueued = resolve;
+function waitFrameInterval(ms) {
+  return new Promise((resolve) => {
+    frameWaitResolve = resolve;
+    frameWaitTimer = setTimeout(() => {
+      frameWaitTimer = null;
+      frameWaitResolve = null;
+      resolve();
+    }, ms);
   });
-  const entry = { windowId, promise, timer: null };
-  entry.timer = setTimeout(() => {
-    const winId = entry.windowId;
-    queuedCapture = null;
-    runImmediateCapture(winId).then(resolveQueued);
-  }, waitMs);
-  queuedCapture = entry;
-  return promise;
 }
 
-function scheduleCoalescedCapturePush(tabHint = null, snapHint = null) {
-  pendingPushTarget = { tab: tabHint, snap: snapHint };
-  if (deferredPushPromise) return deferredPushPromise;
-  deferredPushPromise = (async () => {
+function kickFrameLoop(tabHint = null, snapHint = null) {
+  if (tabHint && tabHint.id) latestTab = tabHint;
+  if (snapHint && typeof snapHint === "object") latestSnapshot = snapHint;
+  if (frameLoopPromise) return frameLoopPromise;
+  const epoch = frameLoopEpoch;
+  frameLoopPromise = (async () => {
     try {
-      const target = pendingPushTarget || {};
-      const tab = target.tab && target.tab.id ? target.tab : await getTargetTab(false);
-      if (!tab || !tab.id) return "";
-      let png = await captureVisibleTabCoalesced(tab.windowId);
-      if (!png && state.lastError) {
-        png = await captureVisibleTabCoalesced(tab.windowId);
-      }
-      if (!png) return "";
-      if (!state.confirmed || !state.token || !state.port) return png;
-      const latest = pendingPushTarget || target;
-      const latestTab = latest.tab && latest.tab.id ? latest.tab : tab;
-      const latestSnap = latest.snap || {};
-      const tabs = await listBrowseableTabs();
-      await studioFetch("/api/browser/bridge/push", "POST", {
-        ok: true,
-        ...latestSnap,
-        url: latestSnap.url || latestTab.url || "",
-        title: latestSnap.title || latestTab.title || "",
-        png,
-        tabs,
-        tab_id: latestTab.id,
-        lastError: state.lastError || "",
-        last_error: state.lastError || "",
-      });
-      state.paired = true;
-      return png;
-    } catch (e) {
-      state.lastError = String(e && e.message ? e.message : e).slice(0, 240);
-      return "";
+      do {
+        while (true) {
+          if (epoch !== frameLoopEpoch) break;
+          if (captureInFlight) {
+            try {
+              await captureInFlight;
+            } catch (_e) {}
+            if (epoch !== frameLoopEpoch) break;
+          }
+          const now = Date.now();
+          const elapsed = lastCaptureAt === 0 ? MIN_CAPTURE_INTERVAL_MS : now - lastCaptureAt;
+          if (elapsed < MIN_CAPTURE_INTERVAL_MS) {
+            const waitMs = Math.max(1, MIN_CAPTURE_INTERVAL_MS - elapsed);
+            await waitFrameInterval(waitMs);
+            continue;
+          }
+          break;
+        }
+        if (epoch !== frameLoopEpoch) break;
+        if (!frameDirty && !state.frameDirty) break;
+        frameDirty = false;
+        state.frameDirty = false;
+
+        const tab = latestTab && latestTab.id ? latestTab : await getTargetTab(false);
+        if (epoch !== frameLoopEpoch) break;
+        let png = "";
+        if (tab && tab.id) {
+          png = await runSingleCapture(tab.windowId);
+        }
+        if (epoch !== frameLoopEpoch) break;
+        if (state.confirmed && state.token && state.port) {
+          try {
+            const curTab = (latestTab && latestTab.id ? latestTab : tab) || {};
+            const snap = latestSnapshot || {};
+            const tabs = await listBrowseableTabs();
+            await studioFetch("/api/browser/bridge/push", "POST", {
+              ok: true,
+              ...snap,
+              url: snap.url || curTab.url || "",
+              title: snap.title || curTab.title || "",
+              png,
+              tabs,
+              tab_id: curTab.id || null,
+              captureError: state.captureError || "",
+              lastError: state.lastError || "",
+              last_error: state.lastError || "",
+            });
+            state.paired = true;
+          } catch (pushErr) {
+            state.captureError = String(
+              pushErr && pushErr.message ? pushErr.message : pushErr
+            ).slice(0, 240);
+          }
+        }
+      } while (frameDirty || state.frameDirty);
     } finally {
-      deferredPushPromise = null;
+      if (epoch === frameLoopEpoch) {
+        frameLoopPromise = null;
+      }
     }
   })();
-  return deferredPushPromise;
+  return frameLoopPromise;
 }
 
 function resetCaptureState() {
-  if (queuedCapture && queuedCapture.timer) {
-    clearTimeout(queuedCapture.timer);
+  frameLoopEpoch += 1;
+  frameDirty = false;
+  state.frameDirty = false;
+  state.captureError = "";
+  if (frameWaitTimer) {
+    clearTimeout(frameWaitTimer);
+    frameWaitTimer = null;
+  }
+  if (frameWaitResolve) {
+    const r = frameWaitResolve;
+    frameWaitResolve = null;
+    r();
   }
   captureInFlight = null;
-  queuedCapture = null;
   lastCaptureAt = 0;
-  pendingPushTarget = null;
-  deferredPushPromise = null;
+  frameLoopPromise = null;
+  latestTab = null;
+  latestSnapshot = null;
 }
 
 async function captureAndSnapshot(tab, op = "snapshot", extra = {}, opts = {}) {
@@ -687,6 +726,7 @@ async function captureAndSnapshot(tab, op = "snapshot", extra = {}, opts = {}) {
     return {
       ok: false,
       error: "no active browser tab",
+      captureError: state.captureError || "",
       lastError: state.lastError || "",
       last_error: state.lastError || "",
       tabs: await listBrowseableTabs(),
@@ -721,28 +761,19 @@ async function captureAndSnapshot(tab, op = "snapshot", extra = {}, opts = {}) {
       state.lastError = errMsg;
     }
   }
-  let png = "";
+  latestTab = tab;
+  latestSnapshot = snap;
   if (!opts || !opts.skipCapture) {
-    const now = Date.now();
-    const canCaptureNow =
-      !captureInFlight &&
-      !queuedCapture &&
-      (lastCaptureAt === 0 || now - lastCaptureAt >= MIN_CAPTURE_INTERVAL_MS);
-    if (canCaptureNow || (opts && opts.awaitCapture)) {
-      png = await captureVisibleTabCoalesced(tab.windowId);
-      if (!png && state.lastError) {
-        scheduleCoalescedCapturePush(tab, snap);
-      }
-    } else {
-      scheduleCoalescedCapturePush(tab, snap);
-    }
+    frameDirty = true;
+    state.frameDirty = true;
+    kickFrameLoop();
   }
   const tabs = await listBrowseableTabs();
   return {
     ...snap,
-    png,
     tabs,
     tab_id: tab.id,
+    captureError: state.captureError || "",
     lastError: state.lastError || "",
     last_error: state.lastError || "",
   };
@@ -763,7 +794,7 @@ async function executeCommand(cmd) {
       state.targetTabId = tid;
       saveState();
       await chrome.tabs.update(tid, { active: true });
-      await new Promise((r) => setTimeout(r, 120));
+      await new Promise((r) => setTimeout(r, 20));
       return await captureAndSnapshot(t, "snapshot");
     }
     if (op === "new_tab") {
@@ -809,7 +840,7 @@ async function executeCommand(cmd) {
     const needsSettle = ["click", "click_ref", "fill_ref", "key", "back", "forward", "reload"].includes(op);
     const out = await captureAndSnapshot(tab, op, cmd, { skipCapture: needsSettle });
     if (needsSettle) {
-      await new Promise((r) => setTimeout(r, 120));
+      await new Promise((r) => setTimeout(r, 20));
       let refreshed = await chrome.tabs.get(tab.id);
       if (op === "click_ref" && out && out.ok !== false) {
         if (refreshed && refreshed.status === "loading") {
@@ -840,7 +871,7 @@ async function executeCommand(cmd) {
   } catch (e) {
     const errMsg = String(e && e.message ? e.message : e).slice(0, 300);
     state.lastError = errMsg;
-    return { ok: false, error: errMsg, lastError: errMsg, last_error: errMsg };
+    return { ok: false, error: errMsg, captureError: state.captureError || "", lastError: errMsg, last_error: errMsg };
   }
 }
 
@@ -860,7 +891,7 @@ function waitForTabLoad(tabId, timeoutMs = 8000) {
     const timer = setTimeout(finish, timeoutMs);
     function listener(tid, info) {
       if (tid === tabId && info && info.status === "complete") {
-        setTimeout(finish, 80);
+        setTimeout(finish, 20);
       }
     }
     if (chrome.tabs && chrome.tabs.onUpdated && chrome.tabs.onUpdated.addListener) {
@@ -875,11 +906,11 @@ function waitForTabLoad(tabId, timeoutMs = 8000) {
       } catch (_e) {
         finish();
       }
-    }, 80);
+    }, 20);
   });
 }
 
-async function studioFetch(path, method = "GET", body = null) {
+async function defaultStudioFetch(path, method = "GET", body = null) {
   if (!state.confirmed || !state.token || !state.port) throw new Error("Missing confirmed pairing token");
   const headers = {
     "X-Aesop-Bridge-Token": state.token,
@@ -898,24 +929,23 @@ async function studioFetch(path, method = "GET", body = null) {
   return await resp.json();
 }
 
+var studioFetch = globalThis.studioFetch || defaultStudioFetch;
+
 async function pushCurrentTabState() {
   if (!state.confirmed || !state.token || !state.port || commandInFlight) return;
   try {
     const tab = await getTargetTab(false);
-    const payload = tab
-      ? await captureAndSnapshot(tab, "snapshot")
-      : {
-          ok: true,
-          url: "",
-          title: "",
-          tabs: await listBrowseableTabs(),
-          lastError: state.lastError || "",
-          last_error: state.lastError || "",
-        };
-    await studioFetch("/api/browser/bridge/push", "POST", payload);
-    state.paired = true;
+    if (tab && tab.id) {
+      await captureAndSnapshot(tab, "snapshot", {}, { skipCapture: true });
+    } else {
+      latestTab = null;
+      latestSnapshot = null;
+    }
+    frameDirty = true;
+    state.frameDirty = true;
+    await kickFrameLoop();
   } catch (e) {
-    state.lastError = String(e && e.message ? e.message : e).slice(0, 240);
+    state.captureError = String(e && e.message ? e.message : e).slice(0, 240);
   }
 }
 
@@ -938,7 +968,7 @@ async function startBridgeLoop() {
         } catch (cmdErr) {
           const msg = String(cmdErr && cmdErr.message ? cmdErr.message : cmdErr).slice(0, 240);
           state.lastError = msg;
-          out = { ok: false, error: msg, lastError: msg, last_error: msg };
+          out = { ok: false, error: msg, captureError: state.captureError || "", lastError: msg, last_error: msg };
         } finally {
           commandInFlight = false;
         }
@@ -953,7 +983,7 @@ async function startBridgeLoop() {
           try {
             await studioFetch("/api/browser/bridge/reply", "POST", {
               cmd_id: res.cmd.id,
-              result: { ...out, png: "", lastError: state.lastError, last_error: state.lastError },
+              result: { ...out, lastError: state.lastError, last_error: state.lastError },
             });
           } catch (_e2) {}
         }
@@ -970,7 +1000,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (state.paired && !commandInFlight && tabId === state.targetTabId && changeInfo.status === "complete") {
     clearTimeout(state.pushTimer);
     state.pushTimer = setTimeout(() => {
-      if (!commandInFlight) pushCurrentTabState();
+      if (!commandInFlight) {
+        frameDirty = true;
+        state.frameDirty = true;
+        kickFrameLoop();
+      }
     }, 150);
   }
 });
@@ -981,10 +1015,15 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     const t = await chrome.tabs.get(activeInfo.tabId);
     if (t && !isStudioUrl(t.url)) {
       state.targetTabId = t.id;
+      latestTab = t;
       saveState();
       clearTimeout(state.pushTimer);
       state.pushTimer = setTimeout(() => {
-        if (!commandInFlight) pushCurrentTabState();
+        if (!commandInFlight) {
+          frameDirty = true;
+          state.frameDirty = true;
+          kickFrameLoop();
+        }
       }, 120);
     }
   } catch (_e) {}
@@ -1220,6 +1259,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         hasToken: !!state.token,
         targetTabId: state.targetTabId,
         lastError: state.lastError,
+        captureError: state.captureError,
         pendingPair: state.pendingPair
           ? {
               port: state.pendingPair.port,
@@ -1257,12 +1297,23 @@ globalThis.__aesopBridgeTest = {
   handlePairRequest,
   approvePendingPair,
   rejectPendingPair,
-  captureVisibleTabCoalesced,
-  scheduleCoalescedCapturePush,
+  formatCaptureError,
+  runSingleCapture,
+  kickFrameLoop,
   resetCaptureState,
   captureAndSnapshot,
   executeCommand,
   pushCurrentTabState,
   startBridgeLoop,
   pageScript,
+  get frameDirty() {
+    return frameDirty;
+  },
+  set frameDirty(v) {
+    frameDirty = !!v;
+    state.frameDirty = !!v;
+  },
+  setStudioFetch(fn) {
+    studioFetch = fn || defaultStudioFetch;
+  },
 };

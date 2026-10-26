@@ -18,9 +18,11 @@ function updateUI(st) {
   if (st && st.paired) {
     dot.className = "dot ok";
     title.textContent = `Connected (127.0.0.1:${st.port})`;
-    note.textContent = st.lastError
-      ? `Last error: ${st.lastError}`
-      : "Your normal Chrome profile and logins are linked to Aesop Studio.";
+    note.textContent = st.captureError
+      ? st.captureError
+      : st.lastError
+        ? `Last error: ${st.lastError}`
+        : "Your normal Chrome profile and logins are linked to Aesop Studio.";
   } else if (st && st.pendingPair && st.pendingPair.port) {
     dot.className = "dot";
     title.textContent = "Confirmation required";
@@ -29,7 +31,7 @@ function updateUI(st) {
     dot.className = "dot";
     title.textContent = "Not paired yet";
     note.textContent =
-      (st && st.lastError) ||
+      (st && (st.captureError || st.lastError)) ||
       "Open Aesop Studio in Chrome and confirm pairing here, or paste the pairing code below.";
   }
 }
