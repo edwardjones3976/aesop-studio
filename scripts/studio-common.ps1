@@ -1,0 +1,26 @@
+# Shared by start.ps1, open.ps1 and stop.ps1. The server writes server.port and server.pid (its own pid) once it has
+# bound; these helpers trust those files plus an HTTP probe, not netstat, because Windows sometimes reports a
+# listener's owner as PID 0 and the Store python alias is a launcher stub whose pid is not the server's.
+
+function Test-StudioPort([int]$Port) {
+  # Studio answers every request with "Server: AesopStudio" (a 401 for an unsigned /api call is fine).
+  try {
+    $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/api/ping")
+    $req.Timeout = 2000
+    try { $resp = $req.GetResponse() } catch [System.Net.WebException] { $resp = $_.Exception.Response }
+    if (-not $resp) { return $false }
+    $ok = [string]$resp.Headers["Server"] -match '^AesopStudio'
+    $resp.Close()
+    return $ok
+  } catch { return $false }
+}
+
+function Get-StudioState([string]$Data) {
+  # Returns @{ Running; Port; Pid } for the Studio that owns this data directory.
+  $portFile = Join-Path $Data "server.port"
+  $pidFile = Join-Path $Data "server.pid"
+  $port = if (Test-Path $portFile) { [int](Get-Content $portFile -Raw).Trim() } else { 0 }
+  $procId = if (Test-Path $pidFile) { [int](Get-Content $pidFile -Raw).Trim() } else { 0 }
+  $running = $port -gt 0 -and (Test-StudioPort $port)
+  return @{ Running = $running; Port = $port; Pid = $procId }
+}

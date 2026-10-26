@@ -1,6 +1,7 @@
 """Aesop Studio login app: start the local server, open a one-time sign-in link, pin a Desktop shortcut."""
 from __future__ import annotations
 
+import http.client
 import os
 import struct
 import subprocess
@@ -15,7 +16,8 @@ if str(ROOT) not in sys.path:
 
 PORT = int(os.environ.get("AESOP_PORT", 8765))
 DATA = Path(os.environ.get("AESOP_DATA", Path(os.environ.get("LOCALAPPDATA", ".")) / "AesopStudio"))
-PID_FILE = DATA / "server.pid"
+PID_FILE = DATA / "server.pid"  # both written by the server itself once it has bound
+PORT_FILE = DATA / "server.port"
 LINK_FILE = DATA / "launch-link.txt"
 RELOGIN = DATA / "relogin.request"
 ICON_FILE = ROOT / "tools" / "aesop.ico"
@@ -56,48 +58,27 @@ def _pid_alive(pid: int) -> bool:
     return f'"{pid}"' in r.stdout
 
 
-def parse_listener(netstat_text: str, port: int = PORT) -> int | None:
-    want = {f"127.0.0.1:{port}", f"[::1]:{port}"}
-    for line in netstat_text.splitlines():
-        parts = line.split()
-        if len(parts) < 5 or parts[-2].upper() != "LISTENING":
-            continue
-        if parts[1] in want:
-            try:
-                return int(parts[-1])
-            except ValueError:
-                return None
-    return None
-
-
-def _listener_pid(port: int = PORT) -> int | None:
-    """PID listening on loopback:port, if any."""
+def studio_answers(port: int, timeout: float = 2.0) -> bool:
+    """True when loopback:port is Aesop Studio (by its Server header). netstat is not used: Windows sometimes
+    reports a listener's owner as PID 0, and another program can hold the port."""
     try:
-        r = subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True, timeout=15,
-                           creationflags=CREATE_NO_WINDOW)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return parse_listener(r.stdout, port)
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        c.request("GET", "/api/ping")
+        ok = (c.getresponse().getheader("Server") or "").startswith("AesopStudio")
+        c.close()
+        return ok
+    except (OSError, http.client.HTTPException):
+        return False
 
 
 def studio_pid() -> int | None:
-    """Live Studio process: recorded pid if still running, else whoever holds the loopback port."""
-    if PID_FILE.is_file():
-        try:
-            pid = int(PID_FILE.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            pid = None
-        else:
-            if _pid_alive(pid):
-                return pid
-    listen = _listener_pid()
-    if listen:
-        try:
-            PID_FILE.write_text(str(listen), encoding="utf-8")
-        except OSError:
-            pass
-        return listen
-    return None
+    """Live Studio process: the pid the server recorded for itself, if the port it recorded answers as Studio."""
+    try:
+        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+        port = int(PORT_FILE.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+    return pid if studio_answers(port) else None
 
 
 def last_server_error() -> str:
@@ -173,12 +154,12 @@ def start_server() -> None:
     if studio_pid():
         return
     log, err = DATA / "server.log", DATA / "server.log.err"
-    LINK_FILE.unlink(missing_ok=True)
+    for f in (LINK_FILE, PID_FILE, PORT_FILE):
+        f.unlink(missing_ok=True)
     proc = subprocess.Popen(
-        [console_python(), "-m", "aesop_studio", "--port", str(PORT), "--data", str(DATA)],
+        [console_python(), "-u", "-m", "aesop_studio", "--port", str(PORT), "--data", str(DATA)],
         cwd=str(ROOT), stdout=log.open("w", encoding="utf-8"),
         stderr=err.open("w", encoding="utf-8"), creationflags=CREATE_NO_WINDOW)
-    PID_FILE.write_text(str(proc.pid), encoding="utf-8")
     for _ in range(20):
         code = proc.poll()
         if code is not None:
@@ -232,8 +213,8 @@ def stop_server() -> None:
     if pid:
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True,
                        creationflags=CREATE_NO_WINDOW)
-    PID_FILE.unlink(missing_ok=True)
-    LINK_FILE.unlink(missing_ok=True)
+    for f in (LINK_FILE, PID_FILE, PORT_FILE):
+        f.unlink(missing_ok=True)
 
 
 def run_gui() -> None:

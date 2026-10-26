@@ -18,9 +18,11 @@ Double-click **Aesop Studio** on the Desktop (this PC's home). That login app st
 python tools\login_app.py --install-shortcut   # pin or restore the Desktop shortcut
 python tools\login_app.py                      # login window (also recreates the shortcut)
 .\open.ps1           # same sign-in without the window
-.\start.ps1          # starts on http://127.0.0.1:8765 and opens the one-time launch link
+.\start.ps1          # starts on http://127.0.0.1:8765 (or the next free port) and opens the one-time launch link
 .\stop.ps1           # stops the server started by start.ps1
 ```
+
+The server claims its port exclusively. If 8765 is busy (another program listening there), it moves to the next free port, up to `--port-tries` (default 10). Once bound it writes `server.port` and its own `server.pid` to the data folder; the launchers read those and confirm by the `Server: AesopStudio` header instead of netstat.
 
 Data lives in `%LOCALAPPDATA%\AesopStudio` (override with `-Data` or `AESOP_DATA`). The server binds to **127.0.0.1 only**. A browser session needs the one-time launch link written to `launch-link.txt` at startup. Restart to get a new link.
 

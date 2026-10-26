@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -836,10 +837,37 @@ class Handler(BaseHTTPRequestHandler):
         self.json(res)
 
 
-def make_server(data_dir: str, port: int) -> ThreadingHTTPServer:
+class PortUnavailableError(RuntimeError):
+    pass
+
+
+class StudioHTTPServer(ThreadingHTTPServer):
+    # On Windows SO_REUSEADDR lets a second socket bind a port another program already listens on; requests then land
+    # on either server at random (seen 2026-10-26: a stray `python -m http.server 8765` swallowed Studio's requests).
+    # Claim the port exclusively so a busy port fails the bind instead.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def make_server(data_dir: str, port: int, tries: int = 1) -> ThreadingHTTPServer:
+    """Bind the first free port in [port, port + tries). The data-directory lock is taken first, as before."""
     app = App(data_dir, port)
     handler = type("BoundHandler", (Handler,), {"app": app})
-    srv = ThreadingHTTPServer((HOST, port), handler)
+    errors = []
+    for p in range(port, port + max(1, tries)):
+        try:
+            srv = StudioHTTPServer((HOST, p), handler)
+            break
+        except OSError as e:
+            errors.append(f"{p}: {e.strerror or e}")
+    else:
+        app._instance_lock.close()
+        raise PortUnavailableError("no free loopback port (" + "; ".join(errors) + ")")
+    app.port = p
     srv.daemon_threads = True
     srv.app = app
     return srv
@@ -850,12 +878,20 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=int(os.environ.get("AESOP_PORT", 8765)))
     ap.add_argument("--data", default=os.environ.get("AESOP_DATA",
                                                      str(Path(os.environ.get("LOCALAPPDATA", ".")) / "AesopStudio")))
+    ap.add_argument("--port-tries", type=int, default=int(os.environ.get("AESOP_PORT_TRIES", 10)),
+                    help="if --port is busy, try this many consecutive ports in total")
     a = ap.parse_args(argv)
     try:
-        srv = make_server(a.data, a.port)
-    except InstanceLockError as e:
+        srv = make_server(a.data, a.port, a.port_tries)
+    except (InstanceLockError, PortUnavailableError) as e:
         print(f"Aesop Studio not started: {e}", file=sys.stderr)
         raise SystemExit(2)
+    a.port = srv.app.port
+    # The launchers read these instead of netstat: Windows sometimes hides a listener's owner, and the Store python
+    # alias is a launcher stub whose pid is not the server's.
+    pid_file, port_file = Path(a.data) / "server.pid", Path(a.data) / "server.port"
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+    port_file.write_text(str(a.port), encoding="utf-8")
     url = f"http://127.0.0.1:{a.port}/login?code={srv.app.login_code}"
     link_file = Path(a.data) / "launch-link.txt"
     link_file.write_text(url, encoding="utf-8")
@@ -895,7 +931,8 @@ def main(argv=None):
         srv.app.browser.stop()
         pass
     finally:
-        link_file.unlink(missing_ok=True)
+        for f in (link_file, pid_file, port_file):
+            f.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

@@ -31,14 +31,28 @@ class TestLoginApp(unittest.TestCase):
         d = login_app.desktop_dir()
         self.assertTrue(str(d).endswith("Desktop"))
 
-    def test_parse_listener_loopback(self):
-        sample = (
-            "  TCP    0.0.0.0:80             0.0.0.0:0              LISTENING       4\n"
-            "  TCP    127.0.0.1:8765         0.0.0.0:0              LISTENING       65856\n"
-            "  TCP    127.0.0.1:8765         127.0.0.1:9            TIME_WAIT       0\n"
-        )
-        self.assertEqual(login_app.parse_listener(sample, 8765), 65856)
-        self.assertIsNone(login_app.parse_listener(sample, 9999))
+    def test_studio_answers_only_for_studio(self):
+        # A squatting file server on the port is not Studio; a server that identifies as AesopStudio is.
+        import threading
+        from http.server import HTTPServer, SimpleHTTPRequestHandler
+
+        def serve(version):
+            h = type("H", (SimpleHTTPRequestHandler,), {"server_version": version, "sys_version": "",
+                                                         "log_message": lambda *a: None})
+            srv = HTTPServer(("127.0.0.1", 0), h)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            self.addCleanup(srv.server_close)
+            self.addCleanup(srv.shutdown)
+            return srv.server_address[1]
+
+        self.assertTrue(login_app.studio_answers(serve("AesopStudio")))
+        self.assertFalse(login_app.studio_answers(serve("SimpleHTTP/0.6")))
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        closed = s.getsockname()[1]
+        s.close()
+        self.assertFalse(login_app.studio_answers(closed, timeout=0.5))
 
     def test_stale_pid_file_is_not_running(self):
         self.assertFalse(login_app._pid_alive(1))  # System Idle is PID 0; 1 is unused on Windows
