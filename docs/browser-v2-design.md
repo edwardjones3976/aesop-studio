@@ -1,0 +1,66 @@
+# Aesop Studio Browser v2 — Design & Architecture
+
+## 1. Why Browser v1 Fell Short
+
+Browser v1 drove Chrome over the DevTools protocol (`CDP_PORT = 9222`) through a Playwright subprocess (`aesop_studio/browser_worker.py`). That design had four structural flaws:
+
+1. **Painful sign-in (second Chrome identity):** Chrome 136+ blocks `--remote-debugging-port` on the default User Data Directory. To work around that restriction, v1 launched a separate Chrome profile at `%LOCALAPPDATA%\AesopStudio\chrome-studio`. That profile had none of the owner's cookies or sessions, forcing the owner to sign in all over again inside a separate Chrome window (or close and reopen Chrome).
+2. **Laggy, indirect UI:** The inspector polled `/api/browser/shot` every 2.5 seconds, encoding and decoding full PNG screenshots over a subprocess pipe, with 500–1200 ms fixed waits on every click, key press, and scroll.
+3. **Slow, fragile vision-only agent:** `browse_agent.py` took a screenshot on every step, restricted browsing to three vision routes (`claude`, `codex`, `openai-api`), and asked the model to guess raw `(x, y)` pixel coordinates. It had no structured DOM/accessibility tree, no element refs, no multi-tab control, no in-page search, and no direct citation into the project's research notebook.
+4. **Brittle environment coupling:** Fixed port `9222`, mandatory `.venv` Playwright dependency, and broken `.venv` resolution inside linked git worktrees.
+
+---
+
+## 2. Browser v2 Architecture
+
+Browser v2 replaces the single-track CDP screenshot loop with a three-part architecture:
+
+### A. Chrome Extension Bridge in the Owner's Normal Profile (`extension/`)
+
+A Manifest V3 extension (**Aesop Studio Browser Bridge**) runs directly inside the owner's everyday Chrome profile:
+
+- **Zero re-sign-in, zero Chrome restart:** Because the extension runs in the normal Chrome profile, the owner's existing Google, GitHub, and other logins work immediately in place.
+- **Automatic & 1-click pairing with cryptographic token authentication:**
+  - On startup, Studio generates a 256-bit `pairing_token` (`secrets.token_urlsafe(32)`).
+  - Every extension request to `/api/browser/bridge/*` must present `X-Aesop-Bridge-Token: <pairing_token>`, verified with `hmac.compare_digest`. Unauthenticated localhost callers and cross-origin pages are rejected (`403 Forbidden`).
+  - When the owner opens Aesop Studio in Chrome, Studio's authenticated UI publishes a loopback pairing handshake (`data-aesop-bridge` / `window.postMessage` of type `AESOP_STUDIO_PAIR`) that the extension's loopback content script (`content_pair.js`) picks up automatically. The owner can also pair with one click from the Browser panel or the extension popup.
+- **No credentials or cookies leave Chrome:** The extension never requests `cookies` permission, never reads `document.cookie`, `localStorage`, or `sessionStorage`, and blanks out all password inputs before building DOM snapshots.
+- **Dual-transport resilience:** `Browser` (`aesop_studio/browser.py`) prioritizes the Extension Bridge whenever paired and active, while retaining automatic fallback to the Playwright worker (including worktree-aware `.venv` discovery and enhanced DOM snapshot commands in `browser_worker.py`) when running in legacy/CDP environments.
+
+### B. Sub-Second Live Viewport with Direct Input Passthrough & Interactive DOM Overlay
+
+Instead of 2.5-second blind PNG polling:
+
+- **Event-driven frame + DOM push:** The extension captures viewport frames (`chrome.tabs.captureVisibleTab`) and structural DOM/Accessibility snapshots immediately after navigation, DOM mutations, scroll, click, or typing, and pushes them to `/api/browser/bridge/push`. Long-polling on `/api/browser/bridge/poll` dispatches Studio commands to Chrome in `< 50 ms`.
+- **Sequence-gated updates (`<= 400 ms`):** Studio's Browser panel polls lightweight state (`/api/browser/state?seq=<n>`) and fetches `/api/browser/shot?seq=<n>` only when `frame_seq` advances, keeping idle bandwidth near zero and interactive latency under `1 s`.
+- **Interactive Element Overlay & Direct Input Passthrough:**
+  - Hovering over the live viewport highlights interactive elements from the live accessibility/DOM map (`[ref] role "label"`) and dispatches exact semantic element clicks (`click_ref`) or coordinate clicks (`click`) with immediate visual feedback.
+  - Wheel scrolling, keyboard typing, a direct **Quick Type / Fill** bar, **Multi-Tab switching** (switch, open, close tabs), **Find in Page**, and a **Reader / Structure** inspector tab work directly inside Studio.
+
+### C. DOM- and Accessibility-Tree-First Semantic Agent (`aesop_studio/browse_agent.py`)
+
+- **Structured Page Snapshot (`snapshot`):** Each step extracts a compact, redacted structural view of the active tab:
+  - Page metadata (`url`, `title`, active tab, open `tabs` list);
+  - Document outline (`headings` H1–H4);
+  - Interactive accessibility/DOM elements (`[#1] link "Releases" -> https://...`, `[#2] button "Latest"`, `[#3] input[search] "Find a release..."`) with stable numeric `ref` IDs, roles, labels, bounding boxes, and safety flags;
+  - Structured `forms` summary and clean `main_text` (article/main content).
+- **Works Across Usable Chat Routes (Vision Optional):** Because the primary page representation is structured text + accessibility refs, any usable chat route can browse, and steps avoid slow image encoding unless vision fallback is needed and permitted by the project's transfer policy.
+- **Rich Semantic Actions & Notebook Citation:**
+  - `navigate` (`url`)
+  - `click_ref` (`ref`) and `fill_ref` (`ref`, `text`, `submit`) for deterministic DOM interaction without coordinate guessing
+  - `click` (`x`, `y`), `type` (`text`), `key` (`key`), `scroll` (`dy` / `direction`)
+  - `find` (`query`) for instant in-page text and element search
+  - `switch_tab` (`tab_id`) and `new_tab` (`url`) for multi-tab workflows
+  - `cite_notebook` (`title`, `claim`, `locator`, `limitation`) and `done` (with optional `cite` / `findings`) to record the page as a source and save cited findings directly into the project's Research Notebook.
+
+---
+
+## 3. Defense-in-Depth Safety Guarantees
+
+1. **Loopback-Only + Pairing Token:** Server binds `127.0.0.1` only. All `/api/browser/bridge/*` routes require `X-Aesop-Bridge-Token` matching `Browser.pairing_token` via `hmac.compare_digest`.
+2. **Hard Refusals on Passwords, CAPTCHAs, and Purchases:** Enforced in `browse_agent.py`, `browser.py`, `browser_worker.py`, and `extension/content.js`:
+   - Agents cannot type into or fill password fields (`input[type=password]`, `autocomplete=current-password|new-password`, or password-labelled inputs).
+   - Agents cannot interact with CAPTCHA challenges (`recaptcha`, `hcaptcha`, `cf-turnstile`, `captcha`).
+   - Agents cannot click purchase/checkout confirmation triggers (`buy now`, `place order`, `complete purchase`, `pay now`, `confirm payment`) or type into payment card fields (`cc-number`, `cc-csc`, `cvv`).
+3. **Visible & Stoppable:** Every agent step is recorded with its thought, action, target detail, and page URL/title, and the owner's **Stop** button halts the loop and cancels any running provider turn immediately.
+4. **Zero Credential Leakage:** URLs pass through `security.sanitize_url()` and all extracted text, labels, thoughts, and answers pass through `security.redact()`.

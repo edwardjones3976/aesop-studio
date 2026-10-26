@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Aesop Studio Browser Bridge</title>
+<style>
+  body {
+    margin: 0;
+    padding: 14px;
+    width: 310px;
+    font: 13px/1.45 "Segoe UI", system-ui, sans-serif;
+    background: #0B111A;
+    color: #EEF4FA;
+  }
+  h1 {
+    font-size: 14px;
+    margin: 0 0 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #FF8F8F;
+    display: inline-block;
+  }
+  .dot.ok {
+    background: #80E1CB;
+  }
+  .muted {
+    color: #AFBED0;
+    font-size: 12px;
+    margin: 0 0 10px;
+  }
+  label {
+    display: block;
+    font-size: 12px;
+    color: #AFBED0;
+    margin-bottom: 4px;
+  }
+  input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 7px 9px;
+    border-radius: 7px;
+    border: 1px solid #2B3B4D;
+    background: #141F2C;
+    color: #EEF4FA;
+    font: 12px Consolas, monospace;
+    margin-bottom: 8px;
+  }
+  button {
+    width: 100%;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid #FF916C;
+    background: #FF916C;
+    color: #0B111A;
+    font-weight: 600;
+    cursor: pointer;
+    margin-bottom: 6px;
+  }
+  button.secondary {
+    background: #243243;
+    border-color: #3A4D63;
+    color: #EEF4FA;
+  }
+</style>
+</head>
+<body>
+  <h1><span id="dot" class="dot"></span><span id="statusTitle">Aesop Studio Bridge</span></h1>
+  <p id="statusNote" class="muted">Checking Studio connection…</p>
+  <button id="useTabBtn" class="secondary" type="button">Share Active Tab with Studio</button>
+  <label for="pairIn">Pairing code (auto-detected when Studio is open)</label>
+  <input id="pairIn" type="text" placeholder="127.0.0.1:8765#token">
+  <button id="pairBtn" type="button">Pair with Studio</button>
+  <script src="popup.js"></script>
+</body>
+</html>

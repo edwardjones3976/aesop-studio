@@ -1,0 +1,683 @@
+// Aesop Studio Browser Bridge (Manifest V3 Service Worker)
+// Connects the owner's normal Chrome profile (and existing logins) to Aesop Studio over 127.0.0.1
+// with pairing-token authentication. Never reads cookies, storage, or password values.
+"use strict";
+
+let state = {
+  port: 8765,
+  token: "",
+  paired: false,
+  targetTabId: null,
+  lastError: "",
+  polling: false,
+  pushTimer: null,
+};
+
+chrome.storage.local.get(["port", "token", "targetTabId"], (res) => {
+  if (res.port) state.port = Number(res.port) || 8765;
+  if (res.token) state.token = String(res.token);
+  if (res.targetTabId) state.targetTabId = Number(res.targetTabId);
+  if (state.token) {
+    startBridgeLoop();
+  }
+});
+
+chrome.alarms.create("aesop-keepalive", { periodInMinutes: 0.4 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "aesop-keepalive" && state.token && !state.polling) {
+    startBridgeLoop();
+  }
+});
+
+function saveState() {
+  chrome.storage.local.set({
+    port: state.port,
+    token: state.token,
+    targetTabId: state.targetTabId,
+  });
+}
+
+function isStudioUrl(url) {
+  if (!url) return true;
+  try {
+    const u = new URL(url);
+    if (
+      (u.hostname === "127.0.0.1" || u.hostname === "localhost") &&
+      String(u.port || "80") === String(state.port)
+    ) {
+      return true;
+    }
+    return !["http:", "https:"].includes(u.protocol);
+  } catch (_e) {
+    return true;
+  }
+}
+
+async function listBrowseableTabs() {
+  const tabs = await chrome.tabs.query({});
+  return tabs
+    .filter((t) => t.id && !isStudioUrl(t.url))
+    .map((t) => ({
+      id: t.id,
+      windowId: t.windowId,
+      title: String(t.title || "").slice(0, 160),
+      url: String(t.url || "").slice(0, 500),
+      active: !!t.active,
+      selected: t.id === state.targetTabId,
+    }));
+}
+
+async function getTargetTab(createIfMissing = false) {
+  if (state.targetTabId) {
+    try {
+      const t = await chrome.tabs.get(state.targetTabId);
+      if (t && !isStudioUrl(t.url)) return t;
+    } catch (_e) {
+      state.targetTabId = null;
+    }
+  }
+  const all = await chrome.tabs.query({});
+  const activeNonStudio = all.find((t) => t.active && !isStudioUrl(t.url));
+  if (activeNonStudio) {
+    state.targetTabId = activeNonStudio.id;
+    saveState();
+    return activeNonStudio;
+  }
+  const anyNonStudio = all.find((t) => !isStudioUrl(t.url));
+  if (anyNonStudio) {
+    state.targetTabId = anyNonStudio.id;
+    saveState();
+    return anyNonStudio;
+  }
+  if (!createIfMissing) return null;
+  const created = await chrome.tabs.create({ url: "https://example.com", active: true });
+  state.targetTabId = created.id;
+  saveState();
+  return created;
+}
+
+// In-page DOM + Accessibility snapshot and action executor.
+// Injected via chrome.scripting.executeScript into the target tab.
+function pageScript(payload) {
+  const op = payload.op;
+  const isPasswordField = (el) => {
+    if (!el || !el.tagName) return false;
+    const type = String(el.type || "").toLowerCase();
+    const ac = String(el.getAttribute("autocomplete") || "").toLowerCase();
+    const name = String(el.name || el.id || el.placeholder || el.getAttribute("aria-label") || "").toLowerCase();
+    return (
+      type === "password" ||
+      ac.includes("password") ||
+      /\b(password|passwd|passcode|pin)\b/i.test(name)
+    );
+  };
+  const isPaymentField = (el) => {
+    if (!el || !el.tagName) return false;
+    const ac = String(el.getAttribute("autocomplete") || "").toLowerCase();
+    const name = String(el.name || el.id || el.placeholder || el.getAttribute("aria-label") || "").toLowerCase();
+    return (
+      ac.startsWith("cc-") ||
+      /\b(card[_\s-]?number|cvv|cvc|cc-number|cc-csc|credit[_\s-]?card)\b/i.test(name)
+    );
+  };
+  const isCaptchaNode = (el) => {
+    if (!el || !el.tagName) return false;
+    const blob = [
+      el.id,
+      el.className,
+      el.getAttribute("title"),
+      el.getAttribute("aria-label"),
+      el.getAttribute("data-sitekey"),
+      el.src,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return /\b(captcha|recaptcha|hcaptcha|cf-turnstile|g-recaptcha)\b/i.test(blob);
+  };
+  const isPurchaseTrigger = (el) => {
+    if (!el || !el.tagName) return false;
+    const txt = String(
+      el.innerText || el.value || el.getAttribute("aria-label") || el.title || ""
+    )
+      .trim()
+      .toLowerCase();
+    return /\b(buy now|place your order|place order|complete purchase|pay now|confirm payment|submit order|one-click buy)\b/i.test(
+      txt
+    );
+  };
+
+  const labelFor = (el) => {
+    if (!el) return "";
+    if (isPasswordField(el)) return "[password field]";
+    const aria = el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("placeholder");
+    if (aria && aria.trim()) return aria.trim().slice(0, 120);
+    if (el.id) {
+      const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+      if (lbl && lbl.innerText) return lbl.innerText.trim().slice(0, 120);
+    }
+    const parentLbl = el.closest && el.closest("label");
+    if (parentLbl && parentLbl.innerText) return parentLbl.innerText.trim().slice(0, 120);
+    const txt = el.innerText || el.value || el.getAttribute("alt") || el.name || "";
+    return String(txt).replace(/\s+/g, " ").trim().slice(0, 120);
+  };
+
+  const roleFor = (el) => {
+    const r = el.getAttribute("role");
+    if (r) return r.toLowerCase();
+    const tag = el.tagName.toLowerCase();
+    if (tag === "a") return "link";
+    if (tag === "button") return "button";
+    if (tag === "select") return "combobox";
+    if (tag === "textarea") return "textbox";
+    if (tag === "summary") return "button";
+    if (tag === "input") {
+      const t = String(el.type || "text").toLowerCase();
+      if (["button", "submit", "reset"].includes(t)) return "button";
+      if (t === "checkbox") return "checkbox";
+      if (t === "radio") return "radio";
+      if (t === "search") return "searchbox";
+      return "textbox";
+    }
+    return tag;
+  };
+
+  const collectSnapshot = () => {
+    const vw = window.innerWidth || 1366;
+    const vh = window.innerHeight || 854;
+    const headings = [...document.querySelectorAll("h1, h2, h3, h4")]
+      .slice(0, 35)
+      .map((h) => ({
+        level: Number(h.tagName.slice(1)),
+        text: String(h.innerText || "").replace(/\s+/g, " ").trim().slice(0, 160),
+      }))
+      .filter((h) => h.text);
+
+    const sel = [
+      "a[href]",
+      "button",
+      "input:not([type='hidden'])",
+      "select",
+      "textarea",
+      "summary",
+      "[role='button']",
+      "[role='link']",
+      "[role='tab']",
+      "[role='menuitem']",
+      "[role='searchbox']",
+      "[role='checkbox']",
+    ].join(",");
+
+    const nodes = [...document.querySelectorAll(sel)];
+    const elements = [];
+    let refSeq = 1;
+    for (const el of nodes) {
+      if (elements.length >= 85) break;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 3 || rect.height < 3) continue;
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
+      if (rect.bottom < -200 || rect.top > vh + 600) continue;
+      const ref = refSeq++;
+      el.setAttribute("data-aesop-ref", String(ref));
+      const pw = isPasswordField(el);
+      const cap = isCaptchaNode(el);
+      const pur = isPurchaseTrigger(el) || isPaymentField(el);
+      const label = labelFor(el);
+      const href = el.tagName === "A" && el.href && el.href.startsWith("http") ? el.href : "";
+      if (!label && !href && !["input", "textarea", "select"].includes(el.tagName.toLowerCase())) continue;
+      elements.push({
+        ref,
+        role: roleFor(el),
+        tag: el.tagName.toLowerCase(),
+        type: String(el.type || "").toLowerCase(),
+        label: label || href.slice(0, 80) || el.tagName.toLowerCase(),
+        href: href.slice(0, 300),
+        rect: {
+          x: Math.round(rect.left + rect.width / 2),
+          y: Math.round(rect.top + rect.height / 2),
+          left: Math.round(rect.left),
+          top: Math.round(rect.top),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+        },
+        in_viewport: rect.top >= 0 && rect.left >= 0 && rect.bottom <= vh && rect.right <= vw,
+        is_password: pw,
+        is_captcha: cap,
+        is_purchase: pur,
+      });
+    }
+
+    const forms = [...document.querySelectorAll("form")].slice(0, 12).map((f, idx) => {
+      const controls = [...f.querySelectorAll("input:not([type='hidden']), select, textarea, button")]
+        .slice(0, 15)
+        .map((c) => ({
+          ref: Number(c.getAttribute("data-aesop-ref") || 0) || null,
+          role: roleFor(c),
+          type: isPasswordField(c) ? "password" : String(c.type || "").toLowerCase(),
+          label: labelFor(c),
+          is_password: isPasswordField(c),
+        }));
+      return {
+        index: idx + 1,
+        name: String(f.getAttribute("aria-label") || f.name || f.id || `form-${idx + 1}`).slice(0, 80),
+        fields: controls,
+      };
+    });
+
+    const links = [...document.querySelectorAll("a[href]")]
+      .slice(0, 120)
+      .map((a) => ({
+        ref: Number(a.getAttribute("data-aesop-ref") || 0) || null,
+        text: String(a.innerText || a.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 80),
+        href: a.href,
+      }))
+      .filter((l) => l.text && l.href && l.href.startsWith("http"));
+
+    const mainEl =
+      document.querySelector("main, article, [role='main'], #readme, .markdown-body") || document.body;
+    const mainText = String((mainEl && mainEl.innerText) || "").slice(0, 24000);
+    const fullText = String((document.body && document.body.innerText) || "").slice(0, 40000);
+
+    return {
+      ok: true,
+      url: window.location.href,
+      title: document.title || "",
+      vw,
+      vh,
+      scrollY: Math.round(window.scrollY || 0),
+      docH: Math.round((document.documentElement && document.documentElement.scrollHeight) || vh),
+      headings,
+      elements,
+      forms,
+      links,
+      main_text: mainText,
+      text: fullText,
+    };
+  };
+
+  const findByRef = (ref) => {
+    let el = document.querySelector(`[data-aesop-ref="${CSS.escape(String(ref))}"]`);
+    if (!el) {
+      collectSnapshot();
+      el = document.querySelector(`[data-aesop-ref="${CSS.escape(String(ref))}"]`);
+    }
+    return el;
+  };
+
+  const guardAgentTarget = (el, isTyping) => {
+    if (!payload.agent || !el) return null;
+    if (isPasswordField(el)) {
+      return "refused: a provider cannot type into a password field";
+    }
+    if (isCaptchaNode(el) || (el.closest && isCaptchaNode(el.closest("iframe, div, form")))) {
+      return "refused: a provider cannot solve CAPTCHAs";
+    }
+    if (isPurchaseTrigger(el) || isPaymentField(el)) {
+      return "refused: a provider cannot make purchases or enter payment details";
+    }
+    if (isTyping && el.type === "password") {
+      return "refused: a provider cannot type into a password field";
+    }
+    return null;
+  };
+
+  try {
+    if (op === "snapshot" || op === "ping" || op === "text" || op === "links") {
+      return collectSnapshot();
+    }
+    if (op === "click_ref") {
+      const el = findByRef(payload.ref);
+      if (!el) return { ok: false, error: `element ref #${payload.ref} not found on page`, ...collectSnapshot() };
+      const err = guardAgentTarget(el, false);
+      if (err) return { ok: false, error: err, ...collectSnapshot() };
+      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      el.focus && el.focus();
+      el.click();
+      return collectSnapshot();
+    }
+    if (op === "fill_ref") {
+      const el = findByRef(payload.ref);
+      if (!el) return { ok: false, error: `element ref #${payload.ref} not found on page`, ...collectSnapshot() };
+      const err = guardAgentTarget(el, true);
+      if (err) return { ok: false, error: err, ...collectSnapshot() };
+      el.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      el.focus && el.focus();
+      if ("value" in el) {
+        el.value = String(payload.text || "").slice(0, 2000);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      if (payload.submit && el.form) {
+        if (payload.agent && isPurchaseTrigger(el.form)) {
+          return { ok: false, error: "refused: a provider cannot make purchases or enter payment details", ...collectSnapshot() };
+        }
+        el.form.requestSubmit ? el.form.requestSubmit() : el.form.submit();
+      }
+      return collectSnapshot();
+    }
+    if (op === "click") {
+      const x = Number(payload.x || 0);
+      const y = Number(payload.y || 0);
+      const el = document.elementFromPoint(x, y);
+      if (el) {
+        const err = guardAgentTarget(el, false);
+        if (err) return { ok: false, error: err, ...collectSnapshot() };
+        el.focus && el.focus();
+        for (const evType of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+          el.dispatchEvent(
+            new MouseEvent(evType, { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window })
+          );
+        }
+        if (el.tagName === "A" && el.href && el.href.startsWith("http") && el.target !== "_blank") {
+          window.location.href = el.href;
+        }
+      }
+      return collectSnapshot();
+    }
+    if (op === "type") {
+      const el = document.activeElement || document.body;
+      const err = guardAgentTarget(el, true);
+      if (err) return { ok: false, error: err, ...collectSnapshot() };
+      const txt = String(payload.text || "").slice(0, 2000);
+      if (el && "value" in el) {
+        const start = typeof el.selectionStart === "number" ? el.selectionStart : el.value.length;
+        const end = typeof el.selectionEnd === "number" ? el.selectionEnd : el.value.length;
+        el.value = el.value.slice(0, start) + txt + el.value.slice(end);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      } else if (el && el.isContentEditable) {
+        document.execCommand("insertText", false, txt);
+      }
+      return collectSnapshot();
+    }
+    if (op === "key") {
+      const k = String(payload.key || "Enter").slice(0, 40);
+      const el = document.activeElement || document.body;
+      const err = guardAgentTarget(el, k.length === 1);
+      if (err) return { ok: false, error: err, ...collectSnapshot() };
+      if (k === "Backspace" && el && "value" in el) {
+        el.value = el.value.slice(0, -1);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      } else if (k === "Enter" && el && el.form) {
+        const ferr = guardAgentTarget(el.form, false);
+        if (ferr) return { ok: false, error: ferr, ...collectSnapshot() };
+        el.form.requestSubmit ? el.form.requestSubmit() : el.form.submit();
+      } else if (el) {
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent("keyup", { key: k, bubbles: true }));
+      }
+      return collectSnapshot();
+    }
+    if (op === "scroll") {
+      const dy = Number(payload.dy || 600);
+      window.scrollBy({ top: dy, left: 0, behavior: "instant" });
+      return collectSnapshot();
+    }
+    if (op === "find") {
+      const snap = collectSnapshot();
+      const q = String(payload.query || "").trim().toLowerCase();
+      if (!q) return { ...snap, matches: [] };
+      const lines = (snap.text || "").split(/\r?\n/);
+      const matches = [];
+      for (let i = 0; i < lines.length && matches.length < 25; i++) {
+        if (lines[i].toLowerCase().includes(q)) {
+          matches.push({ line: i + 1, snippet: lines[i].trim().slice(0, 220) });
+        }
+      }
+      const elMatches = (snap.elements || []).filter(
+        (e) => (e.label || "").toLowerCase().includes(q) || (e.href || "").toLowerCase().includes(q)
+      );
+      return { ...snap, matches, element_matches: elMatches.slice(0, 20) };
+    }
+    if (op === "back") {
+      window.history.back();
+      return collectSnapshot();
+    }
+    if (op === "forward") {
+      window.history.forward();
+      return collectSnapshot();
+    }
+    if (op === "reload") {
+      window.location.reload();
+      return collectSnapshot();
+    }
+    return collectSnapshot();
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e).slice(0, 300), url: window.location.href, title: document.title || "" };
+  }
+}
+
+async function captureAndSnapshot(tab, op = "snapshot", extra = {}) {
+  if (!tab || !tab.id) {
+    return { ok: false, error: "no active browser tab", tabs: await listBrowseableTabs() };
+  }
+  let snap = { ok: true, url: tab.url || "", title: tab.title || "", vw: 1366, vh: 854, elements: [], headings: [], links: [], forms: [], text: "", main_text: "" };
+  if (tab.url && /^https?:/i.test(tab.url)) {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: pageScript,
+        args: [{ op, ...extra }],
+      });
+      if (results && results[0] && results[0].result) {
+        snap = results[0].result;
+      }
+    } catch (e) {
+      snap.error = String(e && e.message ? e.message : e).slice(0, 240);
+    }
+  }
+  let png = "";
+  try {
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    if (dataUrl && dataUrl.startsWith("data:image/png;base64,")) {
+      png = dataUrl.slice("data:image/png;base64,".length);
+    }
+  } catch (_e) {
+    // Tab might not be the currently visible tab in its window; snapshot still succeeds
+  }
+  const tabs = await listBrowseableTabs();
+  return { ...snap, png, tabs, tab_id: tab.id };
+}
+
+async function executeCommand(cmd) {
+  const op = cmd.op;
+  try {
+    if (op === "tabs") {
+      return { ok: true, tabs: await listBrowseableTabs(), tab_id: state.targetTabId };
+    }
+    if (op === "switch_tab") {
+      const tid = Number(cmd.tab_id);
+      const t = await chrome.tabs.get(tid);
+      if (!t || isStudioUrl(t.url)) {
+        return { ok: false, error: "cannot switch to that tab" };
+      }
+      state.targetTabId = tid;
+      saveState();
+      await chrome.tabs.update(tid, { active: true });
+      await new Promise((r) => setTimeout(r, 120));
+      return await captureAndSnapshot(t, "snapshot");
+    }
+    if (op === "new_tab") {
+      let url = String(cmd.url || "https://example.com").trim();
+      if (url && !url.includes("://")) url = "https://" + url;
+      if (!/^https?:\/\//i.test(url)) {
+        return { ok: false, error: "only http(s) pages are allowed" };
+      }
+      const created = await chrome.tabs.create({ url, active: true });
+      state.targetTabId = created.id;
+      saveState();
+      await waitForTabLoad(created.id, 8000);
+      const updated = await chrome.tabs.get(created.id);
+      return await captureAndSnapshot(updated, "snapshot");
+    }
+    if (op === "close_tab") {
+      const tid = Number(cmd.tab_id || state.targetTabId);
+      if (tid) {
+        try {
+          await chrome.tabs.remove(tid);
+        } catch (_e) {}
+      }
+      if (state.targetTabId === tid) state.targetTabId = null;
+      const next = await getTargetTab(false);
+      return next ? await captureAndSnapshot(next, "snapshot") : { ok: true, tabs: await listBrowseableTabs() };
+    }
+    if (op === "navigate") {
+      let url = String(cmd.url || "").trim();
+      if (!url) return { ok: false, error: "no url" };
+      if (!url.includes("://")) url = "https://" + url;
+      if (!/^https?:\/\//i.test(url)) {
+        return { ok: false, error: "only http(s) pages are allowed" };
+      }
+      let tab = await getTargetTab(true);
+      await chrome.tabs.update(tab.id, { url, active: true });
+      await waitForTabLoad(tab.id, 12000);
+      tab = await chrome.tabs.get(tab.id);
+      return await captureAndSnapshot(tab, "snapshot");
+    }
+
+    const tab = await getTargetTab(true);
+    const out = await captureAndSnapshot(tab, op, cmd);
+    if (["click", "click_ref", "fill_ref", "key", "back", "forward", "reload"].includes(op)) {
+      await new Promise((r) => setTimeout(r, 180));
+      const refreshed = await chrome.tabs.get(tab.id);
+      const after = await captureAndSnapshot(refreshed, "snapshot");
+      return { ...after, ok: out.ok !== false, error: out.error || after.error || "" };
+    }
+    return out;
+  } catch (e) {
+    return { ok: false, error: String(e && e.message ? e.message : e).slice(0, 300) };
+  }
+}
+
+function waitForTabLoad(tabId, timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    }, timeoutMs);
+    function listener(tid, info) {
+      if (tid === tabId && info.status === "complete") {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        setTimeout(resolve, 120);
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+async function studioFetch(path, method = "GET", body = null) {
+  if (!state.token) throw new Error("Missing pairing token");
+  const headers = {
+    "X-Aesop-Bridge-Token": state.token,
+  };
+  if (body !== null) {
+    headers["Content-Type"] = "application/json";
+  }
+  const resp = await fetch(`http://127.0.0.1:${state.port}${path}`, {
+    method,
+    headers,
+    body: body !== null ? JSON.stringify(body) : undefined,
+  });
+  if (!resp.ok) {
+    throw new Error(`HTTP ${resp.status}`);
+  }
+  return await resp.json();
+}
+
+async function pushCurrentTabState() {
+  if (!state.token) return;
+  try {
+    const tab = await getTargetTab(false);
+    const payload = tab
+      ? await captureAndSnapshot(tab, "snapshot")
+      : { ok: true, url: "", title: "", tabs: await listBrowseableTabs() };
+    await studioFetch("/api/browser/bridge/push", "POST", payload);
+    state.paired = true;
+    state.lastError = "";
+  } catch (e) {
+    state.lastError = String(e && e.message ? e.message : e);
+  }
+}
+
+async function startBridgeLoop() {
+  if (state.polling || !state.token) return;
+  state.polling = true;
+  await pushCurrentTabState();
+  while (state.token && state.polling) {
+    try {
+      const res = await studioFetch("/api/browser/bridge/poll?wait=1", "GET");
+      state.paired = true;
+      state.lastError = "";
+      if (res && res.cmd && res.cmd.id) {
+        const out = await executeCommand(res.cmd);
+        await studioFetch("/api/browser/bridge/reply", "POST", {
+          cmd_id: res.cmd.id,
+          result: out,
+        });
+      }
+    } catch (e) {
+      state.paired = false;
+      state.lastError = String(e && e.message ? e.message : e);
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  state.polling = false;
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (state.paired && tabId === state.targetTabId && changeInfo.status === "complete") {
+    clearTimeout(state.pushTimer);
+    state.pushTimer = setTimeout(() => pushCurrentTabState(), 150);
+  }
+});
+
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  if (!state.paired) return;
+  try {
+    const t = await chrome.tabs.get(activeInfo.tabId);
+    if (t && !isStudioUrl(t.url)) {
+      state.targetTabId = t.id;
+      saveState();
+      clearTimeout(state.pushTimer);
+      state.pushTimer = setTimeout(() => pushCurrentTabState(), 120);
+    }
+  } catch (_e) {}
+});
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (!msg || typeof msg !== "object") return false;
+  if (msg.type === "AESOP_PAIR") {
+    state.port = Number(msg.port || 8765) || 8765;
+    state.token = String(msg.token || "").trim();
+    saveState();
+    pushCurrentTabState().then(() => {
+      if (!state.polling) startBridgeLoop();
+      sendResponse({ ok: state.paired, port: state.port, error: state.lastError });
+    });
+    return true;
+  }
+  if (msg.type === "AESOP_STATUS") {
+    listBrowseableTabs().then((tabs) => {
+      sendResponse({
+        paired: state.paired,
+        port: state.port,
+        hasToken: !!state.token,
+        targetTabId: state.targetTabId,
+        lastError: state.lastError,
+        tabs,
+      });
+    });
+    return true;
+  }
+  if (msg.type === "AESOP_USE_TAB") {
+    state.targetTabId = Number(msg.tabId) || null;
+    saveState();
+    pushCurrentTabState().then(() => {
+      sendResponse({ ok: true, targetTabId: state.targetTabId });
+    });
+    return true;
+  }
+  return false;
+});
