@@ -268,16 +268,15 @@ class TestBrowserManager(unittest.TestCase):
         st = b.status()
         self.assertTrue(set(st) >= {"available", "connected", "running", "chrome_found", "url", "title", "note"})
         self.assertFalse(st["running"])
-        orig = (browser.venv_python, browser._port_open)
-        try:
-            browser.venv_python = lambda: None                  # no venv -> clean failure, never a hang
+        fake_py = Path(tempfile.mkdtemp(prefix="aesop-br-")) / "fake-python.exe"
+        fake_py.write_text("", encoding="utf-8")
+        with mock.patch.object(browser, "venv_python", lambda: None):
             self.assertFalse(b.available())
             with self.assertRaises(RuntimeError):
                 b.cmd("ping", timeout=2)
-            browser.venv_python, browser._port_open = orig[0], lambda port=0: False
+        with mock.patch.object(browser, "venv_python", lambda: fake_py), mock.patch.object(
+                browser, "_port_open", lambda port=0: False):
             with self.assertRaises(RuntimeError) as e:          # venv ok but Chrome not connected
                 b.cmd("ping", timeout=2)
             self.assertIn("isn't connected", str(e.exception))
-        finally:
-            browser.venv_python, browser._port_open = orig
 

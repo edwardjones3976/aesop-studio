@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: node --check static/app.js
+        shell: bash
+        run: node --check static/app.js
+
+      - name: node --check extension scripts
+        if: hashFiles('extension/**/*.js') != ''
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for f in extension/**/*.js; do
+            node --check "$f"
+          done
+
+      - name: node tests/js
+        if: hashFiles('tests/js/*.mjs') != ''
+        shell: bash
+        run: |
+          shopt -s nullglob
+          for f in tests/js/*.mjs; do
+            node "$f"
+          done
+
+      - name: unittest (offline, simulated)
+        shell: bash
+        env:
+          AESOP_PROBE_OFFLINE: "1"
+          AESOP_SIMULATED_ROUTE: "1"
+          GITHUB_ACTIONS: "true"
+        run: python -W ignore -m unittest discover -s tests -p "test_*.py"
+
+  secret-scan:
+    name: secret scan (diff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan changed text for credential shapes
+        run: python scripts/ci_secret_scan.py

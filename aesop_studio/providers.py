@@ -20,7 +20,8 @@ STATES = ("UNVERIFIED", "AUTH_REQUIRED", "READY_INCLUDED", "READY_METERED", "REA
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # Variables that would redirect a CLI from subscription sign-in to a separately billed route.
 BILLING_ENV = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
-               "CLAUDE_CODE_USE_VERTEX", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "AZURE_OPENAI_API_KEY"}
+               "CLAUDE_CODE_USE_VERTEX", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "AZURE_OPENAI_API_KEY",
+               "PERPLEXITY_API_KEY"}
 
 
 def _codex_cmd() -> list[str] | None:
@@ -268,6 +269,20 @@ def probe(store=None) -> dict[str, dict]:
              cancellation_behavior="stream closed locally; tokens already generated may still bill (kept as exposure)")
     routes["openai-api"] = r
 
+    from . import perplexity_api
+    r = _base("perplexity", "api", "api.perplexity.ai /orchestrator/v1/chat/completions", ["chat"],
+              "API key (PERPLEXITY_API_KEY)", "metered",
+              "Text chat, streamed. Select a catalog model in Settings. Each call reserves its maximum cost; "
+              "requires the mission permit or a monthly operating limit.")
+    present = perplexity_api.key_present()
+    r.update(state="READY_METERED_DISABLED" if present else "AUTH_REQUIRED",
+             auth_status="api_key_present" if present else "missing", last_verified_at=now,
+             evidence="PERPLEXITY_API_KEY present (value never shown)" if present else "Set PERPLEXITY_API_KEY",
+             incremental_cost_status=f"metered; prices: {perplexity_api.PRICE_SOURCE}",
+             filesystem_scope="none (only the previewed context is sent)",
+             cancellation_behavior="local stream stopped; cancelled or cut-off requests retain exposure")
+    routes["perplexity-orchestrator"] = r
+
     # ---- CLI lanes verified by an explicit owner-triggered live call (stored), plus local status where offered
     for rid, prov, cmdf, auth, billing_note in (
             ("cursor", "cursor", _cursor_cmd, "Cursor sign-in (cursor-agent login)",
@@ -364,6 +379,7 @@ DISPLAY = {
     "copilot": ("Copilot CLI", "Copilot CLI"), "grok": ("Grok CLI", "Grok CLI"),
     "zai": ("Z.ai GLM", "Z.ai GLM"),
     "perplexity": ("Perplexity", "Perplexity"), "firecrawl": ("Firecrawl", "Firecrawl"),
+    "perplexity-orchestrator": ("Perplexity Orchestrator", "Perplexity"),
     "simulated": ("Simulated (test only)", "Simulated"),
 }
 
@@ -387,7 +403,7 @@ def _named(routes: dict) -> dict:
 def cached(store: Store) -> dict[str, dict]:
     row = store.one("SELECT v FROM kv WHERE k='routes'")
     routes = _named(json.loads(row["v"]) if row else refresh(store))
-    for rid in ("openai-api", "perplexity"):
+    for rid in ("openai-api", "perplexity", "perplexity-orchestrator"):
         api = routes.get(rid)
         if api and api["state"] == "READY_METERED_DISABLED":
             from . import ledger

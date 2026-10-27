@@ -13,6 +13,7 @@ os.environ["AESOP_PROBE_OFFLINE"] = "1"
 from aesop_studio.server import PortUnavailableError, make_server  # noqa: E402
 
 
+@unittest.skipUnless(os.name == "nt", "exclusive loopback port bind (SO_EXCLUSIVEADDRUSE) is Windows-only")
 class TestPortClaim(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="aesop-port-"))

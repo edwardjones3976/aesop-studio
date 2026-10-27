@@ -33,6 +33,15 @@ cd C:\Users\edwar\Claude\Projects\Aesop-Studio; codex "Execute docs/foreman-perp
 - The Studio provider probe shows Perplexity ready (not "Needs key").
 - One Researcher web query succeeds. Studio's caps apply (SESSION_CAP=8, DAILY_CAP=60).
 
+## Foreman smoke test (2026-10-26, after the key was set)
+
+Run against main at `6c99527`. Only presence, status and response shape were printed; the key was never printed.
+- The owner's user-level `PERPLEXITY_API_KEY` is present, with a real `pplx-` shape (not the placeholder).
+- **Search API: OK.** One query returned 3 results with fields `date, last_updated, snippet, title, url`. The Researcher's Perplexity backend works.
+- **Orchestrator `GET /orchestrator/v1/models`: HTTP 403.** The key is valid (Search accepts it) but isn't allowed into the Orchestrator API. Perplexity's docs describe it as a private preview. The chat smoke test was skipped; no spend.
+- Owner action, if Orchestrator is wanted: request Orchestrator access for this API key or organization in the Perplexity API console. Then rerun the smoke test.
+- Follow-up for Codex (maintenance): map HTTP 403 in `perplexity_api.response` to "this key doesn't have Orchestrator access" instead of "request rejected".
+
 ## Codex result
 
 _(Codex fills this in: what was done, whether the key was existing or new, any spend, verification result. No key material.)_
