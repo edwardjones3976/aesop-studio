@@ -113,6 +113,7 @@ class TestAgent(Base):
         from aesop_studio.tasks import pid_alive
         self.assertFalse(pid_alive(pid))
 
+    @unittest.skipUnless(os.name == "nt", "ORPHAN/job-object grandchild cleanup is Windows-specific")
     def test_detached_descendant_terminated_via_job(self):
         import re
         from aesop_studio.tasks import pid_alive

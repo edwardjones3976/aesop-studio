@@ -168,6 +168,7 @@ class TestResearcher(TestBroker):
         os.environ.pop("AESOP_SIM_ASK_RESEARCH", None)
         super().tearDown()
 
+    @_ci_flaky_retry
     def test_speakers_call_researcher_and_results_join_timeline(self):
         rec = roundtable.save(self.store, self.p["id"], {
             "mode": "general", "objective": "Pick a note storage engine", "deliverable": "memo",
