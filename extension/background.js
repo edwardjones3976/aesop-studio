@@ -16,6 +16,7 @@ let frameWaitTimer = null;
 let frameWaitResolve = null;
 let latestTab = null;
 let latestSnapshot = null;
+let latestFrame = { seq: 0, png: "" };
 let commandInFlight = false;
 
 let state = {
@@ -346,7 +347,7 @@ function pageScript(payload) {
     });
 
     const links = [...document.querySelectorAll("a[href]")]
-      .slice(0, 120)
+      .slice(0, 40)
       .map((a) => ({
         ref: Number(a.getAttribute("data-aesop-ref") || 0) || null,
         text: String(a.innerText || a.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().slice(0, 80),
@@ -356,8 +357,9 @@ function pageScript(payload) {
 
     const mainEl =
       document.querySelector("main, article, [role='main'], #readme, .markdown-body") || document.body;
-    const mainText = String((mainEl && mainEl.innerText) || "").slice(0, 24000);
-    const fullText = String((document.body && document.body.innerText) || "").slice(0, 40000);
+    const textCap = op === "text" || op === "find" ? 16000 : 1800;
+    const mainText = String((mainEl && mainEl.innerText) || "").slice(0, textCap);
+    const fullText = String((document.body && document.body.innerText) || "").slice(0, textCap);
 
     return {
       ok: true,
@@ -629,6 +631,41 @@ function waitFrameInterval(ms) {
   });
 }
 
+function buildPushPayload(snap, curTab, tabs) {
+  const s = snap && typeof snap === "object" ? snap : {};
+  const t = curTab && typeof curTab === "object" ? curTab : {};
+  const payload = {
+    ok: true,
+    url: s.url || t.url || "",
+    title: String(s.title || t.title || "").slice(0, 200),
+    vw: s.vw || 1366,
+    vh: s.vh || 854,
+    scrollY: s.scrollY || 0,
+    docH: s.docH || s.vh || 854,
+    headings: Array.isArray(s.headings) ? s.headings.slice(0, 20) : [],
+    elements: Array.isArray(s.elements) ? s.elements.slice(0, 60) : [],
+    forms: Array.isArray(s.forms) ? s.forms.slice(0, 6) : [],
+    links: Array.isArray(s.links) ? s.links.slice(0, 20) : [],
+    main_text: String(s.main_text || "").slice(0, 1200),
+    text: String(s.text || "").slice(0, 1200),
+    tabs: Array.isArray(tabs) ? tabs.slice(0, 12) : [],
+    tab_id: t.id || null,
+    frame_seq: latestFrame.seq,
+    captureError: state.captureError || "",
+    lastError: state.lastError || "",
+    last_error: state.lastError || "",
+  };
+  if (JSON.stringify(payload).length > 7600) {
+    payload.links = payload.links.slice(0, 10);
+    payload.text = payload.text.slice(0, 600);
+    payload.main_text = payload.main_text.slice(0, 600);
+  }
+  if (JSON.stringify(payload).length > 7600) {
+    payload.elements = payload.elements.slice(0, 25);
+  }
+  return payload;
+}
+
 function kickFrameLoop(tabHint = null, snapHint = null) {
   if (tabHint && tabHint.id) latestTab = tabHint;
   if (snapHint && typeof snapHint === "object") latestSnapshot = snapHint;
@@ -666,23 +703,16 @@ function kickFrameLoop(tabHint = null, snapHint = null) {
           png = await runSingleCapture(tab.windowId);
         }
         if (epoch !== frameLoopEpoch) break;
+        if (png) {
+          latestFrame = { seq: latestFrame.seq + 1, png };
+        }
         if (state.confirmed && state.token && state.port) {
           try {
             const curTab = (latestTab && latestTab.id ? latestTab : tab) || {};
             const snap = latestSnapshot || {};
             const tabs = await listBrowseableTabs();
-            await studioFetch("/api/browser/bridge/push", "POST", {
-              ok: true,
-              ...snap,
-              url: snap.url || curTab.url || "",
-              title: snap.title || curTab.title || "",
-              png,
-              tabs,
-              tab_id: curTab.id || null,
-              captureError: state.captureError || "",
-              lastError: state.lastError || "",
-              last_error: state.lastError || "",
-            });
+            const pushBody = buildPushPayload(snap, curTab, tabs);
+            await studioFetch("/api/browser/bridge/push?lane=data", "POST", pushBody);
             state.paired = true;
           } catch (pushErr) {
             state.captureError = String(
@@ -719,6 +749,7 @@ function resetCaptureState() {
   frameLoopPromise = null;
   latestTab = null;
   latestSnapshot = null;
+  latestFrame = { seq: 0, png: "" };
 }
 
 async function captureAndSnapshot(tab, op = "snapshot", extra = {}, opts = {}) {
@@ -782,6 +813,17 @@ async function captureAndSnapshot(tab, op = "snapshot", extra = {}, opts = {}) {
 async function executeCommand(cmd) {
   const op = cmd.op;
   try {
+    if (op === "frame" || op === "shot") {
+      const snap = latestSnapshot || {};
+      return {
+        ok: true,
+        png: latestFrame.png || "",
+        frame_seq: latestFrame.seq || 0,
+        vw: snap.vw || 1366,
+        vh: snap.vh || 854,
+        captureError: state.captureError || "",
+      };
+    }
     if (op === "tabs") {
       return { ok: true, tabs: await listBrowseableTabs(), tab_id: state.targetTabId };
     }
@@ -910,6 +952,9 @@ function waitForTabLoad(tabId, timeoutMs = 8000) {
   });
 }
 
+// Separate connections for poll vs everything else: use keepalive: false, cache: "no-store",
+// and distinct query markers (?lane=poll vs ?lane=data) so HTTP/1.1 connections to Studio's
+// ThreadingHTTPServer are never coalesced and a poll fetch cannot queue behind an in-flight push.
 async function defaultStudioFetch(path, method = "GET", body = null) {
   if (!state.confirmed || !state.token || !state.port) throw new Error("Missing confirmed pairing token");
   const headers = {
@@ -918,10 +963,18 @@ async function defaultStudioFetch(path, method = "GET", body = null) {
   if (body !== null) {
     headers["Content-Type"] = "application/json";
   }
-  const resp = await fetch(`http://127.0.0.1:${state.port}${path}`, {
+  const rawPath = String(path || "");
+  const isPoll = rawPath.includes("/api/browser/bridge/poll");
+  const lane = isPoll ? "poll" : "data";
+  const fullPath = rawPath.includes("lane=")
+    ? rawPath
+    : `${rawPath}${rawPath.includes("?") ? "&" : "?"}lane=${lane}`;
+  const resp = await fetch(`http://127.0.0.1:${state.port}${fullPath}`, {
     method,
     headers,
     body: body !== null ? JSON.stringify(body) : undefined,
+    keepalive: false,
+    cache: "no-store",
   });
   if (!resp.ok) {
     throw new Error(`HTTP ${resp.status}`);
@@ -958,7 +1011,7 @@ async function startBridgeLoop() {
   while (state.confirmed && state.token && state.polling) {
     try {
       const errParam = state.lastError ? `&last_error=${encodeURIComponent(state.lastError)}` : "";
-      const res = await studioFetch(`/api/browser/bridge/poll?wait=1${errParam}`, "GET");
+      const res = await studioFetch(`/api/browser/bridge/poll?lane=poll&wait=1${errParam}`, "GET");
       state.paired = true;
       if (res && res.cmd && res.cmd.id) {
         commandInFlight = true;
@@ -973,7 +1026,7 @@ async function startBridgeLoop() {
           commandInFlight = false;
         }
         try {
-          await studioFetch("/api/browser/bridge/reply", "POST", {
+          await studioFetch("/api/browser/bridge/reply?lane=data", "POST", {
             cmd_id: res.cmd.id,
             result: out,
           });
@@ -981,7 +1034,7 @@ async function startBridgeLoop() {
           state.lastError = String(replyErr && replyErr.message ? replyErr.message : replyErr).slice(0, 240);
           await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
           try {
-            await studioFetch("/api/browser/bridge/reply", "POST", {
+            await studioFetch("/api/browser/bridge/reply?lane=data", "POST", {
               cmd_id: res.cmd.id,
               result: { ...out, lastError: state.lastError, last_error: state.lastError },
             });
@@ -1312,6 +1365,9 @@ globalThis.__aesopBridgeTest = {
   set frameDirty(v) {
     frameDirty = !!v;
     state.frameDirty = !!v;
+  },
+  get latestFrame() {
+    return latestFrame;
   },
   setStudioFetch(fn) {
     studioFetch = fn || defaultStudioFetch;

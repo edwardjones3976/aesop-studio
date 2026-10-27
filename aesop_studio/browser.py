@@ -274,6 +274,8 @@ class Browser:
         self.last_png: bytes = b""
         self.last_dims: tuple[int, int] = (1366, 854)
         self.frame_seq: int = 0
+        self.ext_frame_seq: int = 0
+        self._pulled_ext_seq: int = 0
         self.state_seq: int = 0
 
     # ---- Pairing & Extension Bridge ----
@@ -354,6 +356,10 @@ class Browser:
                 snap["url"] = self.ext_state["url"]
             if not snap["title"] and self.ext_state.get("title") and "title" not in raw:
                 snap["title"] = self.ext_state["title"]
+            if "vw" not in raw and self.ext_state.get("vw"):
+                snap["vw"] = self.ext_state["vw"]
+            if "vh" not in raw and self.ext_state.get("vh"):
+                snap["vh"] = self.ext_state["vh"]
             # Keep previous structural fields if a lightweight capture update omitted them
             if snap["url"] == self.ext_state.get("url"):
                 if not snap["elements"] and self.ext_state.get("elements") and "elements" not in raw:
@@ -380,6 +386,13 @@ class Browser:
             if raw_last_err:
                 self.last_error = redact(raw_last_err[:300])
             self.state_seq += 1
+            raw_fseq = raw.get("frame_seq")
+            if isinstance(raw_fseq, (int, float)) and not isinstance(raw_fseq, bool):
+                fseq = int(raw_fseq)
+                if fseq > 0:
+                    if fseq < self.ext_frame_seq:
+                        self._pulled_ext_seq = 0
+                    self.ext_frame_seq = fseq
             png_b64 = raw.get("png")
             if isinstance(png_b64, str) and png_b64:
                 try:
@@ -388,17 +401,25 @@ class Browser:
                         self.last_png = decoded
                         self.last_dims = (snap["vw"], snap["vh"])
                         self.frame_seq += 1
+                        self._pulled_ext_seq = self.ext_frame_seq
                 except ValueError:
                     pass
             elif isinstance(png_b64, (bytes, bytearray)) and bytes(png_b64).startswith(b"\x89PNG"):
                 self.last_png = bytes(png_b64)
                 self.last_dims = (snap["vw"], snap["vh"])
                 self.frame_seq += 1
+                self._pulled_ext_seq = self.ext_frame_seq
         return snap
 
     def bridge_push(self, payload: dict) -> dict:
         snap = self._ingest_ext_state(payload or {})
-        return {"ok": True, "state_seq": self.state_seq, "frame_seq": self.frame_seq, "url": snap["url"]}
+        return {
+            "ok": True,
+            "state_seq": self.state_seq,
+            "frame_seq": self.frame_seq,
+            "ext_frame_seq": self.ext_frame_seq,
+            "url": snap["url"],
+        }
 
     def bridge_poll(self, wait_s: float = 1.5, last_error: str = "") -> dict:
         with self.ext_lock:
@@ -417,6 +438,10 @@ class Browser:
             slot = self.ext_pending.get(str(cmd_id or ""))
             if slot is not None:
                 merged = {**snap}
+                if isinstance((result or {}).get("png"), str) and result.get("png"):
+                    merged["png"] = result["png"]
+                if "frame_seq" in (result or {}):
+                    merged["frame_seq"] = self.ext_frame_seq
                 if "matches" in (result or {}):
                     merged["matches"] = [
                         {"line": int(m.get("line") or 0), "snippet": redact(str(m.get("snippet") or "")[:220])}
@@ -453,6 +478,7 @@ class Browser:
         ext_conn = self.extension_connected()
         cdp_conn = False if ext_conn else _port_open()
         avail = self.available()
+        pending_frame = 1 if (self.frame_seq < self.ext_frame_seq and self._pulled_ext_seq < self.ext_frame_seq) else 0
         return {
             "available": avail,
             "extension_available": EXTENSION_DIR.is_dir(),
@@ -467,7 +493,8 @@ class Browser:
             "error": self.error or self.last_error,
             "last_error": self.last_error,
             "lastError": self.last_error,
-            "frame_seq": self.frame_seq,
+            "frame_seq": self.frame_seq + pending_frame,
+            "ext_frame_seq": self.ext_frame_seq,
             "state_seq": self.state_seq,
             "tabs": self.ext_state.get("tabs", []),
             "note": ""
@@ -743,9 +770,12 @@ class Browser:
     def shot(self, full: bool = False) -> dict:
         """{"png": bytes, "vw": int, "vh": int, "url", "title", "seq": int} of Studio's active tab."""
         if self.extension_connected():
-            # Request a fresh capture if none cached or if full capture requested
-            if not self.last_png or full:
-                self._ext_cmd("shot", timeout=0.25, full=full)
+            # When Studio's cached frame is older than the extension's advertised ext_frame_seq, pull via {op: "frame"}
+            if (self.frame_seq < self.ext_frame_seq and self._pulled_ext_seq < self.ext_frame_seq) or full:
+                prev_seq = self.frame_seq
+                r = self._ext_cmd("frame", timeout=1.0)
+                if self.frame_seq == prev_seq and isinstance(r, dict) and r.get("png"):
+                    self._ingest_ext_state(r)
             png = self.last_png or _FALLBACK_PNG
             vw, vh = self.last_dims
             return {
@@ -778,6 +808,8 @@ class Browser:
     def stop(self) -> None:
         with self.ext_lock:
             self.ext_last_seen = 0.0
+            self.ext_frame_seq = 0
+            self._pulled_ext_seq = 0
             while not self.ext_cmd_q.empty():
                 try:
                     self.ext_cmd_q.get_nowait()
