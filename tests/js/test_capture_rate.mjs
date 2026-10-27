@@ -37,6 +37,7 @@ let pushWaiters = [];
 let pollFailCount = 0;
 let forceNextPushError = null;
 let pushHoldMs = 0;
+let emptyCapturesRemaining = 0;
 
 function recordPush(body) {
   const entry = { at: Date.now(), body };
@@ -73,14 +74,24 @@ globalThis.chrome = {
     },
     async update(id, props) {
       tabUpdateCalls.push({ id, props });
+      if (props && props.active) {
+        currentTab = { ...currentTab, active: true };
+      }
       if (props && props.url) {
         currentTab = { ...currentTab, url: props.url, status: "complete" };
       }
-      return { ...currentTab };
+      return { ...currentTab, id };
     },
     async captureVisibleTab() {
       const now = Date.now();
       captureCallTimestamps.push(now);
+      if (emptyCapturesRemaining > 0) {
+        emptyCapturesRemaining -= 1;
+        return "";
+      }
+      if (!currentTab.active) {
+        return "";
+      }
       if (typeof onMidCaptureHook === "function") {
         const hook = onMidCaptureHook;
         onMidCaptureHook = null;
@@ -203,8 +214,8 @@ function assertMaxTwoCapturesPerSecond(timestamps) {
   }
 }
 
-// 1. Pull transport: mock server holds each push 300 ms; 10 actions 200 ms apart must ack <= 100 ms;
-// frames pulled via {op:"frame"} >= 9/10 within 1 s; captures <= 2/s; pushes never carry png.
+// 1. Push transport (data lane): mock server holds each push 300 ms; 10 actions 200 ms apart must ack <= 100 ms;
+// new frames arrive via push png >= 9/10 within 1 s; captures <= 2/s; png at most once per frame_seq.
 {
   resetCaptureState();
   captureCallTimestamps = [];
@@ -213,6 +224,8 @@ function assertMaxTwoCapturesPerSecond(timestamps) {
   pushHoldMs = 300;
   captureDelayMs = 20;
   enforceStrictQuota = true;
+  emptyCapturesRemaining = 0;
+  currentTab = { ...currentTab, active: true };
   state.confirmed = true;
   state.token = "tok_test_rate_1234567890";
   state.port = 8770;
@@ -220,9 +233,13 @@ function assertMaxTwoCapturesPerSecond(timestamps) {
   state.lastError = "";
   state.captureError = "";
 
-  let framesPulledWithin1s = 0;
+  let framesViaPushWithin1s = 0;
 
   for (let i = 1; i <= 10; i++) {
+    const seqBefore =
+      recordedPushes.length > 0
+        ? Math.max(...recordedPushes.map((p) => (p.body && p.body.frame_seq) || 0))
+        : 0;
     const t0 = Date.now();
     const out = await executeCommand({ op: "scroll", dy: 350 });
     const ackMs = Date.now() - t0;
@@ -230,19 +247,26 @@ function assertMaxTwoCapturesPerSecond(timestamps) {
     assert.equal(out.png, undefined, "command reply must never include a png");
     assert.ok(ackMs <= 100, `action ${i} reply must resolve within 100ms, took ${ackMs}ms`);
 
-    let pulled = null;
+    let pushed = null;
     const deadline = t0 + 1000;
     while (Date.now() < deadline) {
-      const frameOut = await executeCommand({ op: "frame" });
-      if (frameOut.png === SAMPLE_PNG_B64 && frameOut.frame_seq > 0) {
-        pulled = frameOut;
+      await kickFrameLoop();
+      const hit = recordedPushes.find(
+        (p) =>
+          p.body &&
+          p.body.png === SAMPLE_PNG_B64 &&
+          (p.body.frame_seq || 0) > seqBefore &&
+          p.at >= t0 - 50
+      );
+      if (hit) {
+        pushed = hit;
         break;
       }
       await new Promise((r) => setTimeout(r, 25));
     }
-    if (pulled) {
-      framesPulledWithin1s += 1;
-      assert.ok(Date.now() - t0 <= 1000, `action ${i} frame pull must land within 1000ms`);
+    if (pushed) {
+      framesViaPushWithin1s += 1;
+      assert.ok(Date.now() - t0 <= 1000, `action ${i} frame push must land within 1000ms`);
     }
 
     if (i < 10) {
@@ -251,11 +275,19 @@ function assertMaxTwoCapturesPerSecond(timestamps) {
   }
 
   assert.ok(
-    framesPulledWithin1s >= 9,
-    `expected >= 9 frame pulls within 1s of action, got ${framesPulledWithin1s}`
+    framesViaPushWithin1s >= 9,
+    `expected >= 9 frame pushes with png within 1s of action, got ${framesViaPushWithin1s}`
   );
+  const pngSeqSeen = new Set();
   for (const p of recordedPushes) {
-    assert.ok(!p.body || !p.body.png, "push payloads must not include png");
+    const seq = p.body && p.body.frame_seq;
+    if (p.body && p.body.png) {
+      assert.ok(
+        !pngSeqSeen.has(seq),
+        `push must include png at most once per frame_seq (duplicate seq ${seq})`
+      );
+      pngSeqSeen.add(seq);
+    }
   }
   assertMaxTwoCapturesPerSecond(captureCallTimestamps);
 
@@ -269,6 +301,45 @@ function assertMaxTwoCapturesPerSecond(timestamps) {
   );
 
   pushHoldMs = 0;
+}
+
+// 1b. Background-tab capture: empty captureVisibleTab sets captureError; loop activates tab once; clears on success.
+{
+  resetCaptureState();
+  captureCallTimestamps = [];
+  recordedPushes = [];
+  tabUpdateCalls = [];
+  emptyCapturesRemaining = 1;
+  currentTab = {
+    id: 42,
+    windowId: 1,
+    title: "Releases · microsoft/vscode",
+    url: "https://github.com/microsoft/vscode/releases",
+    active: false,
+    status: "complete",
+  };
+  state.confirmed = true;
+  state.token = "tok_test_rate_1234567890";
+  state.port = 8770;
+  state.paired = true;
+  state.captureError = "";
+
+  globalThis.__aesopBridgeTest.frameDirty = true;
+  await kickFrameLoop();
+  assert.equal(state.captureError, "Live view paused: bring the Chrome tab to front");
+  assert.equal(
+    tabUpdateCalls.filter((c) => c.props && c.props.active).length,
+    1,
+    "frame loop must activate the target tab once before retrying capture"
+  );
+
+  globalThis.__aesopBridgeTest.frameDirty = true;
+  await kickFrameLoop();
+  assert.equal(state.captureError, "");
+  const withPng = recordedPushes.find((p) => p.body && p.body.png);
+  assert.ok(withPng, "successful capture after activation must push png");
+  emptyCapturesRemaining = 0;
+  currentTab = { ...currentTab, active: true };
 }
 
 // 2. (iv) A capture that throws sets state.captureError (NOT state.lastError), exposes captureError in push & popup,

@@ -770,8 +770,7 @@ class Browser:
     def shot(self, full: bool = False) -> dict:
         """{"png": bytes, "vw": int, "vh": int, "url", "title", "seq": int} of Studio's active tab."""
         if self.extension_connected():
-            # When Studio's cached frame is older than the extension's advertised ext_frame_seq, pull via {op: "frame"}
-            if (self.frame_seq < self.ext_frame_seq and self._pulled_ext_seq < self.ext_frame_seq) or full:
+            if full:
                 prev_seq = self.frame_seq
                 r = self._ext_cmd("frame", timeout=1.0)
                 if self.frame_seq == prev_seq and isinstance(r, dict) and r.get("png"):

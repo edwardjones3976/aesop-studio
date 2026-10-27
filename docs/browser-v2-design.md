@@ -69,10 +69,12 @@ Instead of 2.5-second blind PNG polling:
 
 ---
 
-## 4. Transport (pull frames, separate HTTP lanes)
+## 4. Transport (push frames on data lane, separate HTTP lanes)
 
 Studio’s stdlib `ThreadingHTTPServer` handles **one request at a time per HTTP/1.1 connection**. When the extension **pushed** full PNGs on the same keep-alive connection as long-poll command fetches, a command could sit behind a ~35 KB push for hundreds of milliseconds and then miss the next poll window (~1 s), producing ~1.5 s action ack latency even though the server and bridge logic were fast.
 
-**Pull-based frames:** The extension keeps `latestFrame = { seq, png }` in the service worker. After each `captureVisibleTab`, it bumps `frame_seq` and stores the PNG locally. **Pushes carry `frame_seq`, DOM snapshot, and tabs only—no PNG** (payload typically ≤ ~8 KB: up to 150 elements, text/main_text capped at 6 KB each with further trimming if JSON exceeds ~7.6 KB). When Studio’s `shot()` sees `frame_seq < ext_frame_seq`, it issues `{ op: "frame" }` on the poll path; the extension replies with the **cached** PNG without a new capture.
+**Data-lane frame push (de-duplicated):** The extension keeps `latestFrame = { seq, png }` in the service worker. After each successful `captureVisibleTab`, it bumps `frame_seq` and stores the PNG locally. **Routine pushes** on `?lane=data` carry DOM snapshot, tabs, and `frame_seq`; they include a **`png` field only when `frame_seq` advanced since the last push** (at most one PNG per new capture—never a repeated PNG for the same seq). Studio’s `bridge_push` ingests that PNG into `last_png` and advances `frame_seq`. **`shot(full=False)`** serves the cached `last_png` and does **not** poll for `{ op: "frame" }`. **`shot(full=True)`** still uses `{ op: "frame" }` on the command poll path to pull the latest cached PNG on demand.
+
+**Tab visibility:** `captureVisibleTab` only captures the **active tab of the focused window**. If the driven tab is in the background of its window (for example Studio is front-most in the same window), Chrome returns an empty string; the extension sets `captureError` (“bring the Chrome tab to front”), activates the target tab **within that window only** (never another window), and retries on the next capture kick. Keep the automated site in a **separate Chrome window** from Studio when possible.
 
 **Separate lanes:** Every `studioFetch` uses `keepalive: false` and `cache: "no-store"`, with `?lane=poll` on `/api/browser/bridge/poll` and `?lane=data` on push/reply (the server ignores the marker; it exists so the browser does not reuse one TCP connection for poll and data). That way a held push on the data lane cannot block command polling.

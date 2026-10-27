@@ -17,6 +17,7 @@ let frameWaitResolve = null;
 let latestTab = null;
 let latestSnapshot = null;
 let latestFrame = { seq: 0, png: "" };
+let lastPushedFrameSeq = 0;
 let commandInFlight = false;
 
 let state = {
@@ -608,6 +609,7 @@ function runSingleCapture(windowId) {
         state.captureError = "";
         return dataUrl.slice("data:image/png;base64,".length);
       }
+      state.captureError = "Live view paused: bring the Chrome tab to front";
       return "";
     } catch (e) {
       state.captureError = formatCaptureError(e);
@@ -663,6 +665,10 @@ function buildPushPayload(snap, curTab, tabs) {
   if (JSON.stringify(payload).length > 7600) {
     payload.elements = payload.elements.slice(0, 25);
   }
+  const fseq = payload.frame_seq;
+  if (typeof fseq === "number" && fseq > 0 && fseq > lastPushedFrameSeq && latestFrame.png) {
+    payload.png = latestFrame.png;
+  }
   return payload;
 }
 
@@ -696,8 +702,17 @@ function kickFrameLoop(tabHint = null, snapHint = null) {
         frameDirty = false;
         state.frameDirty = false;
 
-        const tab = latestTab && latestTab.id ? latestTab : await getTargetTab(false);
+        let tab = latestTab && latestTab.id ? latestTab : await getTargetTab(false);
         if (epoch !== frameLoopEpoch) break;
+        if (tab && tab.id && !tab.active) {
+          try {
+            const activated = await chrome.tabs.update(tab.id, { active: true });
+            if (activated && activated.id) {
+              tab = activated;
+              latestTab = tab;
+            }
+          } catch (_e) {}
+        }
         let png = "";
         if (tab && tab.id) {
           png = await runSingleCapture(tab.windowId);
@@ -713,6 +728,9 @@ function kickFrameLoop(tabHint = null, snapHint = null) {
             const tabs = await listBrowseableTabs();
             const pushBody = buildPushPayload(snap, curTab, tabs);
             await studioFetch("/api/browser/bridge/push?lane=data", "POST", pushBody);
+            if (pushBody.png && pushBody.frame_seq > lastPushedFrameSeq) {
+              lastPushedFrameSeq = pushBody.frame_seq;
+            }
             state.paired = true;
           } catch (pushErr) {
             state.captureError = String(
@@ -750,6 +768,7 @@ function resetCaptureState() {
   latestTab = null;
   latestSnapshot = null;
   latestFrame = { seq: 0, png: "" };
+  lastPushedFrameSeq = 0;
 }
 
 async function captureAndSnapshot(tab, op = "snapshot", extra = {}, opts = {}) {
