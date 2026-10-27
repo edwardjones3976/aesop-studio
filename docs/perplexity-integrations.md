@@ -17,6 +17,8 @@ mission permit. Both disabled means no Orchestrator chat request is sent. The
 mission permit still resets on restart. The same atomic ledger and shared
 envelopes used by the OpenAI API route apply.
 
+Initial load, **Re-verify**, and individual route verification responses apply the same live spend-control overlay: with the mission permit on and monthly limit zero, Perplexity, Perplexity Orchestrator, and Codex API remain `READY_METERED`; turning the permit off with no monthly limit leaves them `READY_METERED_DISABLED`. Probing and metered send gates are unchanged.
+
 Example: create a project with **Perplexity Orchestrator** as its provider, open
 **Settings**, press **Refresh Perplexity models**, choose an entry from the Model
 field's dropdown, save, and send `Reply with one sentence about rain.` Model IDs

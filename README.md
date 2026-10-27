@@ -46,6 +46,8 @@ Data lives in `%LOCALAPPDATA%\AesopStudio` (override with `-Data` or `AESOP_DATA
 
 ## Providers
 
+Antigravity **Verify** discovers models through `agy models` (cached for one hour), skips recorded model quota exhaustion, and tries the next listed model. The card shows the successful model and reset times; unknown reset times expire after 24 hours. The store's `model-preferences:antigravity` JSON list overrides the default order (Argon High, Argon Medium, Flash High, Flash Medium, Flash Low, then remaining CLI models); `providers.model_catalog(store, "antigravity", refresh=True)` forces catalog refresh. This verification fallback does not yet change chat dispatch or project model overrides; send-time integration is pending the WO-20261027-002 scope extension.
+
 | Route | How it is verified | Billing |
 |---|---|---|
 | `codex` (Codex) | `codex login status` → "Logged in using ChatGPT" | ChatGPT plan quota, $0 incremental |
