@@ -6,6 +6,7 @@
 const PAIR_RATE_LIMIT_MS = 1000;
 const MIN_CAPTURE_INTERVAL_MS = 500;
 const RETRY_BACKOFF_MS = 150;
+const POLL_NETWORK_RESET_MS = 5000;
 
 var frameDirty = false;
 let captureInFlight = null;
@@ -633,9 +634,11 @@ function waitFrameInterval(ms) {
   });
 }
 
-function buildPushPayload(snap, curTab, tabs) {
+function buildPushPayload(snap, curTab, tabs, frame) {
   const s = snap && typeof snap === "object" ? snap : {};
   const t = curTab && typeof curTab === "object" ? curTab : {};
+  const frameSeq = frame && typeof frame.seq === "number" ? frame.seq : 0;
+  const framePng = frame && typeof frame.png === "string" ? frame.png : "";
   const payload = {
     ok: true,
     url: s.url || t.url || "",
@@ -652,7 +655,7 @@ function buildPushPayload(snap, curTab, tabs) {
     text: String(s.text || "").slice(0, 6000),
     tabs: Array.isArray(tabs) ? tabs.slice(0, 12) : [],
     tab_id: t.id || null,
-    frame_seq: latestFrame.seq,
+    frame_seq: frameSeq,
     captureError: state.captureError || "",
     lastError: state.lastError || "",
     last_error: state.lastError || "",
@@ -665,9 +668,8 @@ function buildPushPayload(snap, curTab, tabs) {
   if (JSON.stringify(payload).length > 7600) {
     payload.elements = payload.elements.slice(0, 25);
   }
-  const fseq = payload.frame_seq;
-  if (typeof fseq === "number" && fseq > 0 && fseq > lastPushedFrameSeq && latestFrame.png) {
-    payload.png = latestFrame.png;
+  if (frameSeq > 0 && frameSeq > lastPushedFrameSeq && framePng) {
+    payload.png = framePng;
   }
   return payload;
 }
@@ -677,7 +679,14 @@ function kickFrameLoop(tabHint = null, snapHint = null) {
   if (snapHint && typeof snapHint === "object") latestSnapshot = snapHint;
   if (frameLoopPromise) return frameLoopPromise;
   const epoch = frameLoopEpoch;
-  frameLoopPromise = (async () => {
+  let releaseLoop = () => {};
+  const loopDone = new Promise((resolve) => {
+    releaseLoop = resolve;
+  });
+  // Publish the guard before the async body runs. Otherwise a kick that
+  // re-enters from captureVisibleTab starts a second loop sharing latestFrame.
+  frameLoopPromise = loopDone;
+  (async () => {
     try {
       do {
         while (true) {
@@ -713,23 +722,33 @@ function kickFrameLoop(tabHint = null, snapHint = null) {
             }
           } catch (_e) {}
         }
-        let png = "";
+        let capturedRaw = "";
         if (tab && tab.id) {
-          png = await runSingleCapture(tab.windowId);
+          capturedRaw = await runSingleCapture(tab.windowId);
         }
         if (epoch !== frameLoopEpoch) break;
-        if (png) {
-          latestFrame = { seq: latestFrame.seq + 1, png };
+        const capturedPng = capturedRaw;
+        const capturedSeq = capturedPng ? latestFrame.seq + 1 : latestFrame.seq;
+        if (capturedPng) {
+          latestFrame = { seq: capturedSeq, png: capturedPng };
         }
         if (state.confirmed && state.token && state.port) {
           try {
             const curTab = (latestTab && latestTab.id ? latestTab : tab) || {};
             const snap = latestSnapshot || {};
             const tabs = await listBrowseableTabs();
-            const pushBody = buildPushPayload(snap, curTab, tabs);
+            if (epoch !== frameLoopEpoch) break;
+            const pushBody = buildPushPayload(snap, curTab, tabs, {
+              seq: capturedSeq,
+              png: capturedPng,
+            });
             await studioFetch("/api/browser/bridge/push?lane=data", "POST", pushBody);
-            if (pushBody.png && pushBody.frame_seq > lastPushedFrameSeq) {
-              lastPushedFrameSeq = pushBody.frame_seq;
+            if (
+              epoch === frameLoopEpoch &&
+              capturedPng &&
+              pushBody.png === capturedPng
+            ) {
+              lastPushedFrameSeq = capturedSeq;
             }
             state.paired = true;
           } catch (pushErr) {
@@ -738,14 +757,15 @@ function kickFrameLoop(tabHint = null, snapHint = null) {
             ).slice(0, 240);
           }
         }
-      } while (frameDirty || state.frameDirty);
+      } while ((frameDirty || state.frameDirty) && epoch === frameLoopEpoch);
     } finally {
-      if (epoch === frameLoopEpoch) {
+      if (epoch === frameLoopEpoch && frameLoopPromise === loopDone) {
         frameLoopPromise = null;
       }
+      releaseLoop();
     }
   })();
-  return frameLoopPromise;
+  return loopDone;
 }
 
 function resetCaptureState() {
@@ -1021,16 +1041,30 @@ async function pushCurrentTabState() {
   }
 }
 
+function isPollNetworkError(err) {
+  if (!err) return false;
+  if (err.name === "TypeError") return true;
+  const msg = String(err && err.message ? err.message : err);
+  return /network|failed to fetch|econnrefused|econnreset|fetch failed/i.test(msg);
+}
+
 async function startBridgeLoop() {
   if (state.polling || !state.confirmed || !state.token || !state.port) return;
   state.polling = true;
   if (!state.paired) {
     pushCurrentTabState();
   }
+  let pollFailSince = 0;
   while (state.confirmed && state.token && state.polling) {
     try {
       const errParam = state.lastError ? `&last_error=${encodeURIComponent(state.lastError)}` : "";
       const res = await studioFetch(`/api/browser/bridge/poll?lane=poll&wait=1${errParam}`, "GET");
+      const downFor = pollFailSince ? Date.now() - pollFailSince : 0;
+      pollFailSince = 0;
+      if (downFor > POLL_NETWORK_RESET_MS) {
+        resetCaptureState();
+        await pushCurrentTabState();
+      }
       state.paired = true;
       if (res && res.cmd && res.cmd.id) {
         commandInFlight = true;
@@ -1061,6 +1095,9 @@ async function startBridgeLoop() {
         }
       }
     } catch (e) {
+      if (isPollNetworkError(e) && !pollFailSince) {
+        pollFailSince = Date.now();
+      }
       state.lastError = String(e && e.message ? e.message : e).slice(0, 240);
       await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS));
     }
@@ -1364,6 +1401,7 @@ globalThis.__aesopBridgeTest = {
   PAIR_RATE_LIMIT_MS,
   MIN_CAPTURE_INTERVAL_MS,
   RETRY_BACKOFF_MS,
+  POLL_NETWORK_RESET_MS,
   parseLoopbackHttpOrigin,
   validatePairSender,
   handlePairRequest,

@@ -35,6 +35,7 @@ let replyResolvers = new Map();
 let recordedPushes = [];
 let pushWaiters = [];
 let pollFailCount = 0;
+let capturePngQueue = null;
 let forceNextPushError = null;
 let pushHoldMs = 0;
 let emptyCapturesRemaining = 0;
@@ -109,6 +110,11 @@ globalThis.chrome = {
         }
       }
       await new Promise((r) => setTimeout(r, captureDelayMs));
+      if (Array.isArray(capturePngQueue) && capturePngQueue.length) {
+        const b64 = capturePngQueue.shift();
+        if (!b64) return "";
+        return `data:image/png;base64,${b64}`;
+      }
       return SAMPLE_DATA_URL;
     },
   },
@@ -154,6 +160,7 @@ const {
   state,
   MIN_CAPTURE_INTERVAL_MS,
   RETRY_BACKOFF_MS,
+  POLL_NETWORK_RESET_MS,
   kickFrameLoop,
   resetCaptureState,
   executeCommand,
@@ -619,6 +626,129 @@ function assertMaxTwoCapturesPerSecond(timestamps) {
     globalThis.document = prevDocument;
     globalThis.CSS = prevCSS;
     mockPageScriptResult = null;
+  }
+}
+
+// 5. Real frame loop: captureVisibleTab supplies the png. No writes to latestFrame.
+{
+  const PNG_B = SAMPLE_PNG_B64.replace(/A/g, "B");
+  assert.notEqual(PNG_B, SAMPLE_PNG_B64);
+  resetCaptureState();
+  captureCallTimestamps = [];
+  recordedPushes = [];
+  pushWaiters = [];
+  capturePngQueue = [SAMPLE_PNG_B64, PNG_B, ""];
+  captureDelayMs = 0;
+  enforceStrictQuota = false;
+  emptyCapturesRemaining = 0;
+  pushHoldMs = 0;
+  forceNextCaptureError = null;
+  currentTab = {
+    id: 42,
+    windowId: 1,
+    title: "Releases · microsoft/vscode",
+    url: "https://github.com/microsoft/vscode/releases",
+    active: true,
+    status: "complete",
+  };
+  state.confirmed = true;
+  state.token = "tok_test_rate_1234567890";
+  state.port = 8770;
+  state.paired = true;
+  state.polling = false;
+  state.lastError = "";
+  state.captureError = "";
+
+  globalThis.__aesopBridgeTest.frameDirty = true;
+  await kickFrameLoop();
+  assert.equal(recordedPushes.length, 1, "one kick must produce one push");
+  assert.equal(recordedPushes[0].body.frame_seq, 1);
+  assert.ok(recordedPushes[0].body.png && recordedPushes[0].body.png.length > 0);
+  assert.equal(recordedPushes[0].body.png, SAMPLE_PNG_B64);
+
+  const beforeSecond = recordedPushes.length;
+  const second = await executeCommand({ op: "scroll", dy: 350 });
+  assert.equal(second.ok, true);
+  assert.equal(second.png, undefined, "command reply must never include a png");
+  await kickFrameLoop();
+  const secondPush = recordedPushes[beforeSecond];
+  assert.ok(secondPush, "second action must push a frame");
+  assert.equal(secondPush.body.frame_seq, 2);
+  assert.equal(secondPush.body.png, PNG_B, "second push must carry the new capture");
+  assert.notEqual(secondPush.body.png, recordedPushes[0].body.png);
+
+  const beforeIdle = recordedPushes.length;
+  globalThis.__aesopBridgeTest.frameDirty = true;
+  await kickFrameLoop();
+  const idlePush = recordedPushes[beforeIdle];
+  assert.ok(idlePush, "a capture that returns no frame must still push state");
+  assert.equal(idlePush.body.frame_seq, 2);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(idlePush.body, "png"),
+    false,
+    "a push with no new capture must omit the png key"
+  );
+  capturePngQueue = null;
+}
+
+// 6. Studio restart: poll network errors for >5s, then success, resets capture and re-pushes.
+{
+  resetCaptureState();
+  captureCallTimestamps = [];
+  recordedPushes = [];
+  capturePngQueue = null;
+  captureDelayMs = 0;
+  enforceStrictQuota = false;
+  emptyCapturesRemaining = 0;
+  pollFailCount = 0;
+  currentTab = { ...currentTab, active: true };
+  state.confirmed = true;
+  state.token = "tok_test_rate_1234567890";
+  state.port = 8770;
+  state.paired = true;
+  state.polling = false;
+  state.lastError = "";
+  state.captureError = "";
+
+  globalThis.__aesopBridgeTest.frameDirty = true;
+  await kickFrameLoop();
+  assert.equal(recordedPushes.at(-1).body.frame_seq, 1);
+
+  const realNow = Date.now;
+  pollFailCount = 1000;
+  state.lastError = "";
+  const loopP = startBridgeLoop();
+  const armDeadline = realNow() + 2000;
+  while (!String(state.lastError).includes("network") && realNow() < armDeadline) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.match(String(state.lastError), /network/);
+  const failedAt = realNow();
+  Date.now = () => failedAt + POLL_NETWORK_RESET_MS + 1000;
+  try {
+    pollFailCount = 0;
+    const before = recordedPushes.length;
+    let recovered = null;
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      if (recordedPushes.length > before) {
+        recovered = recordedPushes[before];
+        break;
+      }
+    }
+    assert.ok(recovered, "poll recovery after >5s network loss must re-push state");
+    assert.equal(
+      recovered.body.frame_seq,
+      1,
+      "resetCaptureState must restart frame_seq so the new Studio process is not stuck"
+    );
+    assert.ok(recovered.body.png && recovered.body.png.length > 0);
+  } finally {
+    Date.now = realNow;
+    pollFailCount = 0;
+    state.polling = false;
+    await Promise.race([loopP, new Promise((r) => setTimeout(r, 500))]);
+    resetCaptureState();
   }
 }
 
