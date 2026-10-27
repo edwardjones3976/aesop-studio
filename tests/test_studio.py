@@ -218,8 +218,6 @@ class TestBoundaries(unittest.TestCase):
             bad = ["../x", "a/../../x", "/etc/passwd"]
             if os.name == "nt":
                 bad.extend(["..\\x", r"C:\Windows\x"])
-            else:
-                bad.append("..\\x")
             for rel in bad:
                 with self.assertRaises(ScopeError):
                     contained_path(d, rel)

@@ -137,7 +137,7 @@ class TestNewProjectFolders(TestPlan):
         r = self.svc.folder_suggestions(str(base / "al"))
         self.assertEqual([Path(x).name for x in r["dirs"]], ["alpha", "alps"])
         self.assertFalse(r["exists"]); self.assertTrue(r["parent_exists"])
-        r = self.svc.folder_suggestions(str(base) + "\\")
+        r = self.svc.folder_suggestions(f"{base}{os.sep}")
         self.assertEqual([Path(x).name for x in r["dirs"]], ["alpha", "alps", "beta"])  # hidden/system skipped
         self.assertTrue(self.svc.folder_suggestions(str(base / "alpha"))["exists"])
         self.assertEqual(self.svc.folder_suggestions("relative/path")["dirs"], [])
