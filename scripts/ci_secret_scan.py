@@ -25,6 +25,10 @@ _ALLOWLIST = (
     "sk-ant-...",  # docs
 )
 
+# Test fixtures use obviously synthetic key bodies (a run of the alphabet) to prove the redactor strips them.
+# No real key is an alphabet sequence, so skipping these keeps real-looking strings in tests still flagged.
+_SYNTHETIC = re.compile(r"abcdefghij|ABCDEFGHIJ|0123456789|xxxxxxxxxx")
+
 
 def _diff_text() -> str:
     base = subprocess.run(
@@ -61,7 +65,7 @@ def main() -> int:
     for pat in _PATTERNS:
         for m in pat.finditer(body):
             frag = m.group(0)
-            if any(a in frag for a in _ALLOWLIST):
+            if any(a in frag for a in _ALLOWLIST) or _SYNTHETIC.search(frag):
                 continue
             hits.append(f"{pat.pattern}: …{frag[:24]}…")
     if hits:
