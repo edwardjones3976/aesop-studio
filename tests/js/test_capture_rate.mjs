@@ -36,14 +36,13 @@ let recordedPushes = [];
 let pushWaiters = [];
 let pollFailCount = 0;
 let forceNextPushError = null;
+let pushHoldMs = 0;
 
 function recordPush(body) {
   const entry = { at: Date.now(), body };
   recordedPushes.push(entry);
-  if (body && body.png) {
-    const waiters = pushWaiters.splice(0, pushWaiters.length);
-    for (const w of waiters) w(entry);
-  }
+  const waiters = pushWaiters.splice(0, pushWaiters.length);
+  for (const w of waiters) w(entry);
 }
 
 globalThis.chrome = {
@@ -171,8 +170,12 @@ setStudioFetch(async (urlPath, _method = "GET", body = null) => {
       forceNextPushError = null;
       throw new Error(err);
     }
+    if (pushHoldMs > 0) {
+      await new Promise((r) => setTimeout(r, pushHoldMs));
+    }
     recordPush(body || {});
-    return { ok: true, frame_seq: recordedPushes.length };
+    const fseq = body && body.frame_seq != null ? body.frame_seq : recordedPushes.length;
+    return { ok: true, frame_seq: fseq };
   }
   if (u.includes("/api/browser/bridge/reply")) {
     const res = (body && body.result) || {};
@@ -200,15 +203,14 @@ function assertMaxTwoCapturesPerSecond(timestamps) {
   }
 }
 
-// 1. 10 actions 200 ms apart:
-// (i) every action's reply resolves within 100 ms of being issued (and never includes a png);
-// (ii) the number of pushes with a non-empty png is >= 9 of 10 and each arrives within 1000 ms of its action;
-// (iii) captureVisibleTab is called at most 2x per second.
+// 1. Pull transport: mock server holds each push 300 ms; 10 actions 200 ms apart must ack <= 100 ms;
+// frames pulled via {op:"frame"} >= 9/10 within 1 s; captures <= 2/s; pushes never carry png.
 {
   resetCaptureState();
   captureCallTimestamps = [];
   recordedPushes = [];
   pushWaiters = [];
+  pushHoldMs = 300;
   captureDelayMs = 20;
   enforceStrictQuota = true;
   state.confirmed = true;
@@ -218,47 +220,55 @@ function assertMaxTwoCapturesPerSecond(timestamps) {
   state.lastError = "";
   state.captureError = "";
 
-  const ackTimes = [];
-  const frameArrivalTimes = [];
+  let framesPulledWithin1s = 0;
 
   for (let i = 1; i <= 10; i++) {
-    const pushCountBefore = recordedPushes.filter((p) => p.body && p.body.png).length;
-    const nextPngPushPromise = new Promise((resolve) => {
-      pushWaiters.push(resolve);
-    });
     const t0 = Date.now();
     const out = await executeCommand({ op: "scroll", dy: 350 });
     const ackMs = Date.now() - t0;
-    ackTimes.push(ackMs);
     assert.equal(out.ok, true);
     assert.equal(out.png, undefined, "command reply must never include a png");
     assert.ok(ackMs <= 100, `action ${i} reply must resolve within 100ms, took ${ackMs}ms`);
 
-    const pushEntry =
-      recordedPushes.filter((p) => p.body && p.body.png).length > pushCountBefore
-        ? recordedPushes[recordedPushes.length - 1]
-        : await nextPngPushPromise;
-    const frameMs = pushEntry.at - t0;
-    frameArrivalTimes.push(frameMs);
-    assert.equal(pushEntry.body.png, SAMPLE_PNG_B64);
-    assert.ok(frameMs <= 1000, `action ${i} push must arrive within 1000ms, took ${frameMs}ms`);
+    let pulled = null;
+    const deadline = t0 + 1000;
+    while (Date.now() < deadline) {
+      const frameOut = await executeCommand({ op: "frame" });
+      if (frameOut.png === SAMPLE_PNG_B64 && frameOut.frame_seq > 0) {
+        pulled = frameOut;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    if (pulled) {
+      framesPulledWithin1s += 1;
+      assert.ok(Date.now() - t0 <= 1000, `action ${i} frame pull must land within 1000ms`);
+    }
 
     if (i < 10) {
       await new Promise((r) => setTimeout(r, 200));
     }
   }
 
-  const nonEmptyPngPushes = recordedPushes.filter((p) => p.body && p.body.png === SAMPLE_PNG_B64);
   assert.ok(
-    nonEmptyPngPushes.length >= 9,
-    `expected >= 9 pushes with non-empty png out of 10 actions, got ${nonEmptyPngPushes.length}`
+    framesPulledWithin1s >= 9,
+    `expected >= 9 frame pulls within 1s of action, got ${framesPulledWithin1s}`
   );
-  assert.equal(
-    frameArrivalTimes.filter((ms) => ms <= 1000).length,
-    10,
-    `all pushed frames must arrive within 1000ms of their action, got ${JSON.stringify(frameArrivalTimes)}`
-  );
+  for (const p of recordedPushes) {
+    assert.ok(!p.body || !p.body.png, "push payloads must not include png");
+  }
   assertMaxTwoCapturesPerSecond(captureCallTimestamps);
+
+  const capsBeforeFrameOnly = captureCallTimestamps.length;
+  const frameOnly = await executeCommand({ op: "frame" });
+  assert.equal(frameOnly.png, SAMPLE_PNG_B64);
+  assert.equal(
+    captureCallTimestamps.length,
+    capsBeforeFrameOnly,
+    "frame op must return cached png without captureVisibleTab"
+  );
+
+  pushHoldMs = 0;
 }
 
 // 2. (iv) A capture that throws sets state.captureError (NOT state.lastError), exposes captureError in push & popup,

@@ -254,6 +254,60 @@ class TestExtensionBridgeAndSafety(unittest.TestCase):
         self.assertFalse(r_xy_buy["ok"])
         self.assertIn("purchase", r_xy_buy["error"])
 
+    def test_push_frame_seq_without_png_does_not_advance_studio_frame_seq(self):
+        self.b.bridge_push({
+            "url": "https://example.org/",
+            "title": "Example",
+            "frame_seq": 7,
+            "elements": [],
+        })
+        self.assertEqual(self.b.ext_frame_seq, 7)
+        self.assertEqual(self.b.frame_seq, 0)
+        self.assertEqual(self.b._pulled_ext_seq, 0)
+
+    def test_bridge_reply_png_advances_frame_seq(self):
+        import base64
+        png_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        self.b.bridge_push({"url": "https://example.org/", "title": "Example", "frame_seq": 2})
+        self.b.bridge_reply(
+            "offline-cmd",
+            {"ok": True, "png": png_b64, "vw": 64, "vh": 48, "frame_seq": 2},
+        )
+        self.assertEqual(self.b.frame_seq, 1)
+        self.assertEqual(self.b._pulled_ext_seq, 2)
+        self.assertTrue(self.b.last_png.startswith(b"\x89PNG"))
+        self.assertEqual(base64.b64encode(self.b.last_png).decode(), png_b64)
+
+    def test_shot_pulls_frame_when_ext_frame_seq_ahead(self):
+        import threading
+        png_b64 = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        self.b.bridge_push({"url": "https://example.org/", "title": "Example", "frame_seq": 4})
+
+        polled_ops = []
+
+        def ext_worker():
+            polled = self.b.bridge_poll(wait_s=2.0)
+            cmd = polled.get("cmd")
+            if cmd:
+                polled_ops.append(cmd.get("op"))
+            if cmd and cmd.get("op") == "frame":
+                self.b.bridge_reply(
+                    cmd["id"],
+                    {"ok": True, "png": png_b64, "vw": 100, "vh": 80, "frame_seq": 4},
+                )
+
+        t = threading.Thread(target=ext_worker, daemon=True)
+        t.start()
+        shot = self.b.shot()
+        t.join(timeout=3)
+        self.assertEqual(shot["seq"], 1)
+        self.assertTrue(shot["png"].startswith(b"\x89PNG"))
+        self.assertEqual(polled_ops, ["frame"])
+
     def test_bridge_command_poll_and_reply_roundtrip(self):
         import threading
         self.b.bridge_push({"url": "https://example.org/", "title": "Example", "elements": [{"ref": 1, "role": "link", "label": "More", "bbox": {"x": 10, "y": 10, "w": 50, "h": 20}}]})

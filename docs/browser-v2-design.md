@@ -66,3 +66,13 @@ Instead of 2.5-second blind PNG polling:
    - Agents cannot click purchase/checkout confirmation triggers (`buy now`, `place order`, `complete purchase`, `pay now`, `confirm payment`) or type into payment card fields (`cc-number`, `cc-csc`, `cvv`).
 3. **Visible & Stoppable:** Every agent step is recorded with its thought, action, target detail, and page URL/title, and the owner's **Stop** button halts the loop and cancels any running provider turn immediately.
 4. **Zero Credential Leakage:** URLs pass through `security.sanitize_url()` and all extracted text, labels, thoughts, and answers pass through `security.redact()`.
+
+---
+
+## 4. Transport (pull frames, separate HTTP lanes)
+
+Studio’s stdlib `ThreadingHTTPServer` handles **one request at a time per HTTP/1.1 connection**. When the extension **pushed** full PNGs on the same keep-alive connection as long-poll command fetches, a command could sit behind a ~35 KB push for hundreds of milliseconds and then miss the next poll window (~1 s), producing ~1.5 s action ack latency even though the server and bridge logic were fast.
+
+**Pull-based frames:** The extension keeps `latestFrame = { seq, png }` in the service worker. After each `captureVisibleTab`, it bumps `frame_seq` and stores the PNG locally. **Pushes carry `frame_seq`, DOM snapshot, and tabs only—no PNG** (payload typically ≤ ~8 KB: up to 150 elements, text/main_text capped at 6 KB each with further trimming if JSON exceeds ~7.6 KB). When Studio’s `shot()` sees `frame_seq < ext_frame_seq`, it issues `{ op: "frame" }` on the poll path; the extension replies with the **cached** PNG without a new capture.
+
+**Separate lanes:** Every `studioFetch` uses `keepalive: false` and `cache: "no-store"`, with `?lane=poll` on `/api/browser/bridge/poll` and `?lane=data` on push/reply (the server ignores the marker; it exists so the browser does not reuse one TCP connection for poll and data). That way a held push on the data lane cannot block command polling.
