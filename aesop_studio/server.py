@@ -65,7 +65,7 @@ class App:
         self.sessions = Sessions(self.store.data_dir)  # persistent: survives restarts (30-day sliding)
         self.login_code = secrets.token_urlsafe(24)
         self.reconciled = self.sup.reconcile()
-        self.browser = browser_mod.Browser()
+        self.browser = browser_mod.Browser(self.store.data_dir)
         self.drive = browse_agent.Drive(self.store, self.sup, self.browser)
         from .roundtable_live import Broker
         self.broker = Broker(self.store, self.sup)
@@ -129,9 +129,9 @@ class Handler(BaseHTTPRequestHandler):
     def _host_ok(self) -> bool:
         return self.headers.get("Host", "") in self.app.allowed_hosts()
 
-    def body(self) -> dict:
+    def body(self, max_bytes: int = 1_000_000) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
-        if n < 0 or n > 1_000_000:
+        if n < 0 or n > max_bytes:
             raise ValueError("request too large")
         raw = self.rfile.read(n) if n else b"{}"
         return json.loads(raw or b"{}")
@@ -146,6 +146,38 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self):
         self._dispatch("PATCH")
 
+    def do_OPTIONS(self):
+        if not self._host_ok():
+            return self.err(421, "unexpected Host header")
+        url = urllib.parse.urlsplit(self.path)
+        if url.path.startswith("/api/browser/bridge/"):
+            origin = self.headers.get("Origin") or ""
+            allowed = {f"http://{h}" for h in self.app.allowed_hosts()}
+            if origin and (origin.startswith("chrome-extension://") or origin in allowed):
+                return self._send(204, b"", "text/plain", {
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Headers": "Content-Type, X-Aesop-Bridge-Token",
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                })
+        return self.err(403, "cross-origin request rejected")
+
+    def _dispatch_route(self, method: str, path: str, sess: str):
+        for m, pat, name in ROUTES:
+            if m == method:
+                mt = pat.match(path)
+                if mt:
+                    try:
+                        return getattr(self, name)(sess, *mt.groups())
+                    except KeyError as e:
+                        return self.err(404, str(e).strip("'"))
+                    except PermissionError as e:
+                        return self.err(403, str(e))
+                    except Conflict as e:
+                        return self.err(409, str(e))
+                    except (ValueError, ScopeError, ledger.BudgetError) as e:
+                        return self.err(400, str(e))
+        return self.err(404, "no such endpoint")
+
     def _dispatch(self, method: str):
         if not self._host_ok():
             return self.err(421, "unexpected Host header")
@@ -156,6 +188,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._login()
         if method == "GET" and not path.startswith("/api/"):
             return self._static(path)
+        if path.startswith("/api/browser/bridge/"):
+            origin = self.headers.get("Origin") or ""
+            allowed_origins = {f"http://{h}" for h in self.app.allowed_hosts()}
+            if origin and not (origin.startswith("chrome-extension://") or origin in allowed_origins):
+                return self.err(403, "cross-origin request rejected")
+            if not self.app.browser.verify_token(self.headers.get("X-Aesop-Bridge-Token", "")):
+                return self.err(403, "missing or invalid browser bridge pairing token")
+            return self._dispatch_route(method, path, "bridge")
         sess = self._session()
         if not sess:
             return self.err(401, "not signed in to this Studio session; use the launch link printed at startup")
@@ -393,6 +433,39 @@ class Handler(BaseHTTPRequestHandler):
     def browser_status(self, sess):
         self.json(self.app.browser.status())
 
+    @route("GET", r"/api/browser/state")
+    def browser_live_state(self, sess):
+        self.json(self.app.browser.live_state())
+
+    @route("GET", r"/api/browser/snapshot")
+    def browser_snapshot(self, sess):
+        self.json(self.app.browser.snapshot())
+
+    @route("GET", r"/api/browser/pairing")
+    def browser_pairing(self, sess):
+        self.json(self.app.browser.pairing_info(self.app.port))
+
+    @route("POST", r"/api/browser/pairing/rotate")
+    def browser_pairing_rotate(self, sess):
+        self.app.browser.rotate_token()
+        self.json(self.app.browser.pairing_info(self.app.port))
+
+    @route("POST", r"/api/browser/bridge/push")
+    def browser_bridge_push(self, sess):
+        self.json(self.app.browser.bridge_push(self.body(16_000_000)))
+
+    @route("GET", r"/api/browser/bridge/poll")
+    def browser_bridge_poll(self, sess):
+        wait = float((self.query.get("wait") or ["0.05"])[0])
+        last_err = (self.query.get("last_error") or [""])[0]
+        self.json(self.app.browser.bridge_poll(wait, last_error=last_err))
+
+    @route("POST", r"/api/browser/bridge/reply")
+    def browser_bridge_reply(self, sess):
+        b = self.body(16_000_000)
+        res = b.get("result") if isinstance(b.get("result"), dict) else {}
+        self.json(self.app.browser.bridge_reply(str(b.get("cmd_id") or ""), res))
+
     @route("POST", r"/api/browser/navigate")
     def browser_navigate(self, sess):
         self.json(self.app.browser.cmd("navigate", url=self.body().get("url") or ""))
@@ -400,9 +473,10 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/browser/act")
     def browser_act(self, sess):
         b = self.body(); op = b.get("op")
-        if op not in ("click", "scroll", "type", "key", "back", "forward", "reload"):
+        if op not in ("click", "click_ref", "fill_ref", "scroll", "type", "key", "find",
+                      "back", "forward", "reload", "tabs", "switch_tab", "new_tab", "close_tab"):
             raise ValueError("unknown browser action")
-        args = {k: b[k] for k in ("x", "y", "dy", "text", "key") if k in b}
+        args = {k: b[k] for k in ("x", "y", "dy", "text", "key", "ref", "submit", "query", "tab_id", "url") if k in b}
         self.json(self.app.browser.cmd(op, **args))
 
     @route("GET", r"/api/browser/shot")
@@ -410,7 +484,8 @@ class Handler(BaseHTTPRequestHandler):
         full = (self.query.get("full") or ["0"])[0] == "1"
         sh = self.app.browser.shot(full)
         self._send(200, sh["png"], "image/png", {"Cache-Control": "no-store",
-                                                 "X-Browser-W": str(sh["vw"]), "X-Browser-H": str(sh["vh"])})
+                                                 "X-Browser-W": str(sh["vw"]), "X-Browser-H": str(sh["vh"]),
+                                                 "X-Browser-Seq": str(sh.get("seq", 0))})
 
     @route("GET", r"/api/browser/text")
     def browser_text(self, sess):
@@ -454,6 +529,23 @@ class Handler(BaseHTTPRequestHandler):
         page = f"Page: {info.get('title') or ''}\nURL: {info.get('url') or ''}\n\n{info.get('text') or ''}"
         txt = self.app.svc.attach(pid, f"browser-{host}-{stamp}.md", page.encode("utf-8"))
         self.json({"image_id": img["id"], "text_id": txt["id"], "url": info.get("url"), "title": info.get("title")})
+
+    @route("POST", r"/api/projects/(\w+)/browser/cite")
+    def browser_cite(self, sess, pid):
+        self.app.svc.project(pid)
+        b = self.body()
+        snap = self.app.browser.snapshot()
+        res = browse_agent.cite_page_to_notebook(
+            self.app.store,
+            pid,
+            url=str(b.get("url") or snap.get("url") or ""),
+            title=str(b.get("title") or snap.get("title") or ""),
+            page_text=str(snap.get("main_text") or snap.get("text") or ""),
+            claim=str(b.get("claim") or ""),
+            locator=str(b.get("locator") or snap.get("title") or ""),
+            limitation=str(b.get("limitation") or ""),
+        )
+        self.json(res, 201)
 
     @route("POST", r"/api/attachments/(\w+)/discard")
     def attachment_discard(self, sess, aid):

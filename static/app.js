@@ -1362,7 +1362,7 @@ async function bootData() {
   let recovered = "";
   try {
     const s = await api("GET", "/api/session");
-    S.csrf = s.csrf;
+    S.csrf = s.csrf; publishBrowserPairing();
     if (s.reconciled && s.reconciled.length) recovered = `Recovered after restart: ${s.reconciled.length} unfinished task(s) marked ${[...new Set(s.reconciled.map((r) => r.to))].join(", ")}. Nothing was replayed automatically.`;
   } catch (e) {
     $("view").replaceChildren(h("div", { class: "empty welcome" }, h("div", { class: "eico" }, icon("shield")), h("div", { class: "et" }, h("strong", {}, "Sign-in needed"),
@@ -1662,7 +1662,377 @@ async function renderInspector() {
 }
 // The Browser tab mirrors and drives a tab in the OWNER'S own Chrome (their profile, logins, extensions). There is
 // no separate Studio browser: when Chrome isn't connected yet, the panel shows one connect action and nothing else.
+async function publishBrowserPairing(force = false) {
+  try {
+    const p = await api("GET", "/api/browser/pairing");
+    if (p && p.pairing_token) {
+      const next = JSON.stringify({ port: p.port, token: p.pairing_token });
+      if (force || document.documentElement.dataset.aesopBridge !== next) {
+        document.documentElement.dataset.aesopBridge = next;
+        window.postMessage({ type: "AESOP_STUDIO_PAIR", port: p.port, token: p.pairing_token }, window.location.origin);
+      }
+    }
+    return p;
+  } catch { return null; }
+}
+
 function inspBrowser(body, pid, gen) {
+  const live = () => gen === inspGen && body.isConnected;
+  let vw = 1366, vh = 820, busy = false, curUrl = "", driveBtn = null, autoTimer = null;
+  let lastFrameSeq = -1, lastStateSeq = -1, showHotspots = true, readerMode = false, liveSnap = null, lastFind = null;
+
+  const connectCard = (st, pair) => {
+    clearInterval(autoTimer);
+    const extDir = (st && st.extension_dir) || (pair && pair.extension_dir) || "extension";
+    const pairCode = (pair && pair.pairing_code) || "";
+    const copyExt = btn("Copy extension folder path", async () => {
+      try { await navigator.clipboard.writeText(extDir); banner(`Copied extension folder path: ${extDir}`, "ok"); }
+      catch { banner(`Extension folder: ${extDir}`, "ok"); }
+    }, "primary sm", "folder");
+    const pairNow = abtn("Check & pair extension", async () => {
+      await publishBrowserPairing(true);
+      const s = await api("GET", "/api/browser");
+      if (s && s.connected) { banner("Connected to your Chrome via Extension Bridge.", "ok"); inspBrowser(body, pid, gen); }
+      else banner("Click the Aesop Studio Bridge extension icon in Chrome to confirm pairing (1 click).", "warn");
+    }, "sm", "refresh");
+    const copyCode = pairCode ? btn("Copy pairing code", async () => {
+      try { await navigator.clipboard.writeText(pairCode); banner("Copied pairing code to clipboard.", "ok"); }
+      catch { banner(`Pairing code: ${pairCode}`, "ok"); }
+    }, "ghost sm", "key") : null;
+    const goFallback = abtn("Open fallback Chrome window", async () => {
+      try {
+        const r = await api("POST", "/api/browser/connect", {});
+        if (r.connected) { banner(r.note || "Connected.", "ok"); inspBrowser(body, pid, gen); }
+        else if (r.error) banner(r.error, "bad");
+      } catch (e) { banner(e.message, "bad"); }
+    }, "ghost sm", "globe");
+
+    body.replaceChildren(h("div", { class: "brconnect" }, icon("globe"),
+      h("h3", {}, "Connect your Chrome (Browser v2)"),
+      h("p", { class: "muted" }, "Load the Aesop Studio Extension once into your normal Chrome profile so your existing Google, GitHub, and site logins work immediately — with no re-sign-in and no Chrome restart."),
+      h("ol", { class: "brsteps-setup" },
+        h("li", {}, "Open ", h("code", {}, "chrome://extensions"), " in your normal Chrome and enable ", h("strong", {}, "Developer mode"), " (top-right)."),
+        h("li", {}, "Click ", h("strong", {}, "Load unpacked"), " and select: ", h("code", { class: "brpath" }, extDir)),
+        h("li", {}, "Click the extension icon (or notification) to confirm ", h("strong", {}, `Pair with Aesop Studio at 127.0.0.1:${(pair && pair.port) || window.location.port || 8765}?`), " once. Subsequent Studio restarts on the same port reconnect automatically.")),
+      h("div", { class: "row wrap" }, copyExt, pairNow, copyCode),
+      st && st.chrome_found !== false ? h("div", { class: "brfallback" },
+        h("span", { class: "faint" }, "Or use the isolated CDP fallback window (separate Chrome profile): "), goFallback) : null));
+
+    autoTimer = setInterval(async () => {
+      if (!live()) { clearInterval(autoTimer); return; }
+      try {
+        await publishBrowserPairing(false);
+        const s = await api("GET", "/api/browser");
+        if (s && s.connected && live()) { clearInterval(autoTimer); inspBrowser(body, pid, gen); }
+      } catch { /* wait */ }
+    }, 1500);
+  };
+
+  const mirror = (initSt) => {
+    const urlIn = h("input", { type: "text", class: "grow brurl", spellcheck: "false", autocapitalize: "off", autocomplete: "off",
+      placeholder: "Search or enter a web address", "aria-label": "Web address" });
+    const lock = h("span", { class: "brlock", "aria-hidden": "true" });
+    const shot = h("img", { class: "brshot", alt: "Your Chrome tab", draggable: "false" });
+    const overlay = h("div", { class: "broverlay", "aria-label": "Interactive DOM elements" });
+    const readerBox = h("div", { class: "brreader", hidden: true });
+    const loadbar = h("div", { class: "brload", "aria-hidden": "true" });
+    const stat = h("div", { class: "brstat", role: "status", "aria-live": "polite" }, "Connected to your Chrome.");
+    const modeBadge = h("span", { class: "pill ok brmode" }, initSt && initSt.mode === "extension" ? "Extension · Normal Profile" : "CDP Fallback");
+    const tabList = h("div", { class: "brtabs", role: "tablist", "aria-label": "Browser tabs" });
+    const view = h("div", { class: "brview", tabindex: "0", "aria-label": "Your Chrome tab — click, scroll and type to interact" }, loadbar, shot, overlay);
+    const frame = h("div", { class: "brframe" }, view, readerBox);
+    const setBusy = (v) => { busy = v; frame.classList.toggle("loading", v); };
+    const lost = (e) => {
+      if (/isn't connected|not connected/i.test(e.message)) { connectCard({ chrome_found: true }, null); banner("Browser disconnected — reconnect when you're ready.", ""); return true; }
+      return false;
+    };
+    const call = async (method, path, b) => { setBusy(true); try { return await api(method, path, b); } finally { setBusy(false); } };
+    const refreshShot = async (seqHint) => {
+      try {
+        const q = seqHint !== undefined ? `?seq=${seqHint}` : "";
+        const r = await fetch(`/api/browser/shot${q}`, { headers: { "X-Aesop-Key": apiKey() }, credentials: "same-origin" });
+        if (!live()) return;
+        if (r.ok) {
+          vw = Number(r.headers.get("X-Browser-W")) || vw; vh = Number(r.headers.get("X-Browser-H")) || vh;
+          const seq = Number(r.headers.get("X-Browser-Seq"));
+          if (!isNaN(seq)) lastFrameSeq = seq;
+          const u = URL.createObjectURL(await r.blob()); const old = shot.src; shot.src = u;
+          if (old && old.startsWith("blob:")) URL.revokeObjectURL(old);
+          frame.classList.add("has-page");
+        }
+      } catch { /* keep the last frame */ }
+    };
+
+    const renderTabs = (tabs) => {
+      const items = (tabs || []).slice(0, 8).map((t) => h("div", { class: "brtab" + (t.selected ? " active" : ""), title: `${t.title || ""}\n${t.url || ""}` },
+        h("button", { type: "button", class: "brtab-btn", onclick: () => act("switch_tab", { tab_id: t.id }) }, (t.title || t.url || `Tab ${t.id}`).slice(0, 26)),
+        (tabs || []).length > 1 ? h("button", { type: "button", class: "brtab-close", "aria-label": "Close tab", title: "Close tab", onclick: (e) => { e.stopPropagation(); act("close_tab", { tab_id: t.id }); } }, "×") : null));
+      items.push(h("button", { type: "button", class: "iconbtn sm brtab-new", title: "New tab", "aria-label": "New tab", onclick: () => act("new_tab", { url: "https://example.org" }) }, icon("plus", "sm")));
+      tabList.replaceChildren(...items);
+    };
+
+    const renderOverlayAndReader = (st) => {
+      if (!st) return;
+      liveSnap = st;
+      vw = Number(st.vw) || vw; vh = Number(st.vh) || vh;
+      overlay.hidden = !showHotspots || readerMode;
+      const els = (st.elements || []).slice(0, 45);
+      overlay.replaceChildren(...els.map((el) => {
+        const bb = el.bbox || {};
+        if (!bb.w || !bb.h || bb.x < 0 || bb.y < 0 || bb.x > vw || bb.y > vh) return null;
+        const prot = el.is_password ? "PASSWORD" : (el.is_captcha ? "CAPTCHA" : (el.is_purchase ? "PURCHASE" : ""));
+        const hs = h("button", {
+          type: "button",
+          class: "brhotspot" + (prot ? " prot" : ""),
+          title: `[#${el.ref}] ${el.role || el.tag}: ${el.label || ""}${prot ? ` (Protected: ${prot})` : ""}`,
+          onclick: (ev) => {
+            ev.stopPropagation();
+            act("click_ref", { ref: el.ref });
+          }
+        }, h("span", { class: "brref" }, `#${el.ref}`));
+        hs.style.left = `${Math.max(0, Math.min(98, (bb.x / vw) * 100)).toFixed(2)}%`;
+        hs.style.top = `${Math.max(0, Math.min(98, (bb.y / vh) * 100)).toFixed(2)}%`;
+        hs.style.width = `${Math.max(1.5, Math.min(100, (bb.w / vw) * 100)).toFixed(2)}%`;
+        hs.style.height = `${Math.max(1.5, Math.min(100, (bb.h / vh) * 100)).toFixed(2)}%`;
+        return hs;
+      }));
+
+      if (readerMode) {
+        const heads = (st.headings || []).slice(0, 20);
+        const forms = (st.forms || []).slice(0, 6);
+        readerBox.replaceChildren(
+          h("div", { class: "brreader-sec" },
+            h("strong", {}, "Outline & Headings"),
+            heads.length ? h("ul", { class: "brreader-list" }, ...heads.map((hd) => h("li", {}, `H${hd.level}: ${hd.text}`))) : h("p", { class: "faint" }, "No headings detected.")),
+          h("div", { class: "brreader-sec" },
+            h("strong", {}, `Interactive Elements (${els.length})`),
+            els.length ? h("div", { class: "brchips" }, ...els.map((el) => h("button", {
+              type: "button",
+              class: "btn ghost sm brchip",
+              title: el.href || el.label || "",
+              onclick: () => act("click_ref", { ref: el.ref })
+            }, `[#${el.ref}] ${el.role || el.tag}: ${(el.label || "").slice(0, 36)}`))) : h("p", { class: "faint" }, "No interactive elements detected.")),
+          forms.length ? h("div", { class: "brreader-sec" },
+            h("strong", {}, "Forms"),
+            ...forms.map((fm) => h("div", { class: "faint" }, `${fm.name}: ${(fm.fields || []).map((f) => `[#${f.ref}] ${f.label}`).join(", ")}`))) : null,
+          h("div", { class: "brreader-sec" },
+            h("strong", {}, "Main Content"),
+            h("pre", { class: "brreader-text" }, st.main_text || "(empty)")));
+      }
+    };
+
+    const setStat = (st) => {
+      if (!st || st.url === undefined) return;
+      curUrl = st.url || ""; if (document.activeElement !== urlIn) urlIn.value = st.url || urlIn.value;
+      const https = /^https:/i.test(st.url || ""); lock.textContent = st.url ? (https ? "🔒" : "⚠") : "";
+      stat.textContent = st.error ? `⚠ ${st.error}` : (st.title || (st.url ? "" : "Connected to your Chrome."));
+      stat.classList.toggle("err", !!st.error);
+      if (st.mode) {
+        modeBadge.textContent = st.mode === "extension" ? "Extension · Normal Profile" : "CDP Fallback";
+        modeBadge.className = "pill brmode " + (st.mode === "extension" ? "ok" : "warn");
+      }
+      if (Array.isArray(st.tabs)) renderTabs(st.tabs);
+      if (st.elements || st.headings || st.main_text !== undefined) renderOverlayAndReader(st);
+    };
+
+    const pollState = async (forceShot) => {
+      try {
+        const st = await api("GET", "/api/browser/state");
+        if (!live()) return;
+        if (!st.connected) { connectCard(st, null); return; }
+        const frameChanged = st.frame_seq !== undefined && st.frame_seq !== lastFrameSeq;
+        const stateChanged = st.state_seq !== undefined && st.state_seq !== lastStateSeq;
+        if (stateChanged || forceShot) {
+          lastStateSeq = st.state_seq ?? lastStateSeq;
+          setStat(st);
+        }
+        if (forceShot || frameChanged || !frame.classList.contains("has-page")) {
+          await refreshShot(st.frame_seq);
+        }
+      } catch (e) { lost(e); }
+    };
+
+    const after = async (st) => {
+      if (st) setStat(st);
+      await pollState(true);
+    };
+    const go = async () => { if (!urlIn.value.trim()) return; urlIn.blur(); try { await after(await call("POST", "/api/browser/navigate", { url: urlIn.value.trim() })); } catch (e) { if (!lost(e)) setStat({ url: curUrl, error: e.message }); } };
+    const act = async (op, extra) => {
+      try {
+        const r = await call("POST", "/api/browser/act", { op, ...extra });
+        if (op === "find" && r) { lastFind = r; renderFindResults(r); }
+        await after(r);
+        return r;
+      } catch (e) { if (!lost(e)) setStat({ url: curUrl, error: e.message }); return null; }
+    };
+
+    urlIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+    urlIn.addEventListener("focus", () => urlIn.select());
+    shot.addEventListener("click", (e) => {
+      if (busy || !shot.clientWidth) return;
+      const r = shot.getBoundingClientRect();
+      const d = h("span", { class: "brclick" }); d.style.left = (e.clientX - r.left) + "px"; d.style.top = (e.clientY - r.top) + "px";
+      view.append(d); setTimeout(() => d.remove(), 450);
+      act("click", { x: Math.round((e.clientX - r.left) / r.width * vw), y: Math.round((e.clientY - r.top) / r.height * vh) });
+    });
+    let wheelTimer = null, wheelDelta = 0;
+    view.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      wheelDelta += e.deltaY;
+      if (wheelTimer) return;
+      wheelTimer = setTimeout(() => {
+        const dy = Math.max(-1000, Math.min(1000, Math.round(wheelDelta)));
+        wheelDelta = 0; wheelTimer = null;
+        if (!busy && dy) act("scroll", { dy });
+      }, 90);
+    }, { passive: false });
+    const SPECIAL = { Enter: "Enter", Backspace: "Backspace", Tab: "Tab", Delete: "Delete", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", Escape: "Escape", Home: "Home", End: "End" };
+    view.addEventListener("keydown", (e) => {
+      if (busy || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.key.length === 1) { e.preventDefault(); act("type", { text: e.key }); }
+      else if (SPECIAL[e.key]) { e.preventDefault(); act("key", { key: SPECIAL[e.key] }); }
+    });
+
+    const iconBtn = (ico, label, fn) => h("button", { type: "button", class: "iconbtn brnav", "aria-label": label, title: label, onclick: fn }, icon(ico));
+    const findIn = h("input", { type: "text", class: "grow sm", placeholder: "Find in page (headings, buttons, text)…", "aria-label": "Find in page" });
+    const findOut = h("div", { class: "brfind-out" });
+    const findBox = h("div", { class: "brfind", hidden: true },
+      h("div", { class: "brbar" }, findIn, btn("Find", () => { if (findIn.value.trim()) act("find", { query: findIn.value.trim() }); }, "sm primary", "search"),
+        btn("Close", () => { findBox.hidden = true; }, "ghost sm")),
+      findOut);
+    findIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); if (findIn.value.trim()) act("find", { query: findIn.value.trim() }); } });
+    const renderFindResults = (r) => {
+      const ms = (r && r.matches) || [];
+      const ems = (r && r.element_matches) || [];
+      findOut.replaceChildren(
+        ems.length ? h("div", { class: "brchips" }, ...ems.map((e) => h("button", { type: "button", class: "btn ghost sm brchip", onclick: () => act("click_ref", { ref: e.ref }) }, `[#${e.ref}] ${e.role}: ${(e.label || "").slice(0, 40)}`))) : null,
+        ms.length ? h("ul", { class: "brreader-list" }, ...ms.slice(0, 8).map((m) => h("li", {}, `L${m.line}: ${m.snippet}`))) : (!ems.length ? h("p", { class: "faint" }, "No matches on this page.") : null));
+    };
+
+    const typeIn = h("input", { type: "text", class: "grow sm", placeholder: "Quick type into focused input…", "aria-label": "Quick type into page" });
+    const doQuickType = (submit) => {
+      const val = typeIn.value;
+      if (!val) return;
+      typeIn.value = "";
+      act("type", { text: val }).then(() => { if (submit) act("key", { key: "Enter" }); });
+    };
+    typeIn.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doQuickType(true); } });
+    const quickBar = h("div", { class: "brbar brquick" }, typeIn,
+      btn("Type", () => doQuickType(false), "ghost sm"),
+      btn("Type + Enter", () => doQuickType(true), "ghost sm", "send"));
+
+    const topMeta = h("div", { class: "brtop" }, modeBadge, tabList,
+      btn("Disconnect", async () => { await api("POST", "/api/browser/stop", {}); connectCard({ chrome_found: true }, null); }, "ghost sm"));
+
+    const bar = h("div", { class: "brbar" },
+      iconBtn("chevL", "Back", () => act("back")), iconBtn("chevR", "Forward", () => act("forward")), iconBtn("refresh", "Reload", () => act("reload")),
+      h("div", { class: "braddr" }, lock, urlIn, btn("Go", go, "primary sm brgo", "send")),
+      iconBtn("search", "Find in page", () => { findBox.hidden = !findBox.hidden; if (!findBox.hidden) findIn.focus(); }));
+
+    const sendChat = abtn("Send page to chat", async () => {
+      try {
+        const r = await call("POST", `/api/projects/${pid}/browser/attach`);
+        const cid = S.conv; if (cid) { const set = chatChips[cid] || (chatChips[cid] = new Set()); if (r.image_id) set.add(r.image_id); if (r.text_id) set.add(r.text_id); }
+        banner("Page added to the chat (screenshot + structured text).", "ok");
+        if (S.tab === "chat" && !S.global) refresh2Chat(); else setTab("chat");
+      } catch (e) { if (!lost(e)) banner(e.message, "bad"); }
+    }, "sm", "chat");
+
+    const citeBtn = abtn("Cite to notebook", async () => {
+      const v = await dialog("Cite browser page to Research Notebook", [
+        { name: "claim", label: "Finding or summary to cite", type: "textarea", required: true, value: "", placeholder: "e.g. Latest release v2.4.0 adds WebSocket streaming and fixes OAuth redirect." },
+        { name: "locator", label: "Section / locator", value: (liveSnap && liveSnap.title) || curUrl || "" },
+        { name: "limitation", label: "Caveat / limitation (optional)", value: "" }
+      ], "Save citation");
+      if (!v || !v.claim.trim()) return;
+      try {
+        await call("POST", `/api/projects/${pid}/browser/cite`, v);
+        banner("Cited page source and finding into the project's Research Notebook.", "ok");
+      } catch (e) { if (!lost(e)) banner(e.message, "bad"); }
+    }, "ghost sm", "bookmark");
+
+    const hotspotBtn = btn("Hotspots: On", () => {
+      showHotspots = !showHotspots;
+      hotspotBtn.textContent = showHotspots ? "Hotspots: On" : "Hotspots: Off";
+      if (liveSnap) renderOverlayAndReader(liveSnap);
+    }, "ghost sm", "layers");
+
+    const readerBtn = btn("Structure view", () => {
+      readerMode = !readerMode;
+      view.hidden = readerMode;
+      readerBox.hidden = !readerMode;
+      readerBtn.textContent = readerMode ? "Live view" : "Structure view";
+      if (liveSnap) renderOverlayAndReader(liveSnap);
+    }, "ghost sm", "list");
+
+    const actions = h("div", { class: "brbar2" }, sendChat, citeBtn, readerBtn, hotspotBtn,
+      abtn("Read text", async () => { try { const r = await call("GET", "/api/browser/text"); await dialog("Page text", [{ name: "t", label: r.title || r.url || "Page", type: "textarea", value: r.text || "(empty)", tall: true, readonly: true }], "Close"); } catch (e) { if (!lost(e)) banner(e.message, "bad"); } }, "ghost sm", "note"));
+
+    const driveLog = h("ol", { class: "brdrive-log" });
+    const driveSel = h("select", { class: "chat-prov", "aria-label": "Provider to browse" });
+    const goalIn = h("input", { type: "text", class: "grow", placeholder: "What should it do? e.g. open the repo, find the latest release, and summarize it into the notebook", "aria-label": "Browsing goal" });
+    const stepsIn = h("input", { type: "number", min: "1", max: "15", value: "6", class: "brsteps", "aria-label": "Max steps", title: "Maximum steps" });
+    let drivePoll = null;
+    const renderDrive = (d) => {
+      driveSel.replaceChildren(...(d.vision_routes || []).map((r) => h("option", { value: r, selected: r === driveSel.value }, routeName(r))));
+      const active = d.active;
+      driveBtn.textContent = active ? "Browsing…" : "Let a provider browse"; driveBtn.disabled = active || !(d.vision_routes || []).length;
+      driveStop.hidden = !active; goalIn.disabled = active; driveSel.disabled = active; stepsIn.disabled = active;
+      driveLog.replaceChildren(...(d.steps || []).map((st, i) => h("li", { class: "brstep" + (st.action === "error" ? " err" : "") },
+        h("span", { class: "brn" }, String(i + 1)), h("span", { class: "bract" }, st.action),
+        h("span", {}, st.thought || "", st.detail ? h("span", { class: "faint" }, ` ${st.detail}`) : null))));
+      if (d.cited && d.cited.finding_id) {
+        driveLog.append(h("li", { class: "brstep ok" }, h("span", { class: "bract" }, "notebook"), h("span", {}, `Cited into Research Notebook (${d.cited.finding_id})`)));
+      }
+      if (d.answer) driveLog.append(h("li", { class: "brstep ans" }, h("span", { class: "bract" }, "answer"), h("span", {}, d.answer)));
+      if (!active && (d.steps || []).length) pollState(true);
+    };
+    driveBtn = abtn("Let a provider browse", async () => {
+      if (!goalIn.value.trim()) { goalIn.focus(); return; }
+      try {
+        await api("POST", `/api/projects/${pid}/browser/drive`, { provider: driveSel.value, goal: goalIn.value, max_steps: Number(stepsIn.value) || 6 });
+        startDrivePoll();
+      } catch (e) { banner(e.message, "bad"); }
+    }, "sm", "sparkle");
+    const driveStop = h("button", { type: "button", class: "btn ghost sm danger", hidden: true, onclick: async () => { try { await api("POST", "/api/browser/drive/stop"); } catch { /* */ } } }, icon("stop"), "Stop");
+    const startDrivePoll = () => {
+      clearInterval(drivePoll);
+      drivePoll = setInterval(async () => {
+        if (!live()) { clearInterval(drivePoll); return; }
+        try { const d = await api("GET", "/api/browser/drive"); renderDrive(d); if (!d.active) { clearInterval(drivePoll); pollState(true); } } catch { /* */ }
+      }, 900);
+    };
+    const driveSection = h("details", { class: "brdrive" }, h("summary", {}, icon("sparkle", "sm"), "Let a provider browse (DOM-first agent)"),
+      h("div", { class: "brdrive-body" },
+        h("p", { class: "faint" }, "Reads headings, interactive #ref elements, forms, and page text structurally in your Chrome, cites findings into your Research Notebook, and refuses passwords, CAPTCHAs, and purchases. Stop anytime."),
+        h("div", { class: "brbar" }, driveSel, stepsIn, h("span", { class: "faint" }, "steps")),
+        goalIn, h("div", { class: "row" }, driveBtn, driveStop), driveLog));
+    body.replaceChildren(h("div", { class: "brpanel" }, topMeta, bar, findBox, quickBar, frame, stat, actions, driveSection));
+    clearInterval(autoTimer);
+    autoTimer = setInterval(() => { if (!live()) { clearInterval(autoTimer); return; } if (!busy && !document.hidden) pollState(false); }, 450);
+    (async () => {
+      try {
+        await pollState(true);
+        if (!live()) return;
+        if (!curUrl || curUrl === "about:blank") { urlIn.value = ""; stat.textContent = "Connected to your Chrome. Type a web address above."; }
+        const d = await api("GET", "/api/browser/drive"); if (live()) { renderDrive(d); if (d.active) { driveSection.open = true; startDrivePoll(); } }
+      } catch (e) { if (!lost(e)) stat.textContent = e.message; }
+    })();
+  };
+
+  (async () => {
+    let st = null, pair = null;
+    try {
+      [st, pair] = await Promise.all([api("GET", "/api/browser"), publishBrowserPairing()]);
+    } catch (e) { body.replaceChildren(h("div", { class: "note bad" }, icon("alert"), h("span", {}, e.message))); return; }
+    if (!live()) return;
+    if (!st.available && !st.extension_available) { body.replaceChildren(h("div", { class: "note" }, icon("alert"), h("div", { class: "section" }, h("strong", {}, "Browser link not set up"), h("p", {}, st.note)))); return; }
+    if (!st.connected) { connectCard(st, pair); return; }
+    mirror(st);
+  })();
+}
+
+function _inspBrowserV1Unused(body, pid, gen) {
   const live = () => gen === inspGen && body.isConnected;
   let vw = 1366, vh = 854, busy = false, curUrl = "", driveBtn, autoTimer = null;
 

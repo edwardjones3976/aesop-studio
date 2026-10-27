@@ -1034,6 +1034,33 @@ dialog.pv::backdrop { background: rgba(4, 8, 12, .86); }
 .brconnect > .ico { width: 34px; height: 34px; color: var(--sky); }
 .brconnect h3 { margin: 0; font-size: 16px; }
 .brconnect p { max-width: 420px; margin: 0; }
+.brsteps-setup { text-align: left; max-width: 440px; margin: 4px 0; padding-left: 20px; font-size: 12.5px; color: var(--text-2); display: flex; flex-direction: column; gap: 6px; }
+.brpath { font-size: 11.5px; word-break: break-all; }
+.brfallback { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.brtop { display: flex; align-items: center; gap: 6px; justify-content: space-between; flex-wrap: wrap; min-width: 0; }
+.brmode { flex: none; font-size: 11px; }
+.brtabs { display: flex; align-items: center; gap: 4px; flex: 1 1 auto; min-width: 0; overflow-x: auto; padding-bottom: 2px; }
+.brtab { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--sunken); max-width: 160px; flex: none; }
+.brtab.active { border-color: var(--sky); background: var(--panel); }
+.brtab-btn { border: 0; background: none; color: var(--text-2); font-size: 11.5px; padding: 3px 7px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 132px; }
+.brtab.active .brtab-btn { color: var(--text); font-weight: 600; }
+.brtab-close { border: 0; background: none; color: var(--text-3); font-size: 12px; padding: 2px 5px; cursor: pointer; }
+.brtab-close:hover { color: var(--red); }
+.broverlay { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+.brhotspot { position: absolute; pointer-events: auto; border: 1px solid rgba(93, 188, 255, .45); background: rgba(93, 188, 255, .08); border-radius: 3px; padding: 0; cursor: pointer; display: flex; align-items: flex-start; justify-content: flex-start; transition: background .12s, border-color .12s; }
+.brhotspot:hover, .brhotspot:focus-visible { border-color: var(--sky); background: rgba(93, 188, 255, .24); z-index: 3; }
+.brhotspot.prot { border-color: rgba(255, 145, 108, .65); background: rgba(255, 145, 108, .12); }
+.brref { font-size: 9.5px; line-height: 1; font-weight: 700; padding: 1px 3px; border-radius: 2px; background: rgba(12, 18, 28, .82); color: #9bd7ff; opacity: .75; }
+.brhotspot:hover .brref { opacity: 1; }
+.brreader { padding: 10px; overflow-y: auto; max-height: 460px; background: var(--panel); color: var(--text); display: flex; flex-direction: column; gap: 10px; font-size: 12.5px; }
+.brreader-sec { display: flex; flex-direction: column; gap: 4px; }
+.brreader-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; }
+.brchips { display: flex; flex-wrap: wrap; gap: 4px; max-height: 150px; overflow-y: auto; }
+.brchip { font-size: 11px; padding: 2px 6px; height: auto; }
+.brreader-text { margin: 0; white-space: pre-wrap; font-size: 12px; color: var(--text-2); background: var(--sunken); padding: 8px; border-radius: var(--r-sm); max-height: 220px; overflow-y: auto; }
+.brfind { display: flex; flex-direction: column; gap: 6px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--sunken); }
+.brfind-out { display: flex; flex-direction: column; gap: 4px; max-height: 140px; overflow-y: auto; font-size: 12px; }
+.brstep.ok { background: var(--mint-bg); color: var(--mint); }
 /* plan tab */
 .planv { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .plan-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
