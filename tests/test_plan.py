@@ -143,4 +143,5 @@ class TestNewProjectFolders(TestPlan):
         self.assertEqual(self.svc.folder_suggestions("relative/path")["dirs"], [])
         starters = self.svc.folder_suggestions("")["dirs"]
         self.assertTrue(all(Path(x).is_dir() for x in starters))
-        self.assertIn(str(self.tmp), starters)  # parent of this test's own project is offered first
+        norm = {str(Path(x).resolve()) for x in starters}
+        self.assertIn(str(Path(self.tmp).resolve()), norm)  # parent of this test's own project is offered first

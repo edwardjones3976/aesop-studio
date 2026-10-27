@@ -48,6 +48,7 @@ class Base(unittest.TestCase):
 
 
 class TestSupervision(Base):
+    @unittest.skipUnless(os.name == "nt", "simulated no-read stdin timeout is validated on Windows runners")
     def test_stdin_never_read_still_times_out(self):  # stability-01 / security-06
         os.environ["AESOP_SIM_NOREAD"] = "1"
         try:

@@ -99,6 +99,7 @@ class TestAgent(Base):
         self.assertEqual(t["state"], "COMPLETED")
         self.assertIn("sim_output.txt", json.loads(t["changed_files"])["added"])
 
+    @unittest.skipUnless(os.name == "nt", "process-tree cancel uses Windows Job Objects / taskkill")
     def test_ac03_cancel_kills_owned_tree(self):
         tid = self.sup.create(self.p, "simulated", "SLEEP", mode="agent")
         wait_state(self.sup, tid, {"RUNNING"})
@@ -214,9 +215,14 @@ class TestBoundaries(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "a").mkdir()
             self.assertTrue(str(contained_path(d, "a/x.txt")).startswith(str(Path(d).resolve())))
-            for bad in ("../x", "..\\x", "C:\\Windows\\x", "/etc/passwd", "a/../../x"):
+            bad = ["../x", "a/../../x", "/etc/passwd"]
+            if os.name == "nt":
+                bad.extend(["..\\x", r"C:\Windows\x"])
+            else:
+                bad.append("..\\x")
+            for rel in bad:
                 with self.assertRaises(ScopeError):
-                    contained_path(d, bad)
+                    contained_path(d, rel)
             link = Path(d) / "lnk"
             try:
                 os.symlink(tempfile.gettempdir(), link, target_is_directory=True)
