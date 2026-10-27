@@ -217,7 +217,7 @@ class Handler(BaseHTTPRequestHandler):
 
     @route("POST", r"/api/routes/refresh")
     def routes_refresh(self, sess):
-        self.json(providers.refresh(self.app.store))
+        self.json(providers.overlay_spend(self.app.store, providers.refresh(self.app.store)))
 
     @route("GET", r"/api/perplexity-orchestrator/models")
     def perplexity_models(self, sess):
@@ -231,7 +231,8 @@ class Handler(BaseHTTPRequestHandler):
     def route_verify(self, sess, rid):
         """Owner-triggered: one minimal read-only call to a single CLI route proves sign-in and remaining quota."""
         rec = providers.verify_live(self.app.store, rid)
-        self.json({"verification": rec, "routes": providers.refresh(self.app.store)})
+        self.json({"verification": rec,
+                   "routes": providers.overlay_spend(self.app.store, providers.refresh(self.app.store))})
 
     # ---------- roundtables: drafts, compare, and live broker (gated by owner "Live roundtables" switch) ----------
     @route("GET", r"/api/roundtable/lanes")

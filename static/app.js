@@ -3324,6 +3324,9 @@ async function renderProviders() {
         h("dl", {}, h("dt", {}, "Version"), h("dd", {}, r.version || "—"), h("dt", {}, "Billing"), h("dd", {}, r.billing_basis || "—"),
           h("dt", {}, "Incremental cost"), h("dd", {}, ...linkText(r.incremental_cost_status)), h("dt", {}, "Verified"), h("dd", {}, fmtTime(r.last_verified_at))),
         h("div", { class: "ev" }, h("span", {}, h("b", {}, "Evidence: "), r.evidence || "—"), r.limitations ? h("span", {}, h("b", {}, "Limitations: "), r.limitations) : null),
+        r.model_in_use || r.models_exhausted?.length ? h("p", { class: "muted" },
+          `Using ${r.model_in_use || "no verified model"}; exhausted: ${(r.models_exhausted || []).map((m) =>
+            m.model + (m.reset_text ? ` (${m.reset_text})` : "")).join(", ") || "none"}`) : null,
         r.state === "READY_METERED_DISABLED" ? h("div", { class: "note" }, icon("info"), h("span", {}, "Not selectable until a monthly operating limit is set.")) : null,
         verifyBlock(id, r),
         metered ? h("div", { class: "row" }, btn("Spend controls", goSpend, "sm", "dollar")) : null);

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from .store import Store
@@ -76,6 +77,107 @@ MAX_ARGV_PROMPT = 24_000
 # Live-verified CLI routes: an owner-triggered minimal call is the only proof of usable access + quota.
 LIVE_VERIFY_ROUTES = {"cursor", "antigravity", "copilot", "grok", "zai"}
 VERIFY_MAX_AGE_S = 7 * 24 * 3600
+MODEL_CATALOG_TTL_S = 3600
+MODEL_PREFERENCES = {"antigravity": ["gemini-4-argon-high", "gemini-4-argon-medium",
+                                     "gemini-3.8-flash-high", "gemini-3.8-flash-medium",
+                                     "gemini-3.8-flash-low"]}
+
+
+def _model_state(store: Store, rid: str) -> dict:
+    row = store.one("SELECT v FROM kv WHERE k=?", (f"model-state:{rid}",))
+    state = json.loads(row["v"]) if row else {"model_in_use": None, "models_exhausted": []}
+    state["models_exhausted"] = [e for e in state["models_exhausted"]
+                                 if e.get("expires_at", e["at"] + 86400) > time.time()]
+    return state
+
+
+def _save_model_state(store: Store, rid: str, state: dict) -> None:
+    store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (f"model-state:{rid}", json.dumps(state)))
+
+
+def model_catalog(store: Store, rid: str, *, refresh: bool = False) -> list[str]:
+    """Only CLI-advertised model IDs are eligible; preferences never invent a model."""
+    if rid not in MODEL_PREFERENCES:
+        raise RuntimeError(f"{rid} has no model catalog adapter")
+    row = store.one("SELECT v FROM kv WHERE k=?", (f"models:{rid}",))
+    catalog = json.loads(row["v"]) if row else {}
+    if refresh or time.time() - catalog.get("at", 0) >= MODEL_CATALOG_TTL_S:
+        cmd = _agy_cmd() if rid == "antigravity" else None
+        if not cmd:
+            raise RuntimeError(f"{rid} CLI unavailable")
+        code, out = _contained(cmd + ["models"], 30)
+        # Extract IDs only, never persist the CLI's account details or diagnostic output.
+        models = list(dict.fromkeys(re.findall(r"\b(?:gemini|claude|gpt)-[a-zA-Z0-9]+(?:[.\-][a-zA-Z0-9]+)+\b", out)))
+        if code != 0 or not models:
+            raise RuntimeError(f"{rid} model list unavailable; refresh before retrying")
+        catalog = {"at": time.time(), "models": models}
+        store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                (f"models:{rid}", json.dumps(catalog)))
+    pref = store.one("SELECT v FROM kv WHERE k=?", (f"model-preferences:{rid}",))
+    preferred = json.loads(pref["v"]) if pref else MODEL_PREFERENCES[rid]
+    if not isinstance(preferred, list) or not all(isinstance(m, str) for m in preferred):
+        raise RuntimeError(f"invalid model preferences for {rid}")
+    return list(dict.fromkeys(m for m in preferred + catalog["models"] if m in catalog["models"]))
+
+
+def available_models(store: Store, rid: str, requested: str | None = None) -> list[str]:
+    models = model_catalog(store, rid)
+    if requested and requested not in models:
+        raise RuntimeError(f"requested {rid} model is not in the CLI catalog")
+    exhausted = {e["model"] for e in _model_state(store, rid)["models_exhausted"]}
+    return list(dict.fromkeys(m for m in ([requested] if requested else []) + models if m not in exhausted))
+
+
+def record_model_quota(store: Store, rid: str, model: str, code: int, output: str) -> bool:
+    """Record explicit quota rejection of a pinned model, never a timeout or a successful answer."""
+    if code <= 0 or not re.search(r"\b429\b|RESOURCE_EXHAUSTED|quota reached|resets in", output, re.I):
+        return False
+    now = time.time()
+    reset = re.search(r"resets?\s+in\s+((?:\d+(?:\.\d+)?\s*(?:days?|hours?|minutes?|seconds?|[dhms])\s*[, ]*)+)", output, re.I)
+    reset_text = ""
+    delay = 86400
+    if reset:
+        parts = re.findall(r"(\d+(?:\.\d+)?)\s*(days?|hours?|minutes?|seconds?|[dhms])", reset[1], re.I)
+        delay = sum(float(n) * {"d": 86400, "h": 3600, "m": 60, "s": 1}[u[0].lower()] for n, u in parts)
+        reset_text = "Resets in " + " ".join(n + u.lower() for n, u in parts)
+    else:
+        reset_at = re.search(r"resets?\s+at\s+(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2}))", output, re.I)
+        if reset_at:
+            try:
+                delay = max(0, datetime.fromisoformat(reset_at[1].upper()).timestamp() - now)
+                reset_text = "Resets at " + reset_at[1]
+            except ValueError:
+                pass  # unparseable reset: retry eligibility returns after the bounded 24-hour hold
+    with store.write_lock:
+        state = _model_state(store, rid)
+        state["models_exhausted"] = [e for e in state["models_exhausted"] if e["model"] != model]
+        state["models_exhausted"].append({"model": model, "reset_text": reset_text, "at": now,
+                                          "expires_at": now + delay})
+        if state["model_in_use"] == model:
+            state["model_in_use"] = None
+        _save_model_state(store, rid, state)
+    return True
+
+
+def record_model_success(store: Store, rid: str, model: str) -> None:
+    with store.write_lock:
+        state = _model_state(store, rid)
+        state["model_in_use"] = model
+        state["models_exhausted"] = [e for e in state["models_exhausted"] if e["model"] != model]
+        _save_model_state(store, rid, state)
+
+
+def _overlay_models(store: Store, routes: dict) -> dict:
+    for rid in MODEL_PREFERENCES:
+        if rid in routes:
+            state = _model_state(store, rid)
+            routes[rid].update(state)
+            ver = _live_verification(store, rid) or {}
+            if routes[rid]["state"] == "UNAVAILABLE" and "models_exhausted" in ver:
+                if ver.get("state") == "UNVERIFIED" or len(state["models_exhausted"]) < len(ver["models_exhausted"]):
+                    routes[rid]["state"] = "UNVERIFIED"
+    return routes
 
 
 def _live_verification(store, rid: str) -> dict | None:
@@ -110,7 +212,7 @@ def due_reverify(store, now: float | None = None) -> list[str]:
 
 
 def verify_live(store, rid: str) -> dict:
-    """Owner-triggered: one minimal read-only chat call proves sign-in + remaining quota for a CLI lane."""
+    """Owner-triggered minimal chat; explicit model quota rejections can try the next listed model."""
     import tempfile
     from .security import redact
     if rid not in LIVE_VERIFY_ROUTES:
@@ -119,16 +221,33 @@ def verify_live(store, rid: str) -> dict:
     import shutil
     cwd = tempfile.mkdtemp(prefix="aesop-verify-")
     t0 = time.time()
+    models, complete = [], False
     try:
-        argv = build_argv(rid, "chat", cwd, str(Path(cwd) / "last.txt"), None, prompt=prompt)
-        code, out = _contained(argv, 180, cwd=cwd, input_text=None if rid in ARGV_PROMPT_ROUTES else prompt)
-        ok = VERIFY_TOKEN in out
-        detail = "reply matched" if ok else redact(out.strip().splitlines()[-1] if out.strip() else f"exit {code}")
+        models = available_models(store, rid) if rid in MODEL_PREFERENCES else [None]
+        ok, detail = False, "all catalog models have recorded quota exhaustion"
+        for model in models:
+            remaining = 180 - (time.time() - t0)
+            if remaining <= 0:
+                detail = "verification deadline reached; remaining models unverified"
+                break
+            argv = build_argv(rid, "chat", cwd, str(Path(cwd) / "last.txt"), model, prompt=prompt)
+            code, out = _contained(argv, remaining, cwd=cwd, input_text=None if rid in ARGV_PROMPT_ROUTES else prompt)
+            ok = code == 0 and VERIFY_TOKEN in out
+            detail = "reply matched" if ok else redact(out.strip().splitlines()[-1] if out.strip() else f"exit {code}")
+            if model and ok:
+                record_model_success(store, rid, model)
+            if ok or not model or not record_model_quota(store, rid, model, code, out):
+                break
+        else:
+            complete = True
     except (OSError, RuntimeError) as e:
         ok, detail = False, f"{type(e).__name__}: {str(e)[:160]}"
     finally:
         shutil.rmtree(cwd, ignore_errors=True)
     rec = {"at": time.time(), "ok": ok, "detail": detail[:200], "latency_s": round(time.time() - t0, 1)}
+    if rid in MODEL_PREFERENCES:
+        rec.update(_model_state(store, rid))
+        rec["state"] = "READY_INCLUDED" if ok else "UNAVAILABLE" if complete else "UNVERIFIED"
     store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
             (f"verify:{rid}", json.dumps(rec)))
     store.event("route_live_verification", None, route=rid, ok=ok, latency_s=rec["latency_s"])
@@ -365,7 +484,7 @@ def probe(store=None) -> dict[str, dict]:
 
 
 def refresh(store: Store) -> dict[str, dict]:
-    routes = _named(probe(store))
+    routes = _overlay_models(store, _named(probe(store)))
     store.x("INSERT INTO kv(k,v) VALUES('routes',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (json.dumps(routes),))
     store.event("routes_probed", None, states={k: v["state"] for k, v in routes.items()})
     return routes
@@ -402,7 +521,12 @@ def _named(routes: dict) -> dict:
 
 def cached(store: Store) -> dict[str, dict]:
     row = store.one("SELECT v FROM kv WHERE k='routes'")
-    routes = _named(json.loads(row["v"]) if row else refresh(store))
+    routes = _overlay_models(store, _named(json.loads(row["v"]) if row else refresh(store)))
+    return overlay_spend(store, routes)
+
+
+def overlay_spend(store: Store, routes: dict[str, dict]) -> dict[str, dict]:
+    routes = {rid: dict(route) for rid, route in routes.items()}
     for rid in ("openai-api", "perplexity", "perplexity-orchestrator"):
         api = routes.get(rid)
         if api and api["state"] == "READY_METERED_DISABLED":
