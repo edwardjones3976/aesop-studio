@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Project briefing
+    url: https://github.com/edwardjones3976/aesop-studio/blob/main/docs/PROJECT-BRIEFING-20261026.md
+    about: Architecture, process, and open items
