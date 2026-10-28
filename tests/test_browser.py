@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ["AESOP_SIMULATED_ROUTE"] = "1"
 os.environ["AESOP_PROBE_OFFLINE"] = "1"
@@ -83,6 +84,26 @@ class TestDrive(unittest.TestCase):
         st = self.d.status()
         self.assertFalse(st["active"])
         self.assertIn("vision_routes", st)
+
+
+class TestBrowserVenv(unittest.TestCase):
+    def test_venv_python_from_worktree_gitlink(self):
+        from aesop_studio import browser
+
+        with tempfile.TemporaryDirectory(prefix="aesop-wt-") as td:
+            td = Path(td)
+            main = td / "main"
+            wt = td / "wt"
+            main.mkdir()
+            wt.mkdir()
+            py = main / ".venv" / "Scripts" / "python.exe"
+            py.parent.mkdir(parents=True)
+            py.write_text("", encoding="utf-8")
+            gd = main / ".git" / "worktrees" / "wt"
+            gd.mkdir(parents=True)
+            (wt / ".git").write_text(f"gitdir: {gd.as_posix()}\n", encoding="utf-8")
+            with mock.patch.object(browser, "REPO", wt):
+                self.assertEqual(browser.venv_python(), py)
 
 
 class mock_vision:  # noqa: N801 - tiny context manager
