@@ -15,7 +15,7 @@ os.environ["AESOP_PROBE_OFFLINE"] = "1"
 from aesop_studio import providers  # noqa: E402
 from aesop_studio.services import Services  # noqa: E402
 from aesop_studio.store import Store, new_id  # noqa: E402
-from aesop_studio.tasks import Supervisor  # noqa: E402
+from aesop_studio.tasks import Supervisor, _argv_meta_args  # noqa: E402
 
 
 class TestStoreMigrationIdempotent(unittest.TestCase):
@@ -122,6 +122,28 @@ class TestArgvMetaMasking(unittest.TestCase):
         self.assertNotIn(secret_dir, joined)
         self.assertNotIn(secret_file, joined)
         self.assertIn("-p=<prompt>", meta["args"])
+
+    def test_argv_meta_masks_zcode_and_gemini_values(self):
+        chat = str(self.tmp / "chat")
+        Path(chat).mkdir()
+        zctx = "zcode-secret-context"
+        gdir = str(self.tmp / "ref-only")
+        Path(gdir).mkdir()
+        zargs = _argv_meta_args(["zcode.cjs", "-p", zctx], chat)
+        self.assertEqual(zargs, ["-p", "<prompt>"])
+        self.assertNotIn(zctx, " ".join(zargs))
+        gargv = [
+            "gemini.js",
+            "--include-directories",
+            gdir,
+            "-p",
+            "Respond to the latest user message in the input above.",
+        ]
+        gargs = _argv_meta_args(gargv, chat)
+        self.assertIn("<path>", gargs)
+        self.assertNotIn(gdir, " ".join(gargs))
+        long_prompt = "x" * 201
+        self.assertIn("<prompt>", _argv_meta_args(["grok", "-p", long_prompt], chat))
 
 
 if __name__ == "__main__":

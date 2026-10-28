@@ -36,6 +36,9 @@ class TestImages(unittest.TestCase):
         providers.refresh(self.store)
         self.p = self.svc.create_project("P", str(self.tmp / "p"), "simulated")
         self.svc.update_project(self.p["id"], {"transfer_policy": {"simulated": True}})
+        self.store.x(
+            "INSERT INTO kv(k,v) VALUES(?, 'on')", (f"agent_ack:{self.p['id']}",)
+        )
         self.c = self.svc.new_conversation(self.p["id"])
 
     def tearDown(self):
@@ -74,7 +77,26 @@ class TestImages(unittest.TestCase):
         self.assertIn(
             "photos=1", self.sup.output(t["id"])[0]
         )  # staged into the task's own folder
-        self.assertFalse(Path(t["cwd"]).exists())  # and removed with it
+        self.assertFalse(Path(t["cwd"]).exists())  # chat sandbox removed after run
+
+    def test_work_photo_staging_does_not_clobber_project_images(self):
+        decoy_dir = self.tmp / "p" / "images"
+        decoy_dir.mkdir()
+        decoy = decoy_dir / "photo1.png"
+        decoy.write_bytes(PNG + b"owner-decoy")
+        a = self.svc.attach(self.p["id"], "screen.png", PNG)
+        r = self.svc.send(
+            self.p["id"], self.c["id"], "describe", [a["id"]], None, work=True
+        )
+        end = time.time() + 30
+        while self.sup.get(r["task_id"])["state"] not in TERMINAL and time.time() < end:
+            time.sleep(0.05)
+        t = self.sup.get(r["task_id"])
+        self.assertEqual(t["state"], "COMPLETED", t.get("error"))
+        self.assertEqual(decoy.read_bytes(), PNG + b"owner-decoy")
+        staged = Path(t["cwd"]) / ".aesop" / "photos" / t["id"] / "photo1.png"
+        self.assertTrue(staged.is_file())
+        self.assertEqual(staged.read_bytes(), PNG)
 
     def test_deleting_conversation_removes_its_photos(self):
         from aesop_studio import deletion

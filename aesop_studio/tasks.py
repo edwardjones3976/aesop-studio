@@ -77,20 +77,61 @@ READ_TOOL_IMAGE_ROUTES = {
 }
 
 
-def _stage_images(cwd: str, images: list[str]) -> list[str]:
-    """Copy the message's photos into the task's own folder; returns paths relative to it."""
-    import shutil
+def _stage_images(cwd: str, images: list[str], tid: str) -> list[str]:
+    """Copy photos into .aesop/photos/<task id>/ (exclusive create); paths are relative to cwd."""
     from .security import image_kind
 
-    dest = Path(cwd) / "images"
-    dest.mkdir(exist_ok=True)
+    dest = Path(cwd) / ".aesop" / "photos" / tid
+    dest.mkdir(parents=True, exist_ok=True)
+    rel_prefix = f".aesop/photos/{tid}"
     out = []
     for i, src in enumerate(images, 1):
         data = Path(src).read_bytes()
         kind = image_kind(data) or "png"
         name = f"photo{i}.{'jpg' if kind == 'jpeg' else kind}"
-        shutil.copyfile(src, dest / name)
-        out.append(f"images/{name}")
+        path = dest / name
+        with open(path, "xb") as f:
+            f.write(data)
+        out.append(f"{rel_prefix}/{name}")
+    return out
+
+
+_ARGV_META_MASK_AFTER = {
+    "--add-dir": "<path>",
+    "--attachment": "<path>",
+    "--include-directories": "<path>",
+    "--packet": "<path>",
+    "-p": "<prompt>",
+}
+
+
+def _argv_meta_args(argv: list[str], cwd: str) -> list[str]:
+    out: list[str] = []
+    i = 1
+    while i < len(argv) and len(out) < 20:
+        a = argv[i]
+        if a.startswith(cwd):
+            i += 1
+            continue
+        if a.startswith("-p="):
+            out.append("-p=<prompt>")
+            i += 1
+            continue
+        mask = _ARGV_META_MASK_AFTER.get(a)
+        if mask is not None and i + 1 < len(argv):
+            out.extend([a, mask])
+            i += 2
+            continue
+        if len(a) > 200:
+            out.append(
+                "<path>"
+                if ("/" in a or "\\" in a or a.startswith((".", "~")))
+                else "<prompt>"
+            )
+            i += 1
+            continue
+        out.append(a)
+        i += 1
     return out
 
 
@@ -911,7 +952,7 @@ class Supervisor:
         proc = job = timer = None
         try:
             try:
-                rel = _stage_images(cwd, images) if images else []
+                rel = _stage_images(cwd, images, tid) if images else []
                 if rel and route_id in READ_TOOL_IMAGE_ROUTES:
                     prompt += (
                         "\n\n[Attached photos are in your working folder: "
@@ -934,20 +975,9 @@ class Supervisor:
                 if mode == "chat":
                     _remove_chat_dir(cwd)
                 return self._end(tid, "FAILED", lid, 0, error=str(e))
-            hide = {
-                a for f, a in zip(argv, argv[1:]) if f in ("--add-dir", "--attachment")
-            }  # owner folders stay private
             meta = {
-                "executable": Path(
-                    argv[0]
-                ).name,  # never record the prompt (argv-prompt routes) or the cwd
-                "args": [
-                    "-p=<prompt>"
-                    if a.startswith("-p=")
-                    else ("<path>" if a in hide else a)
-                    for a in argv[1:]
-                    if not a.startswith(cwd)
-                ][:20],
+                "executable": Path(argv[0]).name,
+                "args": _argv_meta_args(argv, cwd),
             }
             self._set(tid, "STARTING", argv_meta=json.dumps(meta), started=time.time())
             env = {

@@ -2947,10 +2947,14 @@ function showTask(tid, el, openTask, rv) {
 // ---------- build + review (two AIs working together; the owner decides every next step) ----------
 const RV_LABEL = { approve: ["Approved", "ok"], changes: ["Changes requested", "warn"], unclear: ["Review not structured", "info"] };
 function reviewPanel(tid, box, openTask, rv) {
-  let timer = null; let sig = "";
+  let timer = null; let sig = ""; let detachWaits = 0;
   const stop = () => { clearTimeout(timer); timer = null; };
   const tick = async () => {
-    if (!box.isConnected) return stop();
+    if (!box.isConnected) {
+      if (detachWaits++ < 120) { timer = setTimeout(tick, 0); return; }
+      return stop();
+    }
+    detachWaits = 0;
     let r; try { r = await api("GET", `/api/tasks/${tid}/review`); } catch { timer = setTimeout(tick, 5000); return; }
     let t = null; try { t = (await api("GET", `/api/tasks/${tid}`)).task; } catch { /* shown without task state */ }
     const s2 = JSON.stringify([r, t && t.state]);
