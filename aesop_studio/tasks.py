@@ -23,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import ledger, openai_api, perplexity_api, providers, winjob
+from . import ledger, openai_api, perplexity_api, providers, winjob, xai_api
 from .security import redact
 from .store import Store, new_id
 
@@ -38,7 +38,7 @@ NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subproc
 CHAT_DIR_PREFIX = "aesop-chat-"
 OPEN_REPAIR_STATES = ("OPEN_FOREMAN", "EXPORTED_FOR_FOREMAN")
 # Read-only chat turns on these plan-quota routes are retried once on a transient provider/network error.
-SEPARATE_STDERR_ROUTES = {"zai", "claude"}
+SEPARATE_STDERR_ROUTES = {"zai", "claude", "gemini"}  # banners/diagnostics on stderr
 
 
 def _err_tail(out_path: str, n: int = 300) -> str:
@@ -55,7 +55,8 @@ def _err_tail(out_path: str, n: int = 300) -> str:
 
 
 IMAGE_TOKEN_BOUND = 2_000
-READ_TOOL_IMAGE_ROUTES = {"claude"}  # Claude Code opens staged photos with its Read tool
+# Routes with no photo flag open the staged files with their own file-reading tool (Read, read_file, view_file).
+READ_TOOL_IMAGE_ROUTES = {"claude", "zai", "cursor", "antigravity", "grok"}
 
 
 def _stage_images(cwd: str, images: list[str]) -> list[str]:
@@ -84,7 +85,7 @@ def _data_urls(images: list[str]) -> list[str]:
     return out
 
 
-RETRY_ROUTES = {"zai", "grok", "cursor", "antigravity", "claude", "codex"}
+RETRY_ROUTES = {"zai", "grok", "cursor", "antigravity", "claude", "codex", "gemini", "zcode"}
 TRANSIENT_MARKERS = ("429", "rate limit", "rate_limit", "overloaded", "503", "502", "504", "econnreset",
                      "etimedout", "socket hang up", "fetch failed", "network error", "temporarily unavailable",
                      "service unavailable", "bad gateway", "connection reset", "try again")
@@ -312,7 +313,7 @@ class Supervisor:
     # ---- lifecycle ----
     def create(self, project: dict, route_id: str, prompt: str, mode: str = "agent",
                timeout: int = DEFAULT_TIMEOUT, images: list[str] | None = None, research: dict | None = None,
-               study: dict | None = None) -> str:
+               study: dict | None = None, extra_dirs: list[str] | None = None) -> str:
         """mode: "agent" (writes in the project root), "chat" (temp sandbox), or "study" (read-only reference study in
         Studio's own studies/ folder with the R.E.A. MCP server attached; never counts as the project's writer)."""
         routes = providers.cached(self.store)
@@ -367,14 +368,14 @@ class Supervisor:
                 cwd, before, truncated = tempfile.mkdtemp(prefix=CHAT_DIR_PREFIX), {}, False
             cp = {"mode": mode, "timeout": timeout, "ledger_id": lid, "before_count": len(before),
                   "snapshot_truncated": truncated, **({"images": images} if images else {}),
-                  **({"study": study} if study else {})}
+                  **({"study": study} if study else {}), **({"extra_dirs": extra_dirs} if extra_dirs else {})}
             self._set(tid, "RESERVED", checkpoint=json.dumps(cp), cwd=cwd)
         except Exception as e:  # noqa: BLE001 - nothing was dispatched: release the reservation
             self._end(tid, "FAILED", lid, 0, error=f"could not prepare the task: {type(e).__name__}: {str(e)[:200]}")
             return tid
         pinned = providers.active_model(self.store, route_id) if route_id in providers.BALANCED else project.get("model")
         threading.Thread(target=self._run, args=(tid, route_id, mode, cwd, prompt, out_path, timeout, lid,
-                                                 pinned, images, study), daemon=True).start()
+                                                 pinned, images, study, extra_dirs), daemon=True).start()
         return tid
 
     # ---- research API routes (Firecrawl, Perplexity): one bounded HTTPS call, no subprocess ----
@@ -424,8 +425,9 @@ class Supervisor:
 
     # ---- metered API route (no subprocess; streamed, reserved, settled from real usage) ----
     def _start_api(self, tid, project, route_id, route, prompt, out_path, timeout, images=None) -> str:
-        api = perplexity_api if route_id == "perplexity-orchestrator" else openai_api
-        model = project.get("model") if api is perplexity_api else openai_api.DEFAULT_MODEL
+        api = (perplexity_api if route_id == "perplexity-orchestrator" else xai_api if route_id == "xai-api"
+               else openai_api)
+        model = project.get("model") if api is perplexity_api else api.DEFAULT_MODEL
         max_out = api.DEFAULT_MAX_OUTPUT
         rates = None
         try:  # each high-detail image is bounded at IMAGE_TOKEN_BOUND input tokens in the reservation
@@ -504,7 +506,8 @@ class Supervisor:
             self._end(tid, "EFFECT_UNKNOWN", lid, None, error=f"bookkeeping failed: {type(e).__name__}")
 
     # ---- CLI routes ----
-    def _run(self, tid, route_id, mode, cwd, prompt, out_path, timeout, lid, model, images=None, study=None):
+    def _run(self, tid, route_id, mode, cwd, prompt, out_path, timeout, lid, model, images=None, study=None,
+             extra_dirs=None):
         last_file = out_path + ".last.txt"
         proc = job = timer = None
         try:
@@ -512,16 +515,21 @@ class Supervisor:
                 rel = _stage_images(cwd, images) if images else []
                 if rel and route_id in READ_TOOL_IMAGE_ROUTES:
                     prompt += ("\n\n[Attached photos are in your working folder: " + ", ".join(rel)
-                               + ". Open each one with the Read tool before you answer.]")
-                argv = providers.build_argv(route_id, mode, cwd, last_file, model, prompt=prompt, images=rel, study=study)
+                               + ". Open each one with your file-reading tool (Read / read_file / view_file) before "
+                               "you answer. If your tool cannot show images, say so instead of guessing.]")
+                argv = providers.build_argv(route_id, mode, cwd, last_file, model, prompt=prompt, images=rel, study=study,
+                                            extra_dirs=extra_dirs)
             except RuntimeError as e:
                 if mode == "chat":
                     _remove_chat_dir(cwd)
                 return self._end(tid, "FAILED", lid, 0, error=str(e))
+            hide = {a for f, a in zip(argv, argv[1:]) if f in ("--add-dir", "--attachment")}  # owner folders stay private
             meta = {"executable": Path(argv[0]).name,  # never record the prompt (argv-prompt routes) or the cwd
-                    "args": ["-p=<prompt>" if a.startswith("-p=") else a for a in argv[1:] if not a.startswith(cwd)][:20]}
+                    "args": ["-p=<prompt>" if a.startswith("-p=") else ("<path>" if a in hide else a)
+                             for a in argv[1:] if not a.startswith(cwd)][:20]}
             self._set(tid, "STARTING", argv_meta=json.dumps(meta), started=time.time())
             env = {k: v for k, v in os.environ.items() if k.upper() not in providers.BILLING_ENV}
+            env.update(providers.route_env(route_id))
             try:
                 # Claude Code-based routes write banners/diagnostics to stderr: keep them out of the answer.
                 errf = open(out_path + ".err", "wb") if route_id in SEPARATE_STDERR_ROUTES else None

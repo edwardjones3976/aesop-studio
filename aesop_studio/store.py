@@ -14,6 +14,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects(
   id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL, provider_default TEXT,
   model TEXT, transfer_policy TEXT NOT NULL DEFAULT '{}', retention_days INTEGER NOT NULL DEFAULT 90,
+  reference_dirs TEXT NOT NULL DEFAULT '[]',
   created REAL NOT NULL, updated REAL NOT NULL, archived INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS conversations(
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL, created REAL NOT NULL);
@@ -74,6 +75,9 @@ class Store:
             if "purpose" not in cols:  # migrate stores created before the runtime envelope existed
                 c.execute("ALTER TABLE ledger ADD COLUMN purpose TEXT NOT NULL DEFAULT 'mission'")
                 c.execute("UPDATE ledger SET purpose='included' WHERE billing_basis='subscription_included'")
+            pcols = {r[1] for r in c.execute("PRAGMA table_info(projects)")}
+            if "reference_dirs" not in pcols:  # read-only folders agents may open besides the project root
+                c.execute("ALTER TABLE projects ADD COLUMN reference_dirs TEXT NOT NULL DEFAULT '[]'")
 
     def _connect(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=30, isolation_level=None, check_same_thread=False)

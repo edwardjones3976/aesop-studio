@@ -1548,6 +1548,8 @@ async function projectSettings() {
     fields.push({ name: "model", label: "Model", value: p.model || "", help: "Orchestrator still needs a model from its catalog. Every other provider uses one fixed Studio setting." });
   }
   fields.push({ name: "retention_days", label: "Conversation retention (days)", type: "number", value: String(p.retention_days) });
+  fields.push({ name: "reference_dirs", label: "Reference folders (one absolute path per line)", type: "textarea", value: (p.reference_dirs || []).join("\n"),
+    help: "Work tasks may read these folders besides the project folder (passed to each CLI as --add-dir). Writes still stay in the project folder. Home, Windows and credential folders are refused." });
   const pending = dialog("Project settings", [
     ...fields,
     ...Object.keys(S.routes).filter((k) => USABLE.includes(S.routes[k].state)).map((k) => ({ name: "tp_" + k, label: `Allow sending attached project files to ${routeName(k)}?`, type: "select", value: pol[k] ? "yes" : "no", options: [{ value: "no", label: "No" }, { value: "yes", label: "Yes" }] })),
@@ -1581,7 +1583,7 @@ async function projectSettings() {
   if (!v) return;
   const tp = {}; for (const [k, val] of Object.entries(v)) if (k.startsWith("tp_")) tp[k.slice(3)] = val === "yes";
   await guard(async () => {
-    const updated = await api("PATCH", `/api/projects/${p.id}`, { name: v.name, model: v.model, retention_days: v.retention_days, transfer_policy: tp });
+    const updated = await api("PATCH", `/api/projects/${p.id}`, { name: v.name, model: v.model, retention_days: v.retention_days, transfer_policy: tp, reference_dirs: v.reference_dirs || "" });
     if (S.project && S.project.id === p.id && !S.global) { S.project = updated; renderHeader(); }
     loadProjects(); banner("Settings saved.", "ok");
   });
@@ -1708,8 +1710,7 @@ function setItab(t) {
 let inspGen = 0;
 async function renderInspector() {
   const body = $("inspBody"); const gen = ++inspGen; delete W.hooks.insp;
-  if (!inspectorVisible()) { const dock = $("inspPlanDock"); if (dock) { dock.hidden = true; dock.replaceChildren(); } return; }
-  renderPlanDock();
+  if (!inspectorVisible()) return;
   if (!S.project) { body.replaceChildren(empty("panel", "No project open", "Open a project to see its saved items, folder editor, task changes, terminal output and plan here.")); return; }
   const pid = S.project.id;
   try {
@@ -1887,57 +1888,6 @@ function refresh2Chat() { if (S.tab === "chat" && !S.global) runRender("chat", (
 function composeIntoChat(text, work) {
   S.pendingCompose = { text: text || "", work: !!work };
   setTab("chat");
-}
-let planDockGen = 0;
-function renderPlanDock() {
-  const el = $("inspPlanDock");
-  if (!el) return;
-  if (!S.project) { el.hidden = true; el.replaceChildren(); return; }
-  el.hidden = false;
-  const pid = S.project.id; const name = S.project.name; const gen = ++planDockGen;
-  const live = () => gen === planDockGen && el.isConnected && S.project && S.project.id === pid;
-  const typing = () => el.contains(document.activeElement) && (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "TEXTAREA");
-  let sig = "";
-  const draw = (d) => {
-    const items = d.items || [];
-    const done = items.filter((i) => i.status === "done").length;
-    const focusIn = h("input", { class: "plan-focus", maxlength: "280", "aria-label": "Focus for this project only",
-      placeholder: "What is this project for? (stays on this project)", value: d.focus || "" });
-    focusIn.addEventListener("change", () => guard(async () => {
-      await api("POST", `/api/projects/${pid}/plan/focus`, { focus: focusIn.value });
-      banner("Focus saved for this project.", "ok");
-    }));
-    const addIn = h("input", { type: "text", class: "grow", maxlength: "400", placeholder: "Add a step for this project…", "aria-label": "New plan step" });
-    addIn.addEventListener("keydown", (e) => { if (e.key === "Enter" && addIn.value.trim()) { e.preventDefault(); const v = addIn.value; addIn.value = ""; guard(async () => { await api("POST", `/api/projects/${pid}/plan`, { content: v }); sig = ""; load(); }); } });
-    const row = (it) => {
-      const cb = h("input", { type: "checkbox", "aria-label": `Done: ${it.content}` });
-      cb.checked = it.status === "done";
-      cb.addEventListener("change", () => guard(async () => { await api("PATCH", `/api/projects/${pid}/plan/${it.id}`, { status: cb.checked ? "done" : "todo" }); sig = ""; load(); }));
-      return h("li", { class: `pitem s-${it.status}` }, cb, h("span", { class: "ptext" }, it.content));
-    };
-    el.replaceChildren(h("div", { class: "planv" },
-      h("div", { class: "plan-head" },
-        h("div", { class: "ttl" }, icon("check"), h("h3", {}, "Plan · " + (d.project_name || name)), items.length ? h("span", { class: "faint" }, `${done}/${items.length}`) : null),
-        h("button", { type: "button", class: "linkish", onclick: () => setTab("plan") }, "Open Plan")),
-      h("p", { class: "faint" }, "This checklist belongs to this project only."),
-      focusIn, addIn,
-      items.length ? h("ol", { class: "plist" }, ...items.slice(0, 12).map(row),
-        items.length > 12 ? h("li", { class: "faint" }, `${items.length - 12} more in Full plan`) : null)
-        : h("p", { class: "muted" }, "No steps yet for this project.")));
-  };
-  const load = async () => {
-    if (!live() || typing()) return;
-    let d;
-    try { d = await api("GET", `/api/projects/${pid}/plan`); } catch (e) {
-      if (live() && !sig) el.replaceChildren(h("div", { class: "note bad" }, icon("alert"), h("span", {}, e.message)));
-      return;
-    }
-    if (!live() || typing()) return;
-    const s2 = JSON.stringify({ id: d.project_id, focus: d.focus, items: d.items });
-    if (s2 === sig) return;
-    sig = s2; draw(d);
-  };
-  load();
 }
 async function inspEditor(body, pid, gen, alive) {
   const live = alive || (() => gen === inspGen);
@@ -2295,8 +2245,8 @@ function attachPredict(ta, pid) {
 // 1568 px and about 1.15 MP. OpenAI (Codex, Codex API, detail "high"): fits 2048 x 2048 with the short side at
 // 768 px. Very tall or wide images (long screenshots, receipts) are split into overlapping parts, each sized the
 // same way, so their text stays readable instead of shrinking to a sliver.
-const PHOTO_ROUTES = ["codex", "claude", "openai-api", "simulated"]; // verified live to see an image
-const PHOTO_TARGETS = { claude: { edge: 1568, mp: 1.15e6 }, codex: { edge: 2048, short: 768 }, "openai-api": { edge: 2048, short: 768 } };
+const PHOTO_ROUTES = ["codex", "claude", "openai-api", "xai-api", "copilot", "cursor", "antigravity", "grok", "zai", "simulated"]; // Codex, Copilot and the API route take photos directly; the other CLIs open staged copies with their file tool
+const PHOTO_TARGETS = { claude: { edge: 1568, mp: 1.15e6 }, codex: { edge: 2048, short: 768 }, "openai-api": { edge: 2048, short: 768 }, "xai-api": { edge: 2048, short: 768 } };
 const PHOTO_DEFAULT = { edge: 2048 };
 const photoTarget = (route) => PHOTO_TARGETS[route] || PHOTO_DEFAULT;
 const PHOTO_MAX = 6, PHOTO_PARTS_MAX = 12, PHOTO_FILE_MAX = 5 * 1024 * 1024;
@@ -3520,7 +3470,7 @@ async function renderProviders() {
     btn("Re-verify", () => guard(async () => { banner("Re-verifying via each official CLI…"); S.routes = await api("POST", "/api/routes/refresh"); renderProviders(); if (S.project) renderHeader(); banner("Routes re-verified.", "ok"); }), "primary", "refresh")),
     h("div", { class: "note info" }, icon("shield"), h("span", {}, "States come from each official CLI's own status command. Studio never reads credential files. Handoff routes are not counted as in-app integrations.")),
     entries.length ? h("div", { class: "grid3" }, ...entries.map(([id, r]) => {
-      const metered = isMetered(r) || id === "openai-api"; const name = routeName(id);
+      const metered = isMetered(r) || id === "openai-api" || id === "xai-api"; const name = routeName(id);
       return h("article", { class: "card route", "aria-label": name },
         h("div", { class: "rhead" }, h("span", { class: "rico av" + hashIdx(id, 8), "aria-hidden": "true" }, initials(name)),
           h("div", { class: "rname" }, h("h3", {}, name), r.family && r.family !== name ? h("p", {}, r.family) : null), statePill(r.state)),

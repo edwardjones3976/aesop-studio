@@ -86,9 +86,14 @@ class TestImages(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.svc.build_context(self.p["id"], self.c["id"], "x", ids, "simulated")
         self.svc.build_context(self.p["id"], self.c["id"], "x", ids[:MAX_IMAGES_PER_MESSAGE], "simulated")
-        with self.assertRaises(ValueError) as e:
-            self.svc.build_context(self.p["id"], self.c["id"], "x", ids[:1], "grok")
-        self.assertIn("can't see photos", str(e.exception))
+        with self.assertRaises(ValueError) as e:  # research routes answer from the web: no files, no photos
+            self.svc.build_context(self.p["id"], self.c["id"], "x", ids[:1], "perplexity")
+        self.assertIn("not files or photos", str(e.exception))
+        self.svc.update_project(self.p["id"], {"transfer_policy": {"simulated": True, "grok": True, "copilot": True,
+                                                                   "cursor": True, "antigravity": True, "zai": True}})
+        for rid in ("grok", "copilot", "cursor", "antigravity", "zai"):  # every in-app CLI route now takes photos
+            ctx = self.svc.build_context(self.p["id"], self.c["id"], "x", ids[:1], rid)
+            self.assertIn("1 photo attached", ctx)
         self.svc.update_project(self.p["id"], {"transfer_policy": {"simulated": False}})
         with self.assertRaises(PermissionError):
             self.svc.build_context(self.p["id"], self.c["id"], "x", ids[:1], "simulated")
@@ -105,6 +110,57 @@ class TestImages(unittest.TestCase):
             self.assertEqual(plain[plain.index("--tools") + 1], "")
             withimg = providers.build_argv("claude", "chat", "C:/t", "C:/t/o.txt", images=["images/photo1.png"])
             self.assertEqual(withimg[withimg.index("--tools") + 1], "Read")
+
+    def test_argv_hands_photos_to_every_cli_route(self):
+        from unittest.mock import patch
+        with patch.object(providers, "_copilot_cmd", return_value=["copilot"]):
+            a = providers.build_argv("copilot", "chat", "C:/t", "C:/t/o.txt", images=["images/photo1.png"])
+            self.assertTrue(a[a.index("--attachment") + 1].endswith("photo1.png"))
+            self.assertNotIn("--attachment", providers.build_argv("copilot", "chat", "C:/t", "C:/t/o.txt"))
+        with patch.object(providers, "_grok_cmd", return_value=["grok"]):
+            a = providers.build_argv("grok", "chat", "C:/t", "C:/t/o.txt", prompt="p", images=["images/photo1.png"])
+            self.assertEqual(a[a.index("--tools") + 1], "read_file")  # photos need the file reader, nothing else
+            plain = providers.build_argv("grok", "chat", "C:/t", "C:/t/o.txt", prompt="p")
+            self.assertEqual(plain[plain.index("--tools") + 1], "")
+        from aesop_studio.tasks import READ_TOOL_IMAGE_ROUTES
+        for rid in ("claude", "zai", "cursor", "antigravity", "grok"):  # staged copies + a prompt line to open them
+            self.assertIn(rid, READ_TOOL_IMAGE_ROUTES)
+
+    def test_reference_dirs_reach_every_cli_as_add_dir(self):
+        from unittest.mock import patch
+        ref = str(self.tmp / "p")
+        cases = (("codex", "agent", "_codex_cmd"), ("claude", "agent", "_claude_cmd"), ("zai", "agent", "_zai_cmd"),
+                 ("cursor", "agent", "_cursor_cmd"), ("cursor", "chat", "_cursor_cmd"),
+                 ("copilot", "chat", "_copilot_cmd"), ("antigravity", "chat", "_agy_cmd"))
+        for rid, mode, fn in cases:
+            with self.subTest(route=rid), patch.object(providers, fn, return_value=[rid]):
+                a = providers.build_argv(rid, mode, "C:/t", "C:/t/o.txt", prompt="p", extra_dirs=[ref])
+                self.assertEqual(a[a.index("--add-dir") + 1], ref)
+                if rid == "antigravity":  # the argv prompt stays last so --add-dir can never swallow it
+                    self.assertTrue(a[-1].startswith("-p="))
+                if rid == "codex":
+                    self.assertEqual(a[-1], "-")
+                self.assertNotIn("--add-dir", providers.build_argv(rid, mode, "C:/t", "C:/t/o.txt", prompt="p"))
+        with patch.object(providers, "_grok_cmd", return_value=["grok"]):  # grok.exe rejects additional directories
+            a = providers.build_argv("grok", "agent", "C:/t", "C:/t/o.txt", prompt="p", extra_dirs=[ref])
+            self.assertNotIn("--add-dir", a)
+
+    def test_reference_dirs_validated_and_in_work_preview_only(self):
+        ref = self.tmp / "ref"
+        ref.mkdir()
+        p = self.svc.update_project(self.p["id"], {"reference_dirs": f"{ref}\n\n{ref}\n{self.tmp / 'p'}"})
+        self.assertEqual(p["reference_dirs"], [str(ref.resolve())])  # de-duplicated; the project root is implied
+        for bad in (str(Path.home()), str(Path.home() / ".ssh"), "relative/dir", str(self.tmp / "missing")):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.svc.update_project(self.p["id"], {"reference_dirs": [bad]})
+        self.assertEqual(self.svc.project(self.p["id"])["reference_dirs"], [str(ref.resolve())])  # refusals change nothing
+        note = self.svc.reference_note(self.svc.project(self.p["id"]))
+        self.assertIn(str(ref.resolve()), note)
+        self.assertIn("read-only", note)
+        chat_ctx = self.svc.build_context(self.p["id"], self.c["id"], "x", [], "simulated")
+        self.assertNotIn("Reference folders", chat_ctx)  # chat runs in a sandbox with no file tools: no false promise
+        mem = self.store.q("SELECT content FROM memory WHERE project_id=? AND kind='permission'", (self.p["id"],))
+        self.assertTrue(any("Reference folders" in m["content"] for m in mem))
 
     def test_data_urls_for_metered_route(self):
         f = self.tmp / "x.jpg"

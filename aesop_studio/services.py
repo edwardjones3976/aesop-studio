@@ -19,11 +19,14 @@ from .security import IMAGE_MIMES, image_kind
 
 # Routes verified live to see a photo (2026-10-23). Z.ai's GLM model can't: its Read tool uploads the file but the
 # model never receives the image, so it is left out and the composer offers a switch instead.
-IMAGE_ROUTES = ("codex", "claude", "openai-api", "simulated")
+# Every in-app route takes photos: Codex (-i), Copilot (--attachment) and the API route receive them directly; the
+# other CLIs get them staged in the task folder and are told to open them with their file-reading tool.
+IMAGE_ROUTES = ("codex", "claude", "openai-api", "xai-api", "copilot", "cursor", "antigravity", "grok", "zai", "simulated")
+MAX_REFERENCE_DIRS = 8
 MAX_FILES_PER_MESSAGE = 60
 # Text room per provider for attached files (characters). Grok and Antigravity take the prompt as a command-line
 # argument (24k cap); the Codex API reservation is bounded by bytes; CLIs read stdin.
-FILE_BUDGET = {"grok": 16_000, "antigravity": 16_000, "openai-api": 200_000, "default": 160_000}
+FILE_BUDGET = {"grok": 16_000, "antigravity": 16_000, "openai-api": 200_000, "xai-api": 200_000, "default": 160_000}
 RESEARCH_ROUTES = ("firecrawl", "perplexity")  # answer on the spot from the web; questions and links only
 MAX_IMAGES_PER_MESSAGE = 12  # 6 photos from the owner; very tall or wide ones may be split into parts
 MAX_IMAGE_BYTES_PER_MESSAGE = 20 * 1024 * 1024
@@ -32,7 +35,7 @@ CONTEXT_MESSAGES = 8  # (kept for older callers)
 HISTORY_MESSAGES = 30
 HISTORY_MESSAGE_CHARS = 6000
 # Room for the conversation so far, per provider (characters). Argv-prompt routes (Grok, Antigravity) cap at 24k.
-HISTORY_BUDGET = {"grok": 9_000, "antigravity": 9_000, "openai-api": 60_000, "default": 40_000}
+HISTORY_BUDGET = {"grok": 9_000, "antigravity": 9_000, "openai-api": 60_000, "xai-api": 60_000, "default": 40_000}
 CONTEXT_ATTACHMENT_CHARS = 20_000
 
 
@@ -152,8 +155,37 @@ class Services:
         if not p:
             raise KeyError("project not found")
         p["transfer_policy"] = json.loads(p["transfer_policy"])
+        p["reference_dirs"] = json.loads(p["reference_dirs"] or "[]")
         self.remember_project(pid)
         return p
+
+    def _reference_dirs(self, p: dict, raw) -> list[str]:
+        """Absolute folders agents may read (not write) in Work tasks. Same refusals as a project root: no drive
+        roots, home, Windows or credential trees, no links. The project root itself is never listed twice."""
+        from .security import validate_root
+        if isinstance(raw, str):
+            raw = raw.splitlines()
+        out: list[str] = []
+        for item in list(raw or []):
+            v = str(item).strip().strip('"')
+            if not v:
+                continue
+            resolved = str(validate_root(v))
+            if resolved.lower() == str(p["root"]).lower() or resolved.lower() in (d.lower() for d in out):
+                continue
+            out.append(resolved)
+        if len(out) > MAX_REFERENCE_DIRS:
+            raise ValueError(f"at most {MAX_REFERENCE_DIRS} reference folders per project")
+        return out
+
+    @staticmethod
+    def reference_note(p: dict) -> str:
+        """Prompt line for Work tasks: the folders the owner opened for reading besides the project folder."""
+        dirs = p.get("reference_dirs") or []
+        if not dirs:
+            return ""
+        return ("[Reference folders the owner opened for reading (read-only; the project folder is still the only "
+                "place to write): " + "; ".join(dirs) + "]\n\n")
 
     def projects(self) -> list[dict]:
         return self.s.q("SELECT id,name,root,provider_default,model,updated FROM projects WHERE archived=0 "
@@ -176,6 +208,11 @@ class Services:
             pol = {k: bool(v) for k, v in dict(fields["transfer_policy"]).items() if k in providers.cached(self.s)}
             allowed["transfer_policy"] = json.dumps(pol)
             self._authoritative(pid, "permission", f"Transfer policy set: {pol}")
+        if "reference_dirs" in fields:
+            dirs = self._reference_dirs(p, fields["reference_dirs"])
+            allowed["reference_dirs"] = json.dumps(dirs)
+            self._authoritative(pid, "permission", "Reference folders (read access for Work tasks): "
+                                + (", ".join(dirs) if dirs else "none"))
         if allowed:
             allowed["updated"] = time.time()
             cols = ", ".join(f"{k}=?" for k in allowed)
@@ -503,7 +540,8 @@ class Services:
         timeout = 900 if work else 300
         payload = context
         if work:
-            payload = ("[Studio: work in the project folder. You may edit files here.]\n\n" + context)
+            payload = ("[Studio: work in the project folder. You may edit files here.]\n\n"
+                       + self.reference_note(p) + context)
         # The user message and the durable assistant placeholder commit together BEFORE dispatch, so a
         # provider task can never run without a message that will receive its result. The placeholder
         # carries the context hash: if the task-id link below is lost (crash, write error), _resolve
@@ -523,7 +561,8 @@ class Services:
         try:
             tid = self.sup.create(p, route, payload, mode=mode, timeout=timeout, images=image_paths or None,
                                   research=None if work else (self.research_payload(cid, text, route)
-                                                              if route in RESEARCH_ROUTES else None))
+                                                              if route in RESEARCH_ROUTES else None),
+                                  extra_dirs=(p.get("reference_dirs") or None) if work else None)
         except Exception as e:
             self.s.x("UPDATE messages SET content=?, status='failed' WHERE id=?",
                      (f"Request not dispatched: {redact(str(e))[:300]}", mid))
@@ -578,7 +617,8 @@ class Services:
         atts = umeta.get("attachments") or []
         work = bool(umeta.get("work"))
         context = self.build_context(pid, cid, question, atts, route, before=u["created"])
-        payload = ("[Studio: work in the project folder. You may edit files here.]\n\n" + context) if work else context
+        payload = ("[Studio: work in the project folder. You may edit files here.]\n\n" + self.reference_note(p)
+                   + context) if work else context
         _, images = self.split_images(pid, atts)
         image_paths = [str(self.s.data_dir / x["stored_path"]) for x in images]
         prev = {"provider": a["provider"], "status": a["status"]} if a else None
@@ -603,7 +643,8 @@ class Services:
             tid = self.sup.create(p, route, payload, mode="agent" if work else "chat",
                                   timeout=900 if work else 300, images=image_paths or None,
                                   research=None if work else (self.research_payload(cid, question, route, u["created"])
-                                                              if route in RESEARCH_ROUTES else None))
+                                                              if route in RESEARCH_ROUTES else None),
+                                  extra_dirs=(p.get("reference_dirs") or None) if work else None)
         except Exception as e:
             self.s.x("UPDATE messages SET content=?, status='failed' WHERE id=?",
                      (f"Request not dispatched: {redact(str(e))[:300]}", aid))

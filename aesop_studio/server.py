@@ -535,7 +535,8 @@ class Handler(BaseHTTPRequestHandler):
         prov = b.get("provider") or p["provider_default"]
         ctx = self.app.svc.build_context(pid, cid, b.get("text", ""), b.get("attachment_ids", []), prov)
         if b.get("work"):
-            ctx = "[Studio: work in the project folder. You may edit files here.]\n\n" + ctx
+            ctx = ("[Studio: work in the project folder. You may edit files here.]\n\n"
+                   + self.app.svc.reference_note(p) + ctx)
         self.json({"provider": prov, "context": ctx, "chars": len(ctx), "work": bool(b.get("work"))})
 
     @route("POST", r"/api/projects/(\w+)/conversations/(\w+)/messages")
