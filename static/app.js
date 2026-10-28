@@ -2245,7 +2245,7 @@ function attachPredict(ta, pid) {
 // 1568 px and about 1.15 MP. OpenAI (Codex, Codex API, detail "high"): fits 2048 x 2048 with the short side at
 // 768 px. Very tall or wide images (long screenshots, receipts) are split into overlapping parts, each sized the
 // same way, so their text stays readable instead of shrinking to a sliver.
-const PHOTO_ROUTES = ["codex", "claude", "openai-api", "xai-api", "copilot", "cursor", "antigravity", "grok", "zai", "simulated"]; // Codex, Copilot and the API route take photos directly; the other CLIs open staged copies with their file tool
+const PHOTO_ROUTES = ["codex", "claude", "openai-api", "xai-api", "copilot", "cursor", "antigravity", "grok", "zai", "gemini", "zcode", "simulated"]; // Codex, Copilot and the API route take photos directly; the other CLIs open staged copies with their file tool
 const PHOTO_TARGETS = { claude: { edge: 1568, mp: 1.15e6 }, codex: { edge: 2048, short: 768 }, "openai-api": { edge: 2048, short: 768 }, "xai-api": { edge: 2048, short: 768 } };
 const PHOTO_DEFAULT = { edge: 2048 };
 const photoTarget = (route) => PHOTO_TARGETS[route] || PHOTO_DEFAULT;
