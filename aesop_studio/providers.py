@@ -919,7 +919,9 @@ BALANCED = {
     "codex": {"model": "gpt-6.1-sol", "reasoning": "medium"},
     "claude": {"model": "sonnet", "reasoning": "medium"},
     "cursor": {"model": "composer-2.5", "reasoning": None},
-    "antigravity": {"model": "gemini-4-argon-medium", "reasoning": "medium"},
+    # Owner 2026-10-28: a Google-only model (the Antigravity catalog also lists Claude and GPT-OSS). Argon's quota was
+    # exhausted until 2026-10-30; 3.8 Flash High answered live in 14 s. The effort must match the model's own suffix.
+    "antigravity": {"model": "gemini-3.8-flash-high", "reasoning": "high"},
     "copilot": {"model": "claude-sonnet-5.5", "reasoning": "medium"},
     "grok": {"model": "grok-4.7", "reasoning": "medium"},
     "zai": {"model": "glm-5.3", "reasoning": "high"},
