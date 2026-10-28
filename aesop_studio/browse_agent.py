@@ -18,7 +18,7 @@ from . import providers
 from .security import redact
 from .tasks import TERMINAL
 
-VISION_ROUTES = ("claude", "codex", "openai-api")  # routes verified to read a screenshot
+VISION_ROUTES = ("claude", "codex", "openai-api", "xai-api")  # routes verified to read a screenshot
 MAX_STEPS_CAP = 15
 STEP_TIMEOUT = 150
 VW, VH = 1366, 854

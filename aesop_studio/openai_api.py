@@ -94,9 +94,10 @@ def resolve_key() -> str:
     return key
 
 
-def max_cost(model: str, prompt_bytes: int, max_output: int) -> float:
+def max_cost(model: str, prompt_bytes: int, max_output: int, prices: dict | None = None) -> float:
     """Conservative upper bound. A token is never shorter than one UTF-8 byte, so bytes bound input tokens
     for any script (CJK, emoji, dense code); plus the full output allowance and a 10% margin."""
+    PRICES = prices if prices is not None else globals()["PRICES"]  # noqa: N806 - same table shape per API
     if model not in PRICES:
         raise ApiError(f"no verified price for {model}; metered dispatch refused")
     if prompt_bytes > MAX_PROMPT_BYTES:
@@ -107,27 +108,29 @@ def max_cost(model: str, prompt_bytes: int, max_output: int) -> float:
     return math.ceil(cost * 10000) / 10000  # round up to $0.0001
 
 
-def actual_cost(model: str, usage: dict) -> float:
-    pin, pout = PRICES[model]
+def actual_cost(model: str, usage: dict, prices: dict | None = None) -> float:
+    pin, pout = (prices if prices is not None else PRICES)[model]
     return round((usage.get("input_tokens", 0) * pin + usage.get("output_tokens", 0) * pout) / 1_000_000, 6)
 
 
-def _endpoint() -> tuple[str, int, bool]:
+def _endpoint(host: str | None = None) -> tuple[str, int, bool]:
     # Test-only override (local fake server); impossible to enable outside the offline test mode.
     base = os.environ.get("AESOP_OPENAI_TEST_BASE")
     if base and _test_mode():
         u = urllib.parse.urlsplit(base)
         if u.hostname in ("127.0.0.1", "localhost"):
             return u.hostname, u.port or 80, False
-    return API_HOST, 443, True
+    return host or API_HOST, 443, True
 
 
 IMAGE_TOKEN_BOUND = 3000  # conservative per-image input bound (high-detail tiles) used for reservations
 
 
 def stream(prompt: str, model: str, max_output: int, on_delta, cancel: threading.Event, timeout: int = 300,
-           key: str | None = None, images: list[str] | None = None) -> dict:
+           key: str | None = None, images: list[str] | None = None, host: str | None = None,
+           reasoning_effort: str | None = REASONING_EFFORT) -> dict:
     """Stream a Responses API call. Returns {"text", "usage", "status"}; raises ApiError on failure.
+    `host` selects another OpenAI-compatible Responses endpoint (xAI); `key` must then be that service's key.
     `images` are data: URLs (PNG/JPEG) sent alongside the text as one user message.
 
     Status values: completed/incomplete (usage known), cancelled_presend (nothing sent: $0), cancelled or deadline
@@ -137,11 +140,11 @@ def stream(prompt: str, model: str, max_output: int, on_delta, cancel: threading
     key = key or resolve_key()
     if cancel.is_set():  # nothing sent yet: the caller settles this at $0
         return {"text": "", "usage": None, "status": "cancelled_presend"}
-    host, port, tls = _endpoint()
+    host, port, tls = _endpoint(host)
     payload = prompt if not images else [{"role": "user", "content": [{"type": "input_text", "text": prompt}] + [
         {"type": "input_image", "image_url": u, "detail": "high"} for u in images]}]
     body = json.dumps({"model": model, "input": payload, "max_output_tokens": max_output, "stream": True,
-                       "store": False, "reasoning": {"effort": REASONING_EFFORT}})
+                       "store": False, **({"reasoning": {"effort": reasoning_effort}} if reasoning_effort else {})})
     deadline = time.monotonic() + timeout
     stopped = threading.Event()      # set when the caller stops listening: later deltas are discarded
     done = threading.Event()
