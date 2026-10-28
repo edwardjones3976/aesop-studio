@@ -2760,6 +2760,7 @@ async function renderChat() {
     }
     return bits.length ? bits : null;
   };
+  const openFixTask = (id) => { S.taskSel = id; setItab("changes"); renderInspector(); };
   function msgView(m) {
     const meta = m.meta || {}; const user = m.role === "user"; const r = S.routes[m.provider];
     const costBits = [];
@@ -2823,7 +2824,7 @@ async function renderChat() {
           h("button", { type: "button", class: "linkish", onclick: (e) => { S.taskSel = meta.task_id; openInspector("terminal", e.currentTarget); } }, icon("terminal", "sm"), "Output"),
           h("button", { type: "button", class: "linkish", onclick: (e) => { S.taskSel = meta.task_id; openInspector("changes", e.currentTarget); } }, icon("diff", "sm"), "Changes"),
           !user && m.status === "submitted" ? abtn("Cancel", () => guard(async () => { const c = await api("POST", `/api/tasks/${meta.task_id}/cancel`); banner(c.note, ""); }), "danger sm", "stop") : null) : null,
-        !user && meta.work && meta.task_id ? (() => { const box = h("div", { class: "rvbox", "aria-label": "Review" }); reviewPanel(meta.task_id, box, () => {}, rv); return box; })() : null));
+        !user && meta.work && meta.task_id ? (() => { const box = h("div", { class: "rvbox", "aria-label": "Review" }); reviewPanel(meta.task_id, box, openFixTask, rv); return box; })() : null));
   }
   let fails = 0;
   async function drawMsgs() {

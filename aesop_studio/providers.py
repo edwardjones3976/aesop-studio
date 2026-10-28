@@ -170,6 +170,11 @@ def gemini_oauth_included() -> bool:
     )
 
 
+def gemini_policy_blocked() -> bool:
+    """Metered API-key Gemini is blocked unless Google sign-in (plan quota) is active."""
+    return gemini_api_key_configured() and not gemini_oauth_included()
+
+
 ZCODE_RESOURCES = (
     Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "ZCode" / "resources"
 )
@@ -251,7 +256,7 @@ def verify_live(store, rid: str) -> dict:
 
     if rid not in LIVE_VERIFY_ROUTES:
         raise ValueError(f"{rid} is not a live-verifiable CLI route")
-    if rid == "gemini" and gemini_api_key_configured() and not gemini_oauth_included():
+    if rid == "gemini" and gemini_policy_blocked():
         detail = (
             "blocked by policy: Gemini CLI is configured with an API key (metered Google "
             "billing is not an authorized biller); sign in with Google for plan quota"
@@ -676,17 +681,16 @@ def probe(store=None) -> dict[str, dict]:
                 evidence="probe skipped (offline test mode)",
                 last_verified_at=now,
             )
-            if rid == "gemini":
-                if gemini_api_key_configured():
-                    r.update(
-                        state="BLOCKED_POLICY",
-                        auth_status="api_key_present",
-                        incremental_cost_status="metered (Google API billing is not an authorized biller)",
-                        evidence=(
-                            "Gemini CLI is configured with an API key; sign in with a Google account "
-                            "(run gemini, choose Login with Google) for plan quota"
-                        ),
-                    )
+            if rid == "gemini" and gemini_policy_blocked():
+                r.update(
+                    state="BLOCKED_POLICY",
+                    auth_status="api_key_present",
+                    incremental_cost_status="metered (Google API billing is not an authorized biller)",
+                    evidence=(
+                        "Gemini CLI is configured with an API key; sign in with a Google account "
+                        "(run gemini, choose Login with Google) for plan quota"
+                    ),
+                )
             routes[rid] = r
             continue
         r["executable"] = Path(cmd[-1]).name if rid == "cursor" else Path(cmd[0]).name
@@ -739,7 +743,7 @@ def probe(store=None) -> dict[str, dict]:
                 ),
             )
         if rid == "gemini":
-            if gemini_api_key_configured():
+            if gemini_policy_blocked():
                 r.update(
                     state="BLOCKED_POLICY",
                     auth_status="api_key_present",

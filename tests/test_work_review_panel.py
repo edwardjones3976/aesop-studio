@@ -26,6 +26,15 @@ class TestWorkReviewPanelMount(unittest.TestCase):
         self.assertIn("detachWaits", body)
         self.assertNotIn("if (!box.isConnected) return stop();", body)
 
+    def test_work_review_open_task_selects_fix_task_in_inspector(self):
+        app_js = Path(__file__).resolve().parent.parent / "static" / "app.js"
+        chunk = app_js.read_text(encoding="utf-8")
+        self.assertIn(
+            'const openFixTask = (id) => { S.taskSel = id; setItab("changes"); renderInspector(); };',
+            chunk,
+        )
+        self.assertIn("reviewPanel(meta.task_id, box, openFixTask, rv)", chunk)
+
     @classmethod
     def setUpClass(cls):
         try:

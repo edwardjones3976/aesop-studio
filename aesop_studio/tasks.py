@@ -447,12 +447,13 @@ class Supervisor:
 
     def has_live_work(self) -> bool:
         """A task that is still being prepared or run. A stale process waits for these before it exits."""
-        return (
-            self.store.one(
-                "SELECT id FROM tasks WHERE state IN ('CREATED','RESERVED','STARTING','RUNNING') LIMIT 1"
-            )
-            is not None
-        )
+        if self.store.one(
+            "SELECT id FROM tasks WHERE state IN ('CREATED','RESERVED','STARTING','RUNNING') LIMIT 1"
+        ):
+            return True
+        from . import team
+
+        return team.has_live_work(self.store)
 
     def _busy(self, c, project_id: str):
         """One agent writer per project. An EFFECT_UNKNOWN agent task with an unresolved repair still blocks:

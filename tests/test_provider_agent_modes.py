@@ -139,10 +139,99 @@ class ProviderAgentModes(unittest.TestCase):
                     providers, "_gemini_cmd", return_value=["node", "gemini.js"]
                 ),
                 patch.object(providers, "gemini_api_key_configured", return_value=True),
+                patch.object(providers, "gemini_oauth_included", return_value=False),
             ):
                 routes = providers.probe(store)
             self.assertEqual(routes["gemini"]["state"], "BLOCKED_POLICY")
             self.assertEqual(routes["gemini"]["auth_status"], "api_key_present")
+        finally:
+            store.close()
+
+    def test_gemini_api_key_with_oauth_not_policy_blocked(self):
+        store = Store(tempfile.mkdtemp(prefix="aesop-gem-"))
+        try:
+            import os
+            import time as _time
+
+            store.x(
+                "INSERT INTO kv(k,v) VALUES(?,?)",
+                (
+                    "verify:gemini",
+                    json.dumps({"at": _time.time(), "ok": True, "detail": "ok"}),
+                ),
+            )
+
+            def fake_run(argv, timeout=30):
+                return 0, "gemini 1.0.0"
+
+            with (
+                patch.dict(os.environ, {"AESOP_PROBE_OFFLINE": ""}, clear=False),
+                patch.object(providers, "_run", fake_run),
+                patch.object(
+                    providers, "_gemini_cmd", return_value=["node", "gemini.js"]
+                ),
+                patch.object(providers, "gemini_api_key_configured", return_value=True),
+                patch.object(providers, "gemini_oauth_included", return_value=True),
+            ):
+                os.environ.pop("AESOP_PROBE_OFFLINE", None)
+                routes = providers.probe(store)
+                self.assertEqual(routes["gemini"]["state"], "READY_INCLUDED")
+                self.assertFalse(providers.gemini_policy_blocked())
+        finally:
+            store.close()
+
+    def test_gemini_policy_blocked_matches_probe_and_verify_live(self):
+        store = Store(tempfile.mkdtemp(prefix="aesop-gem-vfy-"))
+        try:
+            import os
+            import time as _time
+
+            store.x(
+                "INSERT INTO kv(k,v) VALUES(?,?)",
+                (
+                    "verify:gemini",
+                    json.dumps({"at": _time.time(), "ok": True, "detail": "ok"}),
+                ),
+            )
+
+            def fake_run(argv, timeout=30):
+                return 0, "gemini 1.0.0"
+
+            cases = (
+                (True, False, True, "BLOCKED_POLICY"),
+                (True, True, False, "READY_INCLUDED"),
+            )
+            for key, oauth, blocked, expect_state in cases:
+                with self.subTest(key=key, oauth=oauth):
+                    with (
+                        patch.dict(
+                            os.environ, {"AESOP_PROBE_OFFLINE": ""}, clear=False
+                        ),
+                        patch.object(providers, "_run", fake_run),
+                        patch.object(
+                            providers, "gemini_api_key_configured", return_value=key
+                        ),
+                        patch.object(
+                            providers, "gemini_oauth_included", return_value=oauth
+                        ),
+                        patch.object(
+                            providers, "_gemini_cmd", return_value=["node", "gemini.js"]
+                        ),
+                        patch.object(
+                            providers,
+                            "_contained",
+                            return_value=(0, providers.VERIFY_TOKEN),
+                        ),
+                        patch.object(
+                            providers, "build_argv", return_value=["node", "gemini.js"]
+                        ),
+                    ):
+                        os.environ.pop("AESOP_PROBE_OFFLINE", None)
+                        self.assertEqual(providers.gemini_policy_blocked(), blocked)
+                        rec = providers.verify_live(store, "gemini")
+                        self.assertEqual(rec["ok"], not blocked)
+                        routes = providers.probe(store)
+                        self.assertEqual(routes["gemini"]["state"], expect_state)
         finally:
             store.close()
 
@@ -199,6 +288,7 @@ class ProviderAgentModes(unittest.TestCase):
                 patch.object(providers, "gemini_oauth_included", return_value=False),
                 patch.object(providers, "_contained") as contained,
             ):
+                self.assertTrue(providers.gemini_policy_blocked())
                 rec = providers.verify_live(store, "gemini")
             self.assertFalse(rec["ok"])
             self.assertIn("blocked by policy", rec["detail"])

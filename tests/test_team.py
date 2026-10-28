@@ -187,6 +187,29 @@ class TestBuildTests(TestTeam):
         self.assertEqual(t2["state"], "FAILED")
         self.assertEqual(t2["summary"], "0 of 1 passed")
 
+    def test_has_live_work_while_team_tests_running(self):
+        tid = self.sup.create(self.p, "simulated", "WRITE x", mode="agent", timeout=30)
+        self.store.x("UPDATE tasks SET state=? WHERE id=?", ("COMPLETED", tid))
+        team.plan(self.store, tid, None)
+        team._put(
+            self.store,
+            tid,
+            {
+                **team.get(self.store, tid),
+                "tests": {"state": "RUNNING", "started": time.time()},
+            },
+        )
+        self.assertTrue(self.sup.has_live_work())
+        team._put(
+            self.store,
+            tid,
+            {
+                **team.get(self.store, tid),
+                "tests": {"state": "PASSED", "summary": "ok"},
+            },
+        )
+        self.assertFalse(self.sup.has_live_work())
+
     def test_no_tests_found(self):
         from aesop_studio import testrun
 
