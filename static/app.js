@@ -6,7 +6,7 @@ for (const P of [Element.prototype, DocumentFragment.prototype]) for (const m of
 // All untrusted text is rendered with textContent via h(); never assign raw HTML.
 const S = { csrf: "", routes: {}, projects: [], project: null, tab: "chat", conv: null, convTitle: "", global: null, poll: null,
   streams: {}, streamUpd: {}, streamConv: null, chatGen: 0, msgSig: "", taskSel: null, preview: null,
-  itab: "preview", inspPref: true, ov: null, lay: { tab: "chat", w: {} }, activity: "" };
+  itab: "preview", inspPref: true, ov: null, lay: { tab: "chat", w: {} }, activity: "", wantWork: false, pendingCompose: null, editorPath: "" };
 
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
@@ -51,7 +51,7 @@ const access = (state) => state === "READY_INCLUDED" ? "official CLI · plan quo
   : state === "SIMULATED" ? "simulated test route" : "unavailable";
 const hashIdx = (s, n) => { let x = 0; for (const c of String(s)) x = (x * 31 + c.charCodeAt(0)) >>> 0; return x % n; };
 const initials = (s) => { const w = String(s || "?").trim().split(/[\s_\-.]+/).filter(Boolean); return ((w[0] || "?")[0] + (w.length > 1 ? w[1][0] : (w[0] || "").slice(1, 2))).toUpperCase(); };
-const WS = { chat: "Chat", agent: "Build", memory: "Memory", artifacts: "Saved" }; // research lives inside Chat
+const WS = { chat: "Chat", plan: "Plan", editor: "Editor", memory: "Memory", artifacts: "Saved" }; // research and folder-work live inside Chat
 const GL = { providers: "Providers", evidence: "Evidence" };
 
 // ---------- icons (inline SVG via createElementNS; no markup strings) ----------
@@ -120,11 +120,14 @@ function takeKey() {
 function apiKey() { try { return localStorage.getItem("aesop.key") || sessionStorage.getItem("aesop.key") || ""; } catch { return ""; } }
 function signInCard() {
   navBump();
+  const list = $("projectList");
+  if (list) list.replaceChildren(h("p", { class: "muted" }, "Your projects are still saved on this PC. Sign in with the launch link to open them. Archive is the only way to hide one."));
   $("view").replaceChildren(h("div", { class: "empty welcome" }, h("div", { class: "eico" }, icon("shield")), h("div", { class: "et" }, h("strong", {}, "Sign-in needed"),
-    h("p", {}, "Reopen Studio from its launch link (start.ps1 opens one for you). This keeps other websites and local programs from using your Studio."))));
+    h("p", {}, "Your projects, chats and plans stay in Aesop Studio. Open the launch link (start.ps1 or the desktop shortcut). A new port does not delete them."))));
 }
 function authFail() { signInCard(); banner("Studio session not recognised. Reopen Studio from its launch link.", "bad"); }
 async function api(method, path, body, raw, retried) {
+  if (S.dead) { const e = new Error("This page has shut down."); e.status = 0; throw e; }
   if (method !== "GET" && !retried) {
     try { return await api(method, path, body, raw, true); }
     catch (e) {
@@ -199,7 +202,7 @@ function dialog(title, fields, submitLabel = "Save") {
   });
 }
 function showShortcuts() {
-  const rows = [[["Ctrl", "K"], "Open the command palette"], [["Ctrl", "Enter"], "Send message / start task"], [["Ctrl", "1"], "Chat"], [["Ctrl", "2"], "Build"],
+  const rows = [[["Ctrl", "K"], "Open the command palette"], [["Ctrl", "Enter"], "Send"], [["Ctrl", "1"], "Chat"], [["Ctrl", "2"], "Work in this folder (in Chat)"],
     [["Ctrl", "3"], "Research notebook (in Chat)"], [["Esc"], "Close a dialog, drawer or sheet"], [["?"], "Show this list"], [["←", "→"], "Resize a focused panel divider"]];
   if ($("dlg").open || $("rtDlg").open) return Promise.resolve(null);
   const done = dialog("Keyboard shortcuts", [], "Close");
@@ -350,7 +353,12 @@ function globalKeys(e) {
   if (e.ctrlKey && !e.altKey && !e.shiftKey && ["1", "2", "3"].includes(e.key) && S.project) {
     e.preventDefault();
     if (e.key === "3") { openResearch(); return; }
-    setTab(["chat", "agent"][Number(e.key) - 1]); return;
+    if (e.key === "1") { setTab("chat"); return; }
+    if (e.key === "2") {
+      if (S.tab !== "chat" || S.global) { S.wantWork = true; setTab("chat"); }
+      else { const t = $("workTog"); if (t) t.click(); else { S.wantWork = true; refresh("chat"); } }
+      return;
+    }
   }
   if (e.key === "?" && !e.ctrlKey && !e.altKey) { e.preventDefault(); showShortcuts(); }
 }
@@ -366,7 +374,8 @@ function routeIndicator() {
   if (!p) { el.hidden = true; return; }
   const r = S.routes[p.provider_default];
   el.hidden = false;
-  el.setAttribute("title", p.provider_default ? `${routeName(p.provider_default)}: ${r ? r.state : "unknown"}` : "No default provider chosen");
+  const pin = r && r.balanced_model ? `${r.balanced_model}${r.balanced_reasoning ? " · " + r.balanced_reasoning : ""}` : "";
+  el.setAttribute("title", p.provider_default ? `${routeName(p.provider_default)}: ${r ? r.state : "unknown"}${pin ? " · " + pin : ""}` : "No default provider chosen");
   el.replaceChildren(p.provider_default ? routeDot(p.provider_default) : h("span", { class: "dot" }), h("b", {}, routeName(p.provider_default) || "No provider"),
     h("span", { class: "rt" }, r ? access(r.state) : p.provider_default ? "unavailable" : "choose one in the workspace header"));
 }
@@ -375,7 +384,9 @@ function routeIndicator() {
 let PAL = { items: [], sel: 0, opener: null };
 function paletteItems() {
   const it = [];
-  if (S.project) for (const [k, v] of Object.entries(WS)) it.push({ g: "Workspace", ico: { chat: "chat", agent: "terminal", memory: "layers", artifacts: "bookmark" }[k], label: `Go to ${v}`, key: { chat: "Ctrl 1", agent: "Ctrl 2" }[k], run: () => setTab(k) });
+  if (S.project) for (const [k, v] of Object.entries(WS)) it.push({ g: "Workspace", ico: { chat: "chat", plan: "check", editor: "file", memory: "layers", artifacts: "bookmark" }[k], label: `Go to ${v}`, key: { chat: "Ctrl 1" }[k], run: () => setTab(k) });
+  if (S.project) it.push({ g: "Workspace", ico: "terminal", label: "Work in this folder (in Chat)", key: "Ctrl 2", run: () => { S.wantWork = true; setTab("chat"); } });
+  if (S.project) it.push({ g: "Workspace", ico: "file", label: "Open Editor (this project’s folder)", run: () => openInspector("files") });
   if (S.project) it.push({ g: "Workspace", ico: "search", label: "Open the research notebook (in Chat)", key: "Ctrl 3", run: () => openResearch() });
   for (const p of S.projects) it.push({ g: "Project", ico: "folder", label: `Switch to ${p.name}`, hint: p.root, run: () => openProject(p.id) });
   it.push({ g: "Action", ico: "plus", label: "New project", run: newProject });
@@ -1307,7 +1318,21 @@ function rtMenu() {
 // Navigation token: every project/view switch bumps navGen and viewGen. Async work checks its token before touching state or the DOM.
 S.navGen = 0; S.viewGen = 0;
 function navBump() { S.navGen++; S.viewGen++; clearInterval(S.poll); }
-const RENDER = { chat: () => renderChat(), agent: (sel) => renderAgent(sel), memory: () => renderMemory(), artifacts: () => renderArtifacts() };
+const RENDER = {
+  chat: () => renderChat(),
+  plan: () => renderPlanWorkspace(),
+  editor: () => renderEditorWorkspace(),
+  memory: () => renderMemory(),
+  artifacts: () => renderArtifacts(),
+};
+function renderPlanWorkspace() {
+  const el = $("view"); const gen = S.viewGen; const pid = S.project.id;
+  inspPlan(el, pid, gen, () => gen === S.viewGen && S.tab === "plan" && !S.global && el.isConnected);
+}
+function renderEditorWorkspace() {
+  const el = $("view"); const gen = S.viewGen; const pid = S.project.id;
+  return inspEditor(el, pid, gen, () => gen === S.viewGen && S.tab === "editor" && !S.global && el.isConnected);
+}
 function errorView(msg, retry) {
   return h("div", { class: "note bad", role: "alert" }, icon("alert"), h("div", { class: "section" }, h("span", {}, msg), retry ? h("div", {}, btn("Retry", retry, "sm", "refresh")) : null));
 }
@@ -1352,6 +1377,29 @@ function wireNav() {
     const n = tabs[(i + (fwd ? 1 : tabs.length - 1)) % tabs.length]; setTab(n.dataset.tab); n.focus();
   });
 }
+function retirePage() {
+  if (S.dead) return;
+  S.dead = true;
+  clearInterval(S.poll);
+  clearInterval(S.alive);
+  try { sessionStorage.clear(); } catch { /* storage blocked */ }
+  location.replace("/shutdown.html");
+}
+async function watchAlive() {
+  if (S.dead || S.build == null) return;
+  try {
+    const r = await fetch("/api/session", { headers: { "X-Aesop-Key": apiKey() }, credentials: "same-origin", cache: "no-store" });
+    if (S.dead) return;
+    if (r.status === 401 || !r.ok) return;
+    const data = await r.json();
+    S.aliveMiss = 0;
+    if (data.retiring || (data.build != null && data.build !== S.build)) retirePage();
+  } catch {
+    if (S.dead) return;
+    S.aliveMiss = (S.aliveMiss || 0) + 1;
+    if (S.aliveMiss >= 2) retirePage();
+  }
+}
 async function boot() {
   setupShell(); setupPalette(); setupRoundtable(); wireNav(); crumbs();
   await bootData();
@@ -1360,13 +1408,16 @@ async function bootData() {
   takeKey();
   if (!apiKey()) { signInCard(); renderInspector(); return; }
   let recovered = "";
+  let s = null;
   try {
-    const s = await api("GET", "/api/session");
+    s = await api("GET", "/api/session");
     S.csrf = s.csrf;
+    if (s.build != null) S.build = s.build;
+    if (!S.alive) S.alive = setInterval(watchAlive, 1500);
     if (s.reconciled && s.reconciled.length) recovered = `Recovered after restart: ${s.reconciled.length} unfinished task(s) marked ${[...new Set(s.reconciled.map((r) => r.to))].join(", ")}. Nothing was replayed automatically.`;
   } catch (e) {
     $("view").replaceChildren(h("div", { class: "empty welcome" }, h("div", { class: "eico" }, icon("shield")), h("div", { class: "et" }, h("strong", {}, "Sign-in needed"),
-      h("p", {}, "Open the one-time launch link from launch-link.txt (start.ps1 opens it for you). This keeps other websites and local programs from using your Studio."))));
+      h("p", {}, "Your projects are still saved on this PC. Open the one-time launch link. A restart or a new port does not delete them."))));
     renderInspector();
     return;
   }
@@ -1378,7 +1429,8 @@ async function bootData() {
     banner(e.message, "bad");
     return;
   }
-  const last = localStorageGet("aesop.project");
+  const remembered = (s && s.last_project) || "";
+  const last = localStorageGet("aesop.project") || remembered;
   if (last && S.projects.some((p) => p.id === last)) await openProject(last);
   else if (!S.projects.length) renderWelcome(); else await openProject(S.projects[0].id);
   if (recovered) banner(recovered);
@@ -1398,13 +1450,13 @@ async function loadProjects() {
   S.projects = list;
   $("projectList").replaceChildren(...S.projects.map((p) => h("button", { "aria-current": S.project && S.project.id === p.id && !S.global ? "true" : "false", "data-pid": p.id, title: p.root, "aria-label": `${p.name}, ${p.root}`, onclick: () => { closeOverlay(false); openProject(p.id); } },
     h("span", { class: "avatar av" + hashIdx(p.id, 8), "aria-hidden": "true" }, initials(p.name)), h("span", { class: "pt" }, h("span", { class: "pname" }, p.name), h("small", {}, tailPath(p.root))))));
-  if (!S.projects.length) $("projectList").append(h("p", { class: "muted" }, "No projects yet."));
+  if (!S.projects.length) $("projectList").append(h("p", { class: "muted" }, "No projects yet. New ones are kept until you archive them."));
 }
 function renderWelcome() {
   navBump();
   S.lay = loadJSON(layKey(), { tab: "chat", w: {} }); layout(); crumbs(); renderInspector();
   $("view").replaceChildren(h("div", { class: "empty welcome" }, h("div", { class: "eico" }, icon("folder")), h("div", { class: "et" }, h("strong", {}, "Start with a project"),
-    h("p", {}, "A project is one folder you choose. Chats, files, agent tasks, research and memory stay inside it. Studio never reads outside the folder you select."),
+    h("p", {}, "A project is one folder you choose. Chats, files, folder work, research and memory stay inside it. Studio never reads outside the folder you select."),
     h("div", { class: "row" }, btn("Create project", newProject, "primary", "plus"), btn("Check provider routes", () => openGlobal("providers"), "ghost", "providers")))));
 }
 async function newProject() {
@@ -1489,30 +1541,42 @@ async function projectSettings() {
   const p = S.project; if (!p) return;
   if ($("dlg").open) { banner("Finish or cancel the open dialog first."); return; }
   const pol = p.transfer_policy || {};
-  const pending = dialog("Project settings", [
+  const fields = [
     { name: "name", label: "Name", value: p.name },
-    { name: "model", label: "Model", value: p.model || "", help: "Perplexity Orchestrator requires a model from its catalog. For CLI routes, leave blank to use their default." },
-    { name: "retention_days", label: "Conversation retention (days)", type: "number", value: String(p.retention_days) },
+  ];
+  if (p.provider_default === "perplexity-orchestrator") {
+    fields.push({ name: "model", label: "Model", value: p.model || "", help: "Orchestrator still needs a model from its catalog. Every other provider uses one fixed Studio setting." });
+  }
+  fields.push({ name: "retention_days", label: "Conversation retention (days)", type: "number", value: String(p.retention_days) });
+  const pending = dialog("Project settings", [
+    ...fields,
     ...Object.keys(S.routes).filter((k) => USABLE.includes(S.routes[k].state)).map((k) => ({ name: "tp_" + k, label: `Allow sending attached project files to ${routeName(k)}?`, type: "select", value: pol[k] ? "yes" : "no", options: [{ value: "no", label: "No" }, { value: "yes", label: "Yes" }] })),
   ]);
   const form = $("dlgForm");
   const model = form.elements.namedItem("model");
-  const catalog = h("datalist", { id: "orchestratorModels" });
-  model.setAttribute("list", catalog.id);
-  const status = h("p", { class: "muted", role: "status" });
-  const refresh = h("button", { type: "button", class: "btn ghost" }, "Refresh Perplexity models");
-  model.closest(".field").append(catalog, refresh, status);
-  const loadModels = async (force = false) => {
-    refresh.disabled = true; status.textContent = "Loading Perplexity models…";
-    try {
-      const data = await api("GET", `/api/perplexity-orchestrator/models${force ? "?refresh=1" : ""}`);
-      catalog.replaceChildren(...data.models.map((m) => h("option", { value: m.id }, m.id)));
-      status.textContent = `${data.models.length} priced models available. Choose a catalog entry for Orchestrator.`;
-    } catch (e) { status.textContent = e.message; }
-    finally { refresh.disabled = false; }
-  };
-  refresh.onclick = () => loadModels(true);
-  if (S.routes["perplexity-orchestrator"]?.auth_status === "api_key_present") loadModels();
+  const routeNow = S.routes[p.provider_default];
+  if (!model && routeNow && routeNow.balanced_model) {
+    const pin = `${routeNow.balanced_model}${routeNow.balanced_reasoning ? " · " + routeNow.balanced_reasoning : ""}`;
+    form.insertBefore(h("p", { class: "muted" }, `Model and reasoning stay on ${pin}. Studio does not offer a higher or lower setting.`), form.querySelector(".actions"));
+  }
+  if (model) {
+    const catalog = h("datalist", { id: "orchestratorModels" });
+    model.setAttribute("list", catalog.id);
+    const status = h("p", { class: "muted", role: "status" });
+    const refresh = h("button", { type: "button", class: "btn ghost" }, "Refresh Perplexity models");
+    model.closest(".field").append(catalog, refresh, status);
+    const loadModels = async (force = false) => {
+      refresh.disabled = true; status.textContent = "Loading Perplexity models…";
+      try {
+        const data = await api("GET", `/api/perplexity-orchestrator/models${force ? "?refresh=1" : ""}`);
+        catalog.replaceChildren(...data.models.map((m) => h("option", { value: m.id }, m.id)));
+        status.textContent = `${data.models.length} priced models available. Choose a catalog entry for Orchestrator.`;
+      } catch (e) { status.textContent = e.message; }
+      finally { refresh.disabled = false; }
+    };
+    refresh.onclick = () => loadModels(true);
+    if (S.routes["perplexity-orchestrator"]?.auth_status === "api_key_present") loadModels();
+  }
   const v = await pending;
   if (!v) return;
   const tp = {}; for (const [k, val] of Object.entries(v)) if (k.startsWith("tp_")) tp[k.slice(3)] = val === "yes";
@@ -1531,20 +1595,22 @@ async function openProject(id) {
     if (nav !== S.navGen) return; // a newer selection won
     S.project = p;
     localStorageSet("aesop.project", id);
+    const savedTab = localStorageGet("aesop.itab." + id);
+    if (["preview", "files", "changes", "terminal", "plan", "browser"].includes(savedTab)) S.itab = savedTab;
     S.lay = loadJSON(layKey(), { tab: "chat", w: {} });
     layout(); renderHeader(); await loadProjects();
     if (nav !== S.navGen) return;
     await setTab(WS[S.lay.tab] ? S.lay.tab : "chat");
   });
 }
-// Route labels outside the header (composer chip, Build line, research draft line) follow the live project default.
+// Route labels outside the header (composer chip, research draft line) follow the live project default.
 function refreshRouteLabels() {
   const p = S.project; if (!p) return;
   const pv = ($("chatProv") && $("chatProv").value) || p.provider_default;
   const rr = S.routes[pv];
   const c = $("composerRoute");
   if (c) c.replaceChildren(pv ? routeDot(pv) : h("span", { class: "dot" }), h("span", { class: "t" },
-    `${routeName(pv) || "No provider chosen"}${rr ? " · " + access(rr.state) : ""}${pv !== p.provider_default ? " · not the project default" : ""}`));
+    `${routeName(pv) || "No provider chosen"}${rr ? " · " + access(rr.state) : ""}${rr && rr.balanced_model ? " · " + rr.balanced_model + (rr.balanced_reasoning ? " · " + rr.balanced_reasoning : "") : ""}${pv !== p.provider_default ? " · not the project default" : ""}`));
   const bt = $("buildRouteTag"); if (bt) bt.replaceChildren(...(rr ? [routeTag(rr)] : []));
   const bd = $("buildRouteDesc"); if (bd) bd.textContent = `Runs the official ${routeName(pv) || "(choose a provider)"} CLI inside ${p.root}. Output is redacted and size-limited. Cancel stops the local process tree only.`;
   const dr = $("draftRoute"); if (dr) dr.textContent = pv ? `Uses ${routeName(pv)}; one request` : "Choose a project provider first";
@@ -1564,7 +1630,8 @@ function renderHeader() {
     const root = h("span", { class: "rootline", id: "rootLine", title: p.root }, p.root);
     const tog = h("button", { type: "button", class: "linkish pathtog", "aria-controls": "rootLine", "aria-expanded": "false", onclick: () => {
       const full = root.classList.toggle("full"); tog.setAttribute("aria-expanded", full ? "true" : "false"); tog.textContent = full ? "hide full path" : "show full path"; } }, "show full path");
-    meta.replaceChildren(root, tog, h("span", { class: "mdot" }, `${routeName(p.provider_default) || "no default provider"}${r ? " · " + access(r.state) : ""}`), h("span", { class: "mdot" }, "saved locally"));
+    const pin = r && r.balanced_model ? ` · ${r.balanced_model}${r.balanced_reasoning ? " · " + r.balanced_reasoning : ""}` : "";
+    meta.replaceChildren(root, tog, h("span", { class: "mdot" }, `${routeName(p.provider_default) || "no default provider"}${r ? " · " + access(r.state) : ""}${pin}`), h("span", { class: "mdot" }, "saved locally"));
   } else meta.replaceChildren();
   $("projControls").hidden = !p; $("tabs").hidden = !p;
   routeIndicator(); crumbs();
@@ -1581,6 +1648,7 @@ function markNav() {
   document.querySelectorAll("[data-global]").forEach((b) => b.setAttribute("aria-current", S.global === b.dataset.global ? "true" : "false"));
 }
 function setTab(tab) {
+  if (tab === "agent") { S.wantWork = true; tab = "chat"; }
   if (!WS[tab]) tab = "chat";
   navBump();
   S.tab = tab; S.global = null; markNav(); S.activity = "";
@@ -1593,7 +1661,7 @@ function setTab(tab) {
   return done;
 }
 
-// ---------- task watcher (one poll shared by Build, Terminal, Changes and Logs) ----------
+// ---------- task watcher (one poll shared by Chat folder-work, Terminal, Changes and Logs) ----------
 // W.gen invalidates in-flight polls when the watched task changes, so A -> B -> A never runs two loops.
 const W = { tid: null, offset: 0, text: "", task: null, timer: null, hooks: {}, gen: 0, err: null, fails: 0 };
 const PERMANENT = [401, 403, 404];
@@ -1634,26 +1702,28 @@ function notifyTask(chunk) { for (const f of Object.values(W.hooks)) { try { f(c
 // ---------- inspector ----------
 function setItab(t) {
   S.itab = t; localStorageSet("aesop.itab", t);
+  if (S.project) localStorageSet("aesop.itab." + S.project.id, t);
   document.querySelectorAll("#itabs [data-itab]").forEach((b) => { const on = b.dataset.itab === t; b.setAttribute("aria-selected", on ? "true" : "false"); b.tabIndex = on ? 0 : -1; if (on && b.id) $("inspBody").setAttribute("aria-labelledby", b.id); if (on && b.scrollIntoView) b.scrollIntoView({ block: "nearest", inline: "nearest" }); });
 }
 let inspGen = 0;
 async function renderInspector() {
   const body = $("inspBody"); const gen = ++inspGen; delete W.hooks.insp;
-  if (!inspectorVisible()) return;
-  if (!S.project) { body.replaceChildren(empty("panel", "No project open", "Open a project to see its saved items, files, task changes, terminal output and task log here.")); return; }
+  if (!inspectorVisible()) { const dock = $("inspPlanDock"); if (dock) { dock.hidden = true; dock.replaceChildren(); } return; }
+  renderPlanDock();
+  if (!S.project) { body.replaceChildren(empty("panel", "No project open", "Open a project to see its saved items, folder editor, task changes, terminal output and plan here.")); return; }
   const pid = S.project.id;
   try {
     if (S.itab === "browser") return inspBrowser(body, pid, gen);
     if (S.itab === "plan") return inspPlan(body, pid, gen);
-    if (S.itab === "files") return await inspFiles(body, pid, gen);
+    if (S.itab === "files") return await inspEditor(body, pid, gen);
     if (S.itab === "preview") return await inspPreview(body, pid, gen);
     const tasks = await api("GET", `/api/projects/${pid}/tasks`);
     if (gen !== inspGen) return;
     const tid = S.taskSel && tasks.some((t) => t.id === S.taskSel) ? S.taskSel : tasks[0] && tasks[0].id;
     if (!tid) {
       body.replaceChildren(S.itab === "terminal"
-        ? empty("terminal", "No task output yet", "Start a task in Build. Its live, redacted output from the provider CLI appears here.")
-        : empty("diff", "No changes recorded", "Changed files are recorded when a Build task runs in the project folder. Start one in Build to see added, modified and removed files here."));
+        ? empty("terminal", "No task output yet", "Turn on Work in this folder in Chat, then send. Live, redacted CLI output from that message appears here.")
+        : empty("diff", "No changes recorded", "Changed files are recorded when a Chat message with Work on runs in the project folder."));
       return;
     }
     watchTask(tid);
@@ -1814,6 +1884,136 @@ function inspBrowser(body, pid, gen) {
   })();
 }
 function refresh2Chat() { if (S.tab === "chat" && !S.global) runRender("chat", () => renderChat()); }
+function composeIntoChat(text, work) {
+  S.pendingCompose = { text: text || "", work: !!work };
+  setTab("chat");
+}
+let planDockGen = 0;
+function renderPlanDock() {
+  const el = $("inspPlanDock");
+  if (!el) return;
+  if (!S.project) { el.hidden = true; el.replaceChildren(); return; }
+  el.hidden = false;
+  const pid = S.project.id; const name = S.project.name; const gen = ++planDockGen;
+  const live = () => gen === planDockGen && el.isConnected && S.project && S.project.id === pid;
+  const typing = () => el.contains(document.activeElement) && (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "TEXTAREA");
+  let sig = "";
+  const draw = (d) => {
+    const items = d.items || [];
+    const done = items.filter((i) => i.status === "done").length;
+    const focusIn = h("input", { class: "plan-focus", maxlength: "280", "aria-label": "Focus for this project only",
+      placeholder: "What is this project for? (stays on this project)", value: d.focus || "" });
+    focusIn.addEventListener("change", () => guard(async () => {
+      await api("POST", `/api/projects/${pid}/plan/focus`, { focus: focusIn.value });
+      banner("Focus saved for this project.", "ok");
+    }));
+    const addIn = h("input", { type: "text", class: "grow", maxlength: "400", placeholder: "Add a step for this project…", "aria-label": "New plan step" });
+    addIn.addEventListener("keydown", (e) => { if (e.key === "Enter" && addIn.value.trim()) { e.preventDefault(); const v = addIn.value; addIn.value = ""; guard(async () => { await api("POST", `/api/projects/${pid}/plan`, { content: v }); sig = ""; load(); }); } });
+    const row = (it) => {
+      const cb = h("input", { type: "checkbox", "aria-label": `Done: ${it.content}` });
+      cb.checked = it.status === "done";
+      cb.addEventListener("change", () => guard(async () => { await api("PATCH", `/api/projects/${pid}/plan/${it.id}`, { status: cb.checked ? "done" : "todo" }); sig = ""; load(); }));
+      return h("li", { class: `pitem s-${it.status}` }, cb, h("span", { class: "ptext" }, it.content));
+    };
+    el.replaceChildren(h("div", { class: "planv" },
+      h("div", { class: "plan-head" },
+        h("div", { class: "ttl" }, icon("check"), h("h3", {}, "Plan · " + (d.project_name || name)), items.length ? h("span", { class: "faint" }, `${done}/${items.length}`) : null),
+        h("button", { type: "button", class: "linkish", onclick: () => setTab("plan") }, "Open Plan")),
+      h("p", { class: "faint" }, "This checklist belongs to this project only."),
+      focusIn, addIn,
+      items.length ? h("ol", { class: "plist" }, ...items.slice(0, 12).map(row),
+        items.length > 12 ? h("li", { class: "faint" }, `${items.length - 12} more in Full plan`) : null)
+        : h("p", { class: "muted" }, "No steps yet for this project.")));
+  };
+  const load = async () => {
+    if (!live() || typing()) return;
+    let d;
+    try { d = await api("GET", `/api/projects/${pid}/plan`); } catch (e) {
+      if (live() && !sig) el.replaceChildren(h("div", { class: "note bad" }, icon("alert"), h("span", {}, e.message)));
+      return;
+    }
+    if (!live() || typing()) return;
+    const s2 = JSON.stringify({ id: d.project_id, focus: d.focus, items: d.items });
+    if (s2 === sig) return;
+    sig = s2; draw(d);
+  };
+  load();
+}
+async function inspEditor(body, pid, gen, alive) {
+  const live = alive || (() => gen === inspGen);
+  let tree;
+  try { tree = await api("GET", `/api/projects/${pid}/tree`); } catch (e) {
+    if (live()) body.replaceChildren(h("div", { class: "note bad" }, icon("alert"), h("span", {}, e.message)));
+    return;
+  }
+  if (!live()) return;
+  const status = h("p", { class: "faint" }, tree.truncated ? "Folder listing was truncated." : "Text files in this project folder. Chat stays the place you ask.");
+  const ta = h("textarea", { "aria-label": "File contents", spellcheck: "false", disabled: true, placeholder: "Open a text file from the tree." });
+  let current = S.editorPath || "";
+  let original = "";
+  const tools = h("div", { class: "ide-tools" });
+  const setBusy = (on) => [...tools.querySelectorAll("button")].forEach((b) => { b.disabled = on; });
+  const excerpt = () => {
+    const raw = ta.value || "";
+    const pick = raw.slice(ta.selectionStart, ta.selectionEnd).trim() || raw;
+    return pick.slice(0, 4000);
+  };
+  const ask = (kind) => {
+    if (!current) { banner("Open a file first.", "bad"); return; }
+    const bodyText = excerpt();
+    const prompts = {
+      ask: `Please read ${current} in this project and answer my question.\n\nWhat does this file do, and what should I know before changing it?\n\n---\n${bodyText}`,
+      learn: `Teach me ${current} in this project. Explain the structure, then quiz me. Don't edit files.\n\n---\n${bodyText}`,
+      practice: `Give me a short practice exercise based on ${current}. Don't change files until I ask.\n\n---\n${bodyText}`,
+      review: `Review ${current} for bugs, readability and missing tests. Read-only; don't edit files.\n\n---\n${bodyText}`,
+      work: `Change ${current} in this project folder:\n\n`,
+    };
+    composeIntoChat(prompts[kind], kind === "work");
+  };
+  const save = () => guard(async () => {
+    if (!current) return;
+    setBusy(true);
+    try {
+      await api("POST", `/api/projects/${pid}/file`, { path: current, content: ta.value });
+      original = ta.value; banner("Saved " + current + " in this project.", "ok");
+    } catch (e) { banner(e.message, "bad"); } finally { setBusy(false); }
+  });
+  const openFile = (entry) => guard(async () => {
+    if (!entry.text) { banner("The editor opens text files only.", "bad"); return; }
+    if (current && ta.value !== original && !confirm("Discard unsaved edits to " + current + "?")) return;
+    const f = await api("GET", `/api/projects/${pid}/file?path=${encodeURIComponent(entry.path)}`);
+    if (!live()) return;
+    current = f.path; S.editorPath = f.path; original = f.content; ta.disabled = false; ta.value = f.content;
+    status.textContent = f.path + " · " + f.chars + " chars · this project only";
+    paintTree();
+  });
+  const fileTree = () => {
+    const kids = {};
+    for (const e of tree.entries || []) { const p = e.parent || ""; (kids[p] || (kids[p] = [])).push(e); }
+    const node = (parent) => (kids[parent] || []).map((e) => e.kind === "dir"
+      ? h("details", { class: "ide-dir", open: true }, h("summary", {}, e.name), h("div", { class: "ide-kids" }, ...node(e.path)))
+      : h("button", { type: "button", class: "ide-file" + (e.path === current ? " on" : ""), disabled: !e.text,
+        title: e.text ? e.path : "Not a text file", onclick: () => openFile(e) }, e.name));
+    return h("nav", { class: "ide-tree", "aria-label": "This project's files" }, ...(node("").length ? node("") : [h("p", { class: "faint" }, "This folder has no readable text files yet.")]));
+  };
+  let treeEl = fileTree();
+  const paintTree = () => { const next = fileTree(); treeEl.replaceWith(next); treeEl = next; };
+  tools.replaceChildren(
+    abtn("Save", save, "sm", "bookmark"),
+    abtn("Ask", () => ask("ask"), "ghost sm", "chat"),
+    abtn("Learn", () => ask("learn"), "ghost sm", "sparkle"),
+    abtn("Practice", () => ask("practice"), "ghost sm", "check"),
+    abtn("Review", () => ask("review"), "ghost sm", "eye"),
+    abtn("Work", () => ask("work"), "ghost sm", "terminal"));
+  const pane = h("div", { class: "ide-pane" }, tools, ta, status);
+  body.replaceChildren(h("div", { class: "ide" },
+    h("p", { class: "faint" }, "Simple editor for this project's folder. Asking happens in Chat."),
+    h("div", { class: "ide-split" }, treeEl, pane)));
+  if (current) {
+    const hit = (tree.entries || []).find((e) => e.path === current && e.kind === "file");
+    if (hit) openFile(hit); else { current = ""; S.editorPath = ""; }
+  }
+}
 async function inspFiles(body, pid, gen) {
   const atts = await api("GET", `/api/projects/${pid}/attachments`);
   if (gen !== inspGen) return;
@@ -1845,11 +2045,11 @@ async function inspPreview(body, pid, gen) {
   body.replaceChildren(h("div", { class: "card-head" }, h("div", { class: "ttl" }, statePill(a.kind)), h("span", { class: "faint" }, a.id === S.preview ? fmtTime(a.created) : "Most recent saved item · " + fmtTime(a.created))),
     h("h2", {}, a.title), h("p", { class: "faint" }, "Shown as plain text. HTML in saved items is never rendered or executed."), h("pre", { class: "out" }, a.content));
 }
-// The Plan tab: a live checklist. Build tasks file their own items and follow them (doing -> done/failed); the
+// The Plan tab: a live checklist. Folder-work messages file their own items and follow them (doing -> done/failed); the
 // owner adds, checks, edits; a provider can draft next steps from the conversation. Below it, recent activity.
-function inspPlan(body, pid, gen) {
+function inspPlan(body, pid, gen, alive) {
   let sig = "", timer = null;
-  const live = () => gen === inspGen && body.isConnected;
+  const live = alive || (() => gen === inspGen && body.isConnected);
   const stamp = (t) => fmtClock(t);
   const draw = (d) => {
     const items = d.items || [];
@@ -1881,13 +2081,17 @@ function inspPlan(body, pid, gen) {
         it.source && it.source !== "owner" ? h("span", { class: "tag psrc" }, it.source === "build" ? "build" : it.source) : null,
         h("button", { type: "button", class: "fdel", "aria-label": `Remove ${it.content}`, onclick: () => post("POST", `/api/projects/${pid}/plan/${it.id}/delete`) }, icon("x", "sm")));
     };
+    const focusIn = h("input", { class: "plan-focus", maxlength: "280", "aria-label": "Focus for this project only",
+      placeholder: "What is this project for? (this project only, not shared)", value: d.focus || "" });
+    focusIn.addEventListener("change", () => post("POST", `/api/projects/${pid}/plan/focus`, { focus: focusIn.value }));
     body.replaceChildren(h("div", { class: "planv" },
       h("div", { class: "plan-head" },
-        h("div", { class: "ttl" }, icon("check"), h("h3", {}, "Plan"), items.length ? h("span", { class: "faint" }, `${done} of ${items.length} done`) : null),
+        h("div", { class: "ttl" }, icon("check"), h("h3", {}, "Plan · " + (d.project_name || S.project.name)), items.length ? h("span", { class: "faint" }, `${done} of ${items.length} done`) : null),
         h("div", { class: "row" }, studyBtn, draftBtn, done ? abtn("Clear done", () => post("POST", `/api/projects/${pid}/plan/clear-done`), "ghost sm", "trash") : null)),
-      addIn,
+      h("p", { class: "faint" }, "Steps, focus and activity below are stored on this project only."),
+      focusIn, addIn,
       items.length ? h("ol", { class: "plist" }, ...items.map(row))
-        : h("p", { class: "muted" }, "No steps yet. Add one above, let the provider draft some from the chat, or start a Build task — builds file their own steps and tick them off."),
+        : h("p", { class: "muted" }, "No steps yet. Add one above, let the provider draft some from the chat, or send a Chat message with Work on — those file their own steps and tick them off."),
       (d.studies || []).length ? h("div", { class: "studies" }, h("h4", {}, "Reference studies"),
         ...(d.studies || []).map((st) => h("details", { class: `study st-${st.state.toLowerCase()}` },
           h("summary", {}, h("span", { class: `pill ${st.state === "DONE" ? "ok" : st.state === "FAILED" ? "bad" : ""}` }, st.state === "RUNNING" ? "studying…" : st.state.toLowerCase()),
@@ -1974,7 +2178,7 @@ function inspTerminal(body, tid, auto) {
   const pre = h("pre", { "aria-live": "off", tabindex: "0", "aria-label": "Task output" });
   const bar = h("span", { class: "grow" }, `task ${tid}`); const st = h("span"); const errBox = h("div");
   pre.textContent = W.tid === tid ? W.text : "";
-  body.replaceChildren(auto ? h("p", { class: "faint" }, "Most recent task. Select another in Build.") : null, errBox,
+  body.replaceChildren(auto ? h("p", { class: "faint" }, "Most recent folder-work task. Pick another from a Chat message (Output / Changes).") : null, errBox,
     h("div", { class: "term" }, h("div", { class: "term-bar" }, icon("terminal", "sm"), bar, st), pre));
   let errShown = null;
   const upd = (chunk) => {
@@ -1988,7 +2192,7 @@ function inspTerminal(body, tid, auto) {
 }
 function inspChanges(body, tid, auto) {
   const wrap = h("div", { class: "changes" }); const errBox = h("div");
-  body.replaceChildren(auto ? h("p", { class: "faint" }, "Most recent task. Select another in Build.") : null, errBox, wrap);
+  body.replaceChildren(auto ? h("p", { class: "faint" }, "Most recent folder-work task. Pick another from a Chat message (Output / Changes).") : null, errBox, wrap);
   let errShown = null; let lastSig = null;
   const upd = () => {
     if (W.tid !== tid) return;
@@ -2196,6 +2400,12 @@ async function renderChat() {
   const gen = ++S.viewGen;
   const convs = await api("GET", `/api/projects/${pid}/conversations`);
   if (gen !== S.viewGen) return;
+  let ack = { agent_ack: false, statement: "" };
+  try { ack = await api("GET", `/api/projects/${pid}/agent-ack`); } catch (e) { ack = { agent_ack: false, statement: `Could not load the agent acknowledgement: ${e.message}` }; }
+  if (gen !== S.viewGen) return;
+  let rv = { reviewers: [], builder: S.project.provider_default, max_rounds: 3 };
+  try { rv = await api("GET", `/api/projects/${pid}/reviewers`); } catch { /* reviewing stays optional */ }
+  if (gen !== S.viewGen) return;
   let atts = (await api("GET", `/api/projects/${pid}/attachments`)).filter((a) => a.extract_status === "extracted");
   if (gen !== S.viewGen) return;
   // Only a current render may change shared chat state.
@@ -2229,10 +2439,18 @@ async function renderChat() {
   }
   const draftKey = "aesop.draft.chat." + cid;
   const provKey = "aesop.chat.prov." + cid;
+  const workKey = "aesop.work." + cid;
+  const rvKey = "aesop.build.reviewer." + pid;
+  let workOn = ssGet(workKey) === "1" || !!S.wantWork;
+  if (S.wantWork) { ssSet(workKey, "1"); S.wantWork = false; }
+  let ackOk = !!ack.agent_ack;
+  let rvPick = null; try { rvPick = localStorage.getItem(rvKey); } catch { /* optional */ }
+  if (rvPick === null) rvPick = rv.reviewers.find((r) => r === "claude" || r === "codex") || rv.reviewers[0] || "";
+  if (rvPick && !rv.reviewers.includes(rvPick)) rvPick = "";
   const chips = chatChips[cid] || (chatChips[cid] = new Set());
-  const usable = usableRoutes();
+  const usable = () => usableRoutes().filter(([, r]) => (r.supported_modes || []).includes(workOn ? "agent" : "chat"));
   let provPick = ssGet(provKey) || S.project.provider_default || "";
-  if (!usable.some(([id]) => id === provPick)) provPick = S.project.provider_default || (usable[0] && usable[0][0]) || "";
+  if (!usable().some(([id]) => id === provPick)) provPick = (usable()[0] && usable()[0][0]) || S.project.provider_default || "";
   const msgsEl = h("div", { class: "msgs", "aria-live": "polite", "aria-relevant": "additions" });
   const ta = h("textarea", { "aria-label": "Message", placeholder: "Ask something about this project…" });
   ta.value = ssGet(draftKey) || "";
@@ -2283,10 +2501,10 @@ async function renderChat() {
     if (errs.length) bits.push(h("span", { class: "bad" }, errs[errs.length - 1].err));
     const research = ["firecrawl", "perplexity"].includes(prov);
     if ((nP || nF) && research) {
-      bits.push(h("span", {}, `${routeName(prov)} takes questions and links, not files or photos.`), ...usable.filter(([id]) => PHOTO_ROUTES.includes(id)).map(([id]) => h("button", { type: "button", class: "linkish", onclick: () => {
+      bits.push(h("span", {}, `${routeName(prov)} takes questions and links, not files or photos.`), ...usable().filter(([id]) => PHOTO_ROUTES.includes(id)).map(([id]) => h("button", { type: "button", class: "linkish", onclick: () => {
         provSel.value = id; ssSet(provKey, id); refreshRouteLabels(); refit(); } }, `Use ${routeName(id)}`)));
     } else if (nP && prov && !PHOTO_ROUTES.includes(prov)) {
-      const alts = usable.filter(([id]) => PHOTO_ROUTES.includes(id));
+      const alts = usable().filter(([id]) => PHOTO_ROUTES.includes(id));
       bits.push(h("span", {}, `${routeName(prov)} can't see photos.`), ...alts.map(([id]) => h("button", { type: "button", class: "linkish", onclick: () => {
         provSel.value = id; ssSet(provKey, id); refreshRouteLabels(); refit(); } }, `Use ${routeName(id)}`)));
     } else if ((nP || nF) && prov && !(S.project.transfer_policy || {})[prov]) {
@@ -2409,20 +2627,30 @@ async function renderChat() {
     const stale = photos.filter((x) => x.state === "ready" && x.target !== want && x.orig.type !== "image/gif");
     if (stale.length) { sendBtn.disabled = true; await Promise.all(stale.map((x) => uploadPhoto(x, provider))); sendBtn.disabled = false; pics = readyPhotos(); }
     if (pics.length > PHOTO_PARTS_MAX) { banner(`Too many photo parts (${pics.length}); remove a long screenshot or two.`, "bad"); return; }
+    if (workOn && !ackOk) { banner("Tick I understand before a message can change files in this folder.", "bad"); return; }
+    if (workOn && !((S.routes[provider] || {}).supported_modes || []).includes("agent")) {
+      banner(`${routeName(provider)} can only chat. Pick a provider that can edit this folder, or turn Work off.`, "bad"); return;
+    }
     if (/^\/study\b/i.test(raw.trim())) { const t = raw.trim().replace(/^\/study\s*/i, ""); ta.value = ""; grow(); ssSet(draftKey, ""); setItab("plan"); renderInspector(); studyDialog(pid, t); return; }
     const text = raw.trim() || (pics.length ? `Please look at the attached photo${pics.length > 1 ? "s" : ""}.` : fids.length ? "Please look at the attached files." : "");
     if (!text) { ta.focus(); return; }
     sending = true; sendBtn.disabled = true; sendBtn.setAttribute("aria-busy", "true");
     try {
-      await api("POST", `/api/projects/${pid}/conversations/${cid}/messages`,
-        { text, attachment_ids: [...chosen(), ...fids, ...pics], provider, confirm_switch: !!confirm });
+      const posted = await api("POST", `/api/projects/${pid}/conversations/${cid}/messages`,
+        { text, attachment_ids: [...chosen(), ...fids, ...pics], provider, confirm_switch: !!confirm,
+          work: workOn, reviewer: workOn ? (rvSel.value || null) : null });
       if (ta.value === raw) { ta.value = ""; grow(); ssSet(draftKey, ""); } // keep anything typed while the request was pending
       for (const x of photos.filter((y) => y.parts.some((id) => pics.includes(id)))) photos.splice(photos.indexOf(x), 1);
       for (const x of files.filter((y) => fids.includes(y.id) || y.state === "unreadable" || y.state === "error")) files.splice(files.indexOf(x), 1);
       try { atts = (await api("GET", `/api/projects/${pid}/attachments`)).filter((x) => x.extract_status === "extracted"); } catch { /* list refreshes on next view */ }
       chips.clear(); drawTray(); drawProjectPick();
       api("GET", `/api/projects/${pid}/typing-corpus`).then((r) => predict.refreshCorpus(r.texts)).catch(() => {});
-      banner("Saved locally and submitted to provider.", "ok");
+      banner(workOn ? "Working in the project folder." : "Saved locally and submitted to provider.", "ok");
+      if (workOn && posted && posted.task_id) {
+        S.taskSel = posted.task_id;
+        if (inspectorVisible() && !["terminal", "changes", "plan"].includes(S.itab)) setItab("terminal");
+        if (inspectorVisible()) renderInspector();
+      }
       if (gen === S.viewGen) { S.msgSig = ""; drawMsgs(); }
     } catch (e) {
       if (e.status === 409 && !confirm) {
@@ -2431,13 +2659,13 @@ async function renderChat() {
         ], "Send with this provider");
         if (go) return send(true);
       } else banner(e.message, "bad");
-    } finally { sending = false; sendBtn.disabled = false; sendBtn.removeAttribute("aria-busy"); }
+    } finally { sending = false; sendBtn.removeAttribute("aria-busy"); paintWork(); }
   };
   const sendBtn = btn("Send", () => send(false), "primary", "send");
   const preview = async () => guard(async () => {
     const provider = messageProvider();
     const r = await api("POST", `/api/projects/${pid}/conversations/${cid}/preview`,
-      { text: ta.value, attachment_ids: [...chosen(), ...readyFiles(), ...readyPhotos()], provider });
+      { text: ta.value, attachment_ids: [...chosen(), ...readyFiles(), ...readyPhotos()], provider, work: workOn });
     await dialog(`Context that will be sent to ${routeName(r.provider)} (${r.chars} chars)`, [{ name: "ctx", label: "Exact payload", type: "textarea", value: r.context, tall: true, readonly: true }], "Close");
   });
   ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(false); } });
@@ -2467,9 +2695,57 @@ async function renderChat() {
   drawProjectPick();
   const attachRow = h("div", { class: "attach", role: "group", "aria-label": "Attach" }, projPick, photoBtn, fileBtn, folderBtn, photoPick, filePick, folderPick);
   const provSel = h("select", { id: "chatProv", class: "chat-prov", "aria-label": "Provider for this message",
-    onchange: (e) => { ssSet(provKey, e.target.value); refreshRouteLabels(); refit(); } },
-    ...usable.map(([id, r]) => h("option", { value: id, selected: id === provPick },
+    onchange: (e) => { ssSet(provKey, e.target.value); refreshRouteLabels(); refit(); } });
+  const fillProv = () => {
+    const cur = provSel.value || provPick;
+    const rows = usable();
+    const keep = rows.some(([id]) => id === cur) ? cur : (rows[0] && rows[0][0]) || "";
+    provSel.replaceChildren(...rows.map(([id, r]) => h("option", { value: id, selected: id === keep },
       `${routeName(id)} · ${access(r.state)}`)));
+    if (keep) { provSel.value = keep; ssSet(provKey, keep); }
+    refreshRouteLabels();
+  };
+  fillProv();
+  const rvSel = h("select", { id: "buildReviewer", class: "chat-prov", "aria-describedby": "buildReviewerHelp",
+    onchange: (e) => { try { localStorage.setItem(rvKey, e.target.value); } catch { /* optional */ } } },
+    h("option", { value: "" }, "No review"),
+    ...rv.reviewers.map((r) => h("option", { value: r, selected: r === rvPick }, `${routeName(r)} reviews it`)));
+  const rvRow = h("div", { class: "row rv-row" }, h("label", { for: "buildReviewer", class: "faint" }, "Second opinion"), rvSel,
+    h("span", { class: "faint", id: "buildReviewerHelp" }, `When the work finishes, Studio runs this project's tests here, then another AI can review the change (read-only). At most ${rv.max_rounds} rounds.`));
+  const ackBox = h("div", { class: "note workack" });
+  const paintAck = () => {
+    if (ackOk || !workOn) { ackBox.hidden = true; ackBox.replaceChildren(); return; }
+    ackBox.hidden = false;
+    const cb = h("input", { type: "checkbox", id: "agentAck", "aria-describedby": "agentAckText" });
+    cb.onchange = () => guard(async () => {
+      const want = cb.checked; cb.disabled = true;
+      try {
+        const r = await api("POST", `/api/projects/${pid}/agent-ack`, { ack: want });
+        ackOk = r && typeof r.agent_ack === "boolean" ? r.agent_ack : want; cb.checked = ackOk;
+        banner(ackOk ? "Acknowledged. Messages can change files in this folder." : "Acknowledgement withdrawn.", ackOk ? "ok" : "");
+        paintWork();
+      } catch (e) { cb.checked = ackOk; throw e; } finally { cb.disabled = false; }
+    });
+    ackBox.replaceChildren(icon("shield"), h("div", { class: "section" },
+      h("p", { id: "agentAckText" }, ack.statement || "Working in this folder runs a provider CLI that can change files here."),
+      h("label", { class: "rt-ack", for: "agentAck" }, cb, h("span", {}, "I understand"))));
+  };
+  const workTog = h("button", { type: "button", id: "workTog", class: "worktog", "aria-pressed": workOn ? "true" : "false",
+    title: "Same composer: off is a chat answer, on edits files in this project folder (Ctrl+2)" }, icon("terminal", "sm"), "Work in this folder");
+  const paintWork = () => {
+    workTog.setAttribute("aria-pressed", workOn ? "true" : "false");
+    composer.classList.toggle("working", workOn);
+    ta.placeholder = workOn
+      ? "What should change in this project folder? Same chat — this message may edit files."
+      : "Ask something about this project… (paste or drop photos, files or folders here)";
+    rvRow.hidden = !(workOn && rv.reviewers.length);
+    sendBtn.disabled = workOn && !ackOk;
+    paintAck();
+  };
+  workTog.onclick = () => {
+    workOn = !workOn; ssSet(workKey, workOn ? "1" : "");
+    fillProv(); paintWork(); ta.focus();
+  };
   let lastProv = null;
   const handoff = h("span", { class: "handoff faint", role: "status", "aria-live": "polite" });
   const showHandoff = () => {
@@ -2482,14 +2758,21 @@ async function renderChat() {
     lastProv = last ? last.provider : null; showHandoff();
   }
   provSel.addEventListener("change", showHandoff);
-  const composer = h("div", { class: "composer" }, predict.el, tray, trayNote, attachRow,
+  const composer = h("div", { class: "composer" }, predict.el, tray, trayNote, attachRow, ackBox, rvRow,
     h("div", { class: "cfoot" },
-      h("div", { class: "row chat-prow" }, provSel, h("span", { class: "chip", id: "composerRoute" }), handoff, h("span", { class: "hint" }, h("kbd", {}, "Ctrl"), h("kbd", {}, "Enter"), " send"),
+      h("div", { class: "row chat-prow" }, workTog, provSel, h("span", { class: "chip", id: "composerRoute" }), handoff, h("span", { class: "hint" }, h("kbd", {}, "Ctrl"), h("kbd", {}, "Enter"), " send"),
         (() => { const b = h("button", { type: "button", class: "linkish predtog", title: "Ghost-text suggestions from your own past messages (Tab accepts, Esc dismisses). Nothing is sent anywhere." });
           const paint = () => { b.textContent = predictOn() ? "✦ predict on" : "predict off"; b.classList.toggle("off", !predictOn()); };
           b.onclick = () => { try { localStorage.setItem("aesop.predict", predictOn() ? "0" : "1"); } catch { /* */ } paint(); ta.focus(); };
           paint(); return b; })()),
       h("div", { class: "row" }, btn("Preview context", preview, "ghost", "eye"), sendBtn)));
+  paintWork();
+  if (S.pendingCompose) {
+    const pending = S.pendingCompose; S.pendingCompose = null;
+    ta.value = pending.text || ""; ssSet(draftKey, ta.value);
+    if (pending.work) { workOn = true; ssSet(workKey, "1"); fillProv(); }
+    grow(); paintWork(); ta.focus();
+  }
   root.append(msgsEl, h("div", { class: "composer-dock" }, composer));
   // drop photos, files or whole folders anywhere on the chat
   let dragDepth = 0;
@@ -2506,7 +2789,6 @@ async function renderChat() {
     if (loose.length) { const w = await walkEntries(loose); addFiles(w.files); }
     for (const d of dirs) { const w = await walkEntries([d]); addFiles(w.files, d.name, w.skipped); }
   });
-  ta.placeholder = "Ask something about this project… (paste or drop photos, files or folders here)";
   $("view").replaceChildren(root);
   drawTray();
   refreshRouteLabels();
@@ -2523,7 +2805,7 @@ async function renderChat() {
   };
   const pickProvider = async (title, current) => {
     const v = await dialog(title, [{ name: "provider", label: "Provider", type: "select", value: current || messageProvider(),
-      options: usable.map(([id]) => ({ value: id, label: routeName(id) })) }], "Send");
+      options: usable().map(([id]) => ({ value: id, label: routeName(id) })) }], "Send");
     return v && v.provider;
   };
   const redoActions = (m) => {
@@ -2537,7 +2819,7 @@ async function renderChat() {
     } else if (m.role === "user" && m.id === lastIds.user) {
       bits.push(h("button", { type: "button", class: "linkish msave", title: "Change your message and send it again (replaces the answer)", onclick: async () => {
         const v = await dialog("Edit and resend", [{ name: "text", label: "Your message", type: "textarea", value: m.content, tall: true },
-          { name: "provider", label: "Provider", type: "select", value: messageProvider(), options: usable.map(([id]) => ({ value: id, label: routeName(id) })) }], "Resend");
+          { name: "provider", label: "Provider", type: "select", value: messageProvider(), options: usable().map(([id]) => ({ value: id, label: routeName(id) })) }], "Resend");
         if (v && v.text && v.text.trim()) redo(m, { text: v.text, provider: v.provider }, `Resent to ${routeName(v.provider)}…`);
       } }, icon("note", "sm"), "Edit"));
     }
@@ -2557,7 +2839,9 @@ async function renderChat() {
       const stream = h("div", { class: "stream" });
       const lbl = h("div", { class: "stream-label" }, "Partial output received so far (not the final answer)");
       const waited = h("span", { class: "faint" });
-      const wait = h("p", { class: "muted" }, meta.task_id
+      const wait = h("p", { class: "muted" }, meta.work
+        ? "Working in the project folder. Live CLI output is in Terminal; the result lands here when it finishes."
+        : meta.task_id
         ? "Waiting for the provider. API routes show partial text here as it arrives; CLI routes show the answer only when they finish."
         : "Waiting for the provider. The answer appears here when it finishes.");
       const upd = () => {
@@ -2592,13 +2876,19 @@ async function renderChat() {
       h("div", { class: "bubble" },
         h("div", { class: "mhead" },
           h("div", { class: "who" }, h("strong", {}, user ? "You" : routeName(m.provider) || "Assistant"), !user ? routeTag(r) : null,
+            meta.work ? h("span", { class: "chip workchip" }, icon("terminal", "sm"), "in this folder") : null,
             user && m.status === "saved" ? null : statePill(m.status), user ? h("span", { class: "mdot" }, "saved locally") : null),
           h("span", { class: "macts" }, save, redoActions(m),
             m.role === "assistant" && m.status === "generated" && URLS_IN(m.content).length ? h("button", { type: "button", class: "linkish msave", title: "Fetch the pages this answer cites into the research notebook", onclick: () => guard(() => addLinksAsSources(pid, m.content)) }, icon("link", "sm"), "Add links as sources") : null,
             m.role === "assistant" && m.status === "generated" ? h("button", { type: "button", class: "linkish msave", title: "Prefill a finding in the research notebook", onclick: () => saveAsFinding(pid, m.content) }, icon("note", "sm"), "Save as finding") : null)),
         body,
         h("div", { class: "mtime" }, fmtClock(m.created), meta.duration_s ? ` · ${meta.duration_s}s provider wait` : ""),
-        costBits.length ? h("div", { class: "costline" }, icon("dollar", "sm"), costBits.join(" · ")) : null));
+        costBits.length ? h("div", { class: "costline" }, icon("dollar", "sm"), costBits.join(" · ")) : null,
+        meta.work && meta.task_id ? h("div", { class: "worktrail" },
+          h("button", { type: "button", class: "linkish", onclick: (e) => { S.taskSel = meta.task_id; openInspector("terminal", e.currentTarget); } }, icon("terminal", "sm"), "Output"),
+          h("button", { type: "button", class: "linkish", onclick: (e) => { S.taskSel = meta.task_id; openInspector("changes", e.currentTarget); } }, icon("diff", "sm"), "Changes"),
+          !user && m.status === "submitted" ? abtn("Cancel", () => guard(async () => { const c = await api("POST", `/api/tasks/${meta.task_id}/cancel`); banner(c.note, ""); }), "danger sm", "stop") : null) : null,
+        !user && meta.work && meta.task_id ? (() => { const box = h("div", { class: "rvbox", "aria-label": "Review" }); reviewPanel(meta.task_id, box, () => {}, rv); return box; })() : null));
   }
   let fails = 0;
   async function drawMsgs() {
@@ -2621,7 +2911,7 @@ async function renderChat() {
       S.msgSig = sig; S.streamUpd = {};
       lastIds = { user: (msgs.filter((x) => x.role === "user").pop() || {}).id, asst: (msgs.filter((x) => x.role === "assistant").pop() || {}).id };
       msgsEl.replaceChildren(...(msgs.length ? msgs.map(msgView) : [h("div", { class: "empty" }, h("div", { class: "eico" }, icon("sparkle")), h("div", { class: "et" }, h("strong", {}, "Ask your first question"),
-        h("p", {}, "Your message is saved locally first, then sent with this project's context. Try one of these:"),
+        h("p", {}, "Your message is saved locally first, then sent with this project's context. Turn on Work in this folder to edit files here. Try one of these:"),
         h("div", { class: "suggest" }, ...SUGGESTIONS.map(([ic, s]) => h("button", { type: "button", onclick: () => { ta.value = s; ssSet(draftKey, s); grow(); ta.focus(); } }, icon(ic), h("span", {}, s))))))]));
       if (stick) toBottom();
     }
@@ -2657,96 +2947,10 @@ async function renderChat() {
   drawMsgs();
 }
 
-// ---------- build (agent tasks) ----------
-async function renderAgent(selected) {
-  if (!S.project || S.global || S.tab !== "agent") return;
-  const pid = S.project.id;
-  const gen = ++S.viewGen;
-  const tasks = await api("GET", `/api/projects/${pid}/tasks`);
-  if (gen !== S.viewGen) return;
-  let ack = { agent_ack: false, statement: "" };
-  try { ack = await api("GET", `/api/projects/${pid}/agent-ack`); } catch (e) { ack = { agent_ack: false, statement: `Could not load the agent acknowledgement: ${e.message}` }; }
-  if (gen !== S.viewGen) return;
-  let ackOk = !!ack.agent_ack;
-  let rv = { reviewers: [], builder: S.project.provider_default, max_rounds: 3 };
-  try { rv = await api("GET", `/api/projects/${pid}/reviewers`); } catch { /* reviewing stays optional */ }
-  if (gen !== S.viewGen) return;
-  const rvKey = "aesop.build.reviewer." + pid;
-  let rvPick = null; try { rvPick = localStorage.getItem(rvKey); } catch { /* optional */ }
-  if (rvPick === null) rvPick = rv.reviewers.find((r) => r === "claude" || r === "codex") || rv.reviewers[0] || "";
-  if (rvPick && !rv.reviewers.includes(rvPick)) rvPick = "";
-  const rvSel = h("select", { id: "buildReviewer", class: "chat-prov", "aria-describedby": "buildReviewerHelp",
-    onchange: (e) => { try { localStorage.setItem(rvKey, e.target.value); } catch { /* optional */ } } },
-    h("option", { value: "" }, "No review"),
-    ...rv.reviewers.map((r) => h("option", { value: r, selected: r === rvPick }, `${routeName(r)} reviews it`)));
-  const rvRow = h("div", { class: "row rv-row" }, h("label", { for: "buildReviewer", class: "faint" }, "Second opinion"), rvSel,
-    h("span", { class: "faint", id: "buildReviewerHelp" }, `When the build finishes, Studio runs the project's tests on this PC (3-minute limit, no keys in the environment), then another AI reviews the change and the results (read-only). Fixes go back only when you say so; at most ${rv.max_rounds} rounds.`));
-  const blockNote = h("div");
-  const draftKey = "aesop.draft.build." + pid;
-  const ta = h("textarea", { "aria-label": "Agent task", placeholder: "Describe a bounded coding task to run inside the project folder…" });
-  ta.value = ssGet(draftKey) || "";
-  ta.addEventListener("input", () => ssSet(draftKey, ta.value));
-  let starting = false;
-  const start = async () => {
-    if (starting) return;
-    const raw = ta.value; if (!raw.trim()) { ta.focus(); return; }
-    starting = true; startBtn.disabled = true; startBtn.setAttribute("aria-busy", "true");
-    try {
-      const t = await api("POST", `/api/projects/${pid}/tasks`, { prompt: raw, reviewer: rvSel.value || null });
-      if (ta.value === raw) ssSet(draftKey, "");
-      banner(`Task ${t.id} ${t.state}.`, t.state === "BLOCKED_OWNER" ? "bad" : "ok");
-      if (t.state === "BLOCKED_OWNER" && /awaiting repair review/i.test(t.error || "")) {
-        blockNote.replaceChildren(h("div", { class: "note bad", role: "alert" }, icon("alert"), h("div", { class: "section" }, h("span", {}, t.error),
-          h("div", {}, h("button", { type: "button", class: "linkish", onclick: () => openGlobal("evidence") }, icon("evidence", "sm"), "Review the open repair in Evidence")))));
-        return;
-      }
-      if (S.project && S.project.id === pid) { S.taskSel = t.id; refresh("agent", t.id); }
-    } catch (e) { banner(e.message, "bad"); }
-    finally { starting = false; startBtn.disabled = !ackOk; startBtn.removeAttribute("aria-busy"); }
-  };
-  const startBtn = btn("Start task", start, "primary", "terminal");
-  startBtn.disabled = !ackOk;
-  let ackBox = null;
-  if (!ackOk) {
-    const cb = h("input", { type: "checkbox", id: "agentAck", "aria-describedby": "agentAckText" });
-    cb.onchange = () => guard(async () => {
-      const want = cb.checked; cb.disabled = true;
-      try {
-        const r = await api("POST", `/api/projects/${pid}/agent-ack`, { ack: want });
-        ackOk = r && typeof r.agent_ack === "boolean" ? r.agent_ack : want; cb.checked = ackOk; startBtn.disabled = !ackOk;
-        banner(ackOk ? "Acknowledged. Agent tasks can run in this project." : "Acknowledgement withdrawn.", ackOk ? "ok" : "");
-      } catch (e) { cb.checked = ackOk; throw e; } finally { cb.disabled = false; }
-    });
-    ackBox = h("div", { class: "note" }, icon("shield"), h("div", { class: "section" }, h("p", { id: "agentAckText" }, ack.statement || "Agent tasks run a provider CLI that can change files in this project folder."),
-      h("label", { class: "rt-ack", for: "agentAck" }, cb, h("span", {}, "I understand")), h("p", { class: "faint" }, "Start task stays disabled until this is ticked.")));
-  }
-  ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); start(); } });
-  const detail = h("div", { class: "section" });
-  const listEl = h("div", { class: "tasklist" });
-  const pickTask = (id) => {
-    S.taskSel = id; setActivity(`Task ${id}`);
-    listEl.querySelectorAll(".task").forEach((b) => b.setAttribute("aria-current", b.dataset.id === id ? "true" : "false"));
-    showTask(id, detail, (other) => { if (S.project && S.project.id === pid) { S.taskSel = other; refresh("agent", other); } }, rv);
-    if (inspectorVisible() && !["terminal", "changes", "plan"].includes(S.itab)) setItab("terminal");
-    if (inspectorVisible()) renderInspector();
-  };
-  listEl.append(...tasks.map((t) => h("button", { class: "task", type: "button", "data-id": t.id, "aria-current": "false", onclick: () => pickTask(t.id) },
-    h("span", { class: "dot " + tone(t.state) }),
-    h("span", {}, h("span", { class: "tp" }, t.prompt.slice(0, 160)),
-      h("span", { class: "tm" }, statePill(t.state), h("span", {}, routeName(t.provider)), h("span", {}, fmtClock(t.started || t.created)))))));
-  $("view").replaceChildren(
-    h("div", { class: "composer" }, h("div", { class: "card-head" }, h("div", { class: "ttl" }, icon("terminal"), h("h2", {}, "Run an agent task")), h("span", { id: "buildRouteTag" })),
-      h("p", { class: "muted", id: "buildRouteDesc" }), ackBox, ta, rv.reviewers.length ? rvRow : null, blockNote,
-      h("div", { class: "cfoot" }, h("span", { class: "hint" }, h("kbd", {}, "Ctrl"), h("kbd", {}, "Enter"), " start"), startBtn)),
-    tasks.length ? h("div", { class: "grid2" }, section("Recent tasks", `${tasks.length} shown`, listEl), detail)
-      : empty("terminal", "No agent tasks yet", "Describe a bounded task above. Each run records its state, output, exit code and changed files."));
-  refreshRouteLabels();
-  autosize(ta);
-  if (tasks.length) {
-    detail.append(empty("terminal", "Select a task", "Its state, facts and actions appear here; live output and changed files open in the inspector."));
-    const sel = selected || (S.taskSel && tasks.some((t) => t.id === S.taskSel) ? S.taskSel : null);
-    if (sel) pickTask(sel);
-  }
+// ---------- folder work lives in Chat (Work in this folder) ----------
+async function renderAgent() {
+  S.wantWork = true;
+  return renderChat();
 }
 // Built once and updated in place, so polling never destroys the control that has keyboard focus.
 function showTask(tid, el, openTask, rv) {

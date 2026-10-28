@@ -1,7 +1,9 @@
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from aesop_studio import providers
+from aesop_studio.store import Store
 
 
 class ProviderAgentModes(unittest.TestCase):
@@ -31,6 +33,57 @@ class ProviderAgentModes(unittest.TestCase):
                     self.assertIn("--no-plan", agent)
                 else:
                     self.assertIn("--strict-mcp-config", agent)
+
+    def test_balanced_pin_ignores_a_caller_model(self):
+        cases = (
+            ("codex", "chat", "_codex_cmd", ["codex"], None),
+            ("claude", "agent", "_claude_cmd", ["claude"], None),
+            ("cursor", "chat", "_cursor_cmd", ["cursor-agent"], None),
+            ("antigravity", "chat", "_agy_cmd", ["agy"], "hi"),
+            ("copilot", "chat", "_copilot_cmd", ["copilot"], None),
+            ("grok", "agent", "_grok_cmd", ["grok"], "hi"),
+            ("zai", "chat", "_zai_cmd", ["zai"], None),
+        )
+        for rid, mode, cmd, argv0, prompt in cases:
+            with self.subTest(provider=rid), patch.object(providers, cmd, return_value=argv0):
+                spec = providers.BALANCED[rid]
+                argv = providers.build_argv(rid, mode, "C:/project", "out", model="not-the-pin", prompt=prompt)
+                self.assertIn(spec["model"], argv)
+                self.assertNotIn("not-the-pin", argv)
+                if spec["reasoning"]:
+                    self.assertIn(spec["reasoning"], " ".join(argv))
+
+    def test_antigravity_quota_on_the_pin_uses_the_next_model(self):
+        fault = ('AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached. '
+                 'Resets in 77h5m2s.","status":"RESOURCE_EXHAUSTED"}')
+        self.assertTrue(providers.model_quota_fault(fault))
+        self.assertEqual(providers.quota_reset_seconds(fault), 77 * 3600 + 5 * 60 + 2)
+        calls = []
+
+        def contained(argv, timeout, cwd=None, input_text=None):
+            calls.append(argv)
+            model = argv[argv.index("--model") + 1]
+            if model == "gemini-4-argon-medium":
+                return 1, fault
+            return 0, "AESOP_VERIFY_OK"
+
+        store = Store(tempfile.mkdtemp(prefix="aesop-agy-"))
+        try:
+            with patch.object(providers, "_agy_cmd", return_value=["agy"]), patch.object(providers, "_contained", contained):
+                rec = providers.verify_live(store, "antigravity")
+            self.assertTrue(rec["ok"])
+            self.assertEqual(rec["model"], "gemini-3.8-flash-medium")
+            self.assertEqual(rec["exhausted_model"], "gemini-4-argon-medium")
+            self.assertEqual([c[c.index("--model") + 1] for c in calls],
+                             ["gemini-4-argon-medium", "gemini-3.8-flash-medium"])
+            self.assertEqual(providers.active_model(store, "antigravity"), "gemini-3.8-flash-medium")
+            with patch.object(providers, "_agy_cmd", return_value=["agy"]):
+                argv = providers.build_argv("antigravity", "chat", "C:/project", "out",
+                                            model="gemini-3.8-flash-medium", prompt="hi")
+            self.assertIn("gemini-3.8-flash-medium", argv)
+            self.assertNotIn("gemini-4-argon-medium", argv)
+        finally:
+            store.close()
 
     def test_grok_prompt_limit_still_applies_to_agent(self):
         with patch.object(providers, "_grok_cmd", return_value=["grok"]):

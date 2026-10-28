@@ -133,13 +133,26 @@ class Services:
                   f"Selected writable root: {resolved}. Access outside this folder requires a new owner grant.",
                   "current", now))
         self.s.event("project_created", pid, root=str(resolved))
+        self.remember_project(pid)
         return self.project(pid)
+
+    def remember_project(self, pid: str) -> None:
+        self.s.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                 ("ui_last_project", pid))
+
+    def last_project(self) -> str:
+        row = self.s.one("SELECT v FROM kv WHERE k=?", ("ui_last_project",))
+        if not row:
+            return ""
+        live = self.s.one("SELECT id FROM projects WHERE id=? AND archived=0", (row["v"],))
+        return live["id"] if live else ""
 
     def project(self, pid: str) -> dict:
         p = self.s.one("SELECT * FROM projects WHERE id=? AND archived=0", (pid,))
         if not p:
             raise KeyError("project not found")
         p["transfer_policy"] = json.loads(p["transfer_policy"])
+        self.remember_project(pid)
         return p
 
     def projects(self) -> list[dict]:
@@ -470,7 +483,7 @@ class Services:
         return "\n\n".join(parts)
 
     def send(self, pid: str, cid: str, text: str, attachment_ids: list[str], provider: str | None,
-             confirm_switch: bool = False) -> dict:
+             confirm_switch: bool = False, work: bool = False) -> dict:
         p = self.project(pid)
         self._conv(pid, cid)
         text = (text or "").strip()
@@ -486,21 +499,31 @@ class Services:
         image_paths = [str(self.s.data_dir / a["stored_path"]) for a in images]
         now = time.time()
         mid = new_id("msg")
+        mode = "agent" if work else "chat"
+        timeout = 900 if work else 300
+        payload = context
+        if work:
+            payload = ("[Studio: work in the project folder. You may edit files here.]\n\n" + context)
         # The user message and the durable assistant placeholder commit together BEFORE dispatch, so a
         # provider task can never run without a message that will receive its result. The placeholder
         # carries the context hash: if the task-id link below is lost (crash, write error), _resolve
         # re-finds the task by (project, prompt hash) instead of orphaning it.
+        umeta = {"attachments": attachment_ids}
+        ameta = {"context_chars": len(payload), "context_sha256": _sha(payload)}
+        if work:
+            umeta["work"] = True
+            ameta["work"] = True
         with self.s.tx() as c:
             c.execute("INSERT INTO messages(id,conversation_id,role,content,status,provider,created,meta) "
                       "VALUES(?,?,?,?,?,?,?,?)", (new_id("msg"), cid, "user", text, "saved", None, now,
-                                                  json.dumps({"attachments": attachment_ids})))
+                                                  json.dumps(umeta)))
             c.execute("INSERT INTO messages(id,conversation_id,role,content,status,provider,created,meta) "
                       "VALUES(?,?,?,?,?,?,?,?)",
-                      (mid, cid, "assistant", "", "submitted", route, now + 0.001,
-                       json.dumps({"context_chars": len(context), "context_sha256": _sha(context)})))
+                      (mid, cid, "assistant", "", "submitted", route, now + 0.001, json.dumps(ameta)))
         try:
-            tid = self.sup.create(p, route, context, mode="chat", timeout=300, images=image_paths or None,
-                                  research=self.research_payload(cid, text, route) if route in RESEARCH_ROUTES else None)
+            tid = self.sup.create(p, route, payload, mode=mode, timeout=timeout, images=image_paths or None,
+                                  research=None if work else (self.research_payload(cid, text, route)
+                                                              if route in RESEARCH_ROUTES else None))
         except Exception as e:
             self.s.x("UPDATE messages SET content=?, status='failed' WHERE id=?",
                      (f"Request not dispatched: {redact(str(e))[:300]}", mid))
@@ -512,7 +535,7 @@ class Services:
         if self.s.one("SELECT count(*) n FROM messages WHERE conversation_id=?", (cid,))["n"] == 2:
             self.s.x("UPDATE conversations SET title=? WHERE id=?", (text[:60], cid))
         self.s.x("UPDATE projects SET updated=? WHERE id=?", (now, pid))
-        return {"message_id": mid, "task_id": tid}
+        return {"message_id": mid, "task_id": tid, "work": work}
 
     def redo(self, pid: str, cid: str, mid: str, provider: str | None = None, text: str | None = None) -> dict:
         """Retry a failed or interrupted answer, regenerate the latest one, or edit the latest question and resend.
@@ -553,12 +576,16 @@ class Services:
         question = text if text is not None else u["content"]
         umeta = json.loads(u["meta"] or "{}")
         atts = umeta.get("attachments") or []
+        work = bool(umeta.get("work"))
         context = self.build_context(pid, cid, question, atts, route, before=u["created"])
+        payload = ("[Studio: work in the project folder. You may edit files here.]\n\n" + context) if work else context
         _, images = self.split_images(pid, atts)
         image_paths = [str(self.s.data_dir / x["stored_path"]) for x in images]
         prev = {"provider": a["provider"], "status": a["status"]} if a else None
-        ameta = {"context_chars": len(context), "context_sha256": _sha(context),
+        ameta = {"context_chars": len(payload), "context_sha256": _sha(payload),
                  "retry_of": prev, "retries": (json.loads(a["meta"] or "{}").get("retries", 0) + 1) if a else 0}
+        if work:
+            ameta["work"] = True
         with self.s.tx() as c:
             if text is not None and text != u["content"]:
                 umeta["edited_at"] = time.time()
@@ -573,16 +600,17 @@ class Services:
                           "VALUES(?,?,?,?,?,?,?,?)", (aid, cid, "assistant", "", "submitted", route, u["created"] + 0.001,
                                                       json.dumps(ameta)))
         try:
-            tid = self.sup.create(p, route, context, mode="chat", timeout=300, images=image_paths or None,
-                                  research=self.research_payload(cid, question, route, u["created"])
-                                  if route in RESEARCH_ROUTES else None)
+            tid = self.sup.create(p, route, payload, mode="agent" if work else "chat",
+                                  timeout=900 if work else 300, images=image_paths or None,
+                                  research=None if work else (self.research_payload(cid, question, route, u["created"])
+                                                              if route in RESEARCH_ROUTES else None))
         except Exception as e:
             self.s.x("UPDATE messages SET content=?, status='failed' WHERE id=?",
                      (f"Request not dispatched: {redact(str(e))[:300]}", aid))
             raise
         self._link_task(aid, tid)
         self.s.event("chat_redo", pid, message_id=aid, provider=route, edited=text is not None)
-        return {"message_id": aid, "task_id": tid}
+        return {"message_id": aid, "task_id": tid, "work": work, "prompt": question}
 
     def _link_task(self, mid: str, tid: str) -> None:
         with self.s.tx() as c:

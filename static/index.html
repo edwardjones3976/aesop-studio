@@ -34,7 +34,8 @@
   <nav class="rail" aria-label="Workspaces">
     <div id="tabs" class="rail-tabs" role="tablist" aria-orientation="vertical" aria-label="Workspace" hidden>
       <button role="tab" data-tab="chat" data-icon="chat" aria-selected="true"><span class="rl">Chat</span></button>
-      <button role="tab" data-tab="agent" data-icon="terminal"><span class="rl">Build</span></button>
+      <button role="tab" data-tab="plan" data-icon="check"><span class="rl">Plan</span></button>
+      <button role="tab" data-tab="editor" data-icon="file"><span class="rl">Editor</span></button>
       <button role="tab" data-tab="memory" data-icon="layers"><span class="rl">Memory</span></button>
       <button role="tab" data-tab="artifacts" data-icon="bookmark"><span class="rl">Saved</span></button>
     </div>
@@ -82,7 +83,7 @@
     <div class="insp-head">
       <div id="itabs" class="itabs" role="tablist" aria-label="Inspector views">
         <button role="tab" data-itab="preview" aria-selected="true" aria-controls="inspBody">Preview</button>
-        <button role="tab" data-itab="files" aria-selected="false" aria-controls="inspBody">Files</button>
+        <button role="tab" data-itab="files" aria-selected="false" aria-controls="inspBody">Editor</button>
         <button role="tab" data-itab="changes" aria-selected="false" aria-controls="inspBody">Changes</button>
         <button role="tab" data-itab="terminal" aria-selected="false" aria-controls="inspBody">Terminal</button>
         <button role="tab" data-itab="plan" aria-selected="false" aria-controls="inspBody">Plan</button>
@@ -90,6 +91,7 @@
       </div>
       <button id="inspectorClose" class="iconbtn" type="button" aria-label="Close inspector" data-icon="x"></button>
     </div>
+    <div id="inspPlanDock" class="insp-plan" hidden></div>
     <div id="inspBody" class="insp-body" role="tabpanel" tabindex="0"></div>
   </aside>
 </div>
@@ -103,7 +105,7 @@
       <input id="palInput" type="text" role="combobox" aria-expanded="true" aria-controls="palList" aria-autocomplete="list" aria-label="Type a command or project name" placeholder="Type a command or project…" autocomplete="off" spellcheck="false">
     </div>
     <ul id="palList" class="pal-list" role="listbox" aria-label="Commands"></ul>
-    <div class="pal-foot"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> run</span><span><kbd>Esc</kbd> close</span><span><kbd>Ctrl</kbd><kbd>1</kbd>–<kbd>3</kbd> Chat / Build / Research</span><span><kbd>Ctrl</kbd><kbd>Enter</kbd> send</span></div>
+    <div class="pal-foot"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> run</span><span><kbd>Esc</kbd> close</span><span><kbd>Ctrl</kbd><kbd>1</kbd> Chat</span><span><kbd>Ctrl</kbd><kbd>2</kbd> Work in folder</span><span><kbd>Ctrl</kbd><kbd>3</kbd> Research</span><span><kbd>Ctrl</kbd><kbd>Enter</kbd> send</span></div>
   </div>
 </dialog>
 </body>

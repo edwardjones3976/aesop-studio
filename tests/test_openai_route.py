@@ -102,12 +102,14 @@ class TestOpenAIRoute(unittest.TestCase):
         self.assertEqual(t["state"], "COMPLETED", t["error"])
         body = FakeResponses.seen[-1]["body"]
         self.assertEqual(body["model"], openai_api.DEFAULT_MODEL)
+        self.assertEqual(body["reasoning"], {"effort": openai_api.REASONING_EFFORT})
         self.assertEqual(body["max_output_tokens"], openai_api.DEFAULT_MAX_OUTPUT)
         self.assertFalse(body["store"])
         self.assertEqual(self.sup.output(t["id"])[0], "The CLI is ripple, due Friday.")
         row = self.store.one("SELECT * FROM ledger WHERE task_ref=?", (t["id"],))
         self.assertEqual(row["purpose"], "runtime")
-        self.assertAlmostEqual(row["settled_usd"], (1200 * 0.10 + 300 * 0.50) / 1e6, places=9)
+        pin, pout = openai_api.PRICES[openai_api.DEFAULT_MODEL]
+        self.assertAlmostEqual(row["settled_usd"], (1200 * pin + 300 * pout) / 1e6, places=9)
         self.assertGreaterEqual(row["reservation_usd"], row["settled_usd"])
         msg = self.svc.messages(self.p["id"], self.c["id"])[-1]
         self.assertEqual(msg["status"], "generated")

@@ -5,7 +5,7 @@ Owner policy: no Submission Tag Headers, contribution tags/envelopes or contribu
 
 ## What it is
 
-A personal, local-first browser workspace for AI projects on Windows. One Python 3.11+ **stdlib-only** server (no pip dependencies, no build step) binds `127.0.0.1` only and serves a single-page UI. The owner opens a project (one folder), picks a provider, chats or runs a supervised agent task, researches with cited sources, and inspects results. Everything stays on the owner's PC.
+A personal, local-first browser workspace for AI projects on Windows. One Python 3.11+ **stdlib-only** server (no pip dependencies, no build step) binds `127.0.0.1` only and serves a single-page UI. The owner opens a project (one folder), picks a provider, chats (folder work is a toggle on the same composer), keeps a plan that belongs only to that project, edits files in a small in-app editor, researches with cited sources, and inspects results. Everything stays on the owner's PC.
 
 - Repo: https://github.com/edwardjones3976/aesop-studio (private; `main` at `2d21fb5`). Local: `C:\Users\edwar\Claude\Projects\Aesop-Studio`.
 - Data: `%LOCALAPPDATA%\AesopStudio` (SQLite `aesop.db` + files). Never committed.

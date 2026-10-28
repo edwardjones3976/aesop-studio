@@ -79,6 +79,44 @@ class TestWorkflow(Base):
         with self.assertRaises(KeyError):
             self.svc.build_context(self.p["id"], oc["id"], "x", [], "simulated")
 
+    def test_chat_work_edits_project_folder(self):
+        self.svc.update_project(self.p["id"], {"transfer_policy": {"simulated": True}})
+        c = self.svc.new_conversation(self.p["id"])
+        r = self.svc.send(self.p["id"], c["id"], "WRITE a file from chat", [], "simulated", work=True)
+        self.assertTrue(r["work"])
+        t = wait_state(self.sup, r["task_id"])
+        self.assertEqual(t["state"], "COMPLETED")
+        self.assertIn("sim_output.txt", json.loads(t["changed_files"])["added"])
+        msgs = self.svc.messages(self.p["id"], c["id"])
+        self.assertTrue(msgs[0]["meta"].get("work"))
+        self.assertTrue(msgs[-1]["meta"].get("work"))
+        self.assertEqual(msgs[-1]["status"], "generated")
+        r2 = self.svc.redo(self.p["id"], c["id"], msgs[-1]["id"])
+        self.assertTrue(r2["work"])
+        t2 = wait_state(self.sup, r2["task_id"])
+        self.assertEqual(t2["state"], "COMPLETED")
+        self.assertEqual(json.loads(t2["checkpoint"])["mode"], "agent")
+        chat = self.svc.send(self.p["id"], c["id"], "just a question", [], "simulated")
+        self.assertFalse(chat["work"])
+        wait_state(self.sup, chat["task_id"])
+        self.assertNotIn("work", self.svc.messages(self.p["id"], c["id"])[-1]["meta"])
+
+    def test_projects_survive_a_restart_of_the_same_library(self):
+        self.assertEqual(self.svc.last_project(), self.p["id"])
+        self.svc.archive_project(self.p["id"])
+        self.assertEqual(self.svc.last_project(), "")
+        other = self.tmp / "kept"
+        other.mkdir()
+        kept = self.svc.create_project("Kept", str(other), "simulated")
+        self.store.close()
+        s2 = Store(self.tmp / "data")
+        svc2 = Services(s2, Supervisor(s2))
+        ids = [p["id"] for p in svc2.projects()]
+        self.assertIn(kept["id"], ids)
+        self.assertNotIn(self.p["id"], ids)
+        self.assertEqual(svc2.last_project(), kept["id"])
+        s2.close()
+
     def test_ac02_explicit_provider_pick_is_enough(self):
         # owner rule 2026-10-23: switching provider mid-chat is the point of Studio; the composer pick needs no confirm
         c = self.svc.new_conversation(self.p["id"])
@@ -308,6 +346,14 @@ class TestHttp(unittest.TestCase):
     def test_ac08_listener_loopback_only(self):
         self.assertEqual(self.srv.server_address[0], "127.0.0.1")
 
+    def test_session_reports_the_build_the_page_booted_with(self):
+        cookie, _csrf = self.login()
+        st, _, body = self.req("GET", "/api/session", headers={"Cookie": cookie})
+        self.assertEqual(st, 200)
+        data = json.loads(body)
+        self.assertEqual(data["build"], int(self.srv.app.source_mtime * 1000))
+        self.assertFalse(data["retiring"])
+
     def test_ac08_auth_origin_csrf_host(self):
         cookie, csrf = self.login()
         self.assertEqual(self.req("GET", "/api/projects")[0], 401)
@@ -347,10 +393,36 @@ class TestHttp(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertEqual([t["id"] for t in json.loads(body)], ["task_agentx"])
 
+    def test_chat_work_via_messages_http(self):
+        cookie, csrf = self.login()
+        origin = f"http://127.0.0.1:{self.port}"
+        app = self.srv.app
+        root = self.tmp / "workhttp"
+        root.mkdir()
+        p = app.svc.create_project("W", str(root), "simulated")
+        app.store.x("INSERT INTO kv(k,v) VALUES(?, 'on')", (f"agent_ack:{p['id']}",))
+        app.svc.update_project(p["id"], {"transfer_policy": {"simulated": True}})
+        c = app.svc.new_conversation(p["id"])
+        st, _, body = self.req(
+            "POST", f"/api/projects/{p['id']}/conversations/{c['id']}/messages",
+            {"text": "WRITE a file from chat", "attachment_ids": [], "provider": "simulated", "work": True},
+            {"Cookie": cookie, "Content-Type": "application/json", "Origin": origin, "X-CSRF-Token": csrf})
+        self.assertEqual(st, 202)
+        r = json.loads(body)
+        self.assertTrue(r["work"])
+        t = wait_state(app.sup, r["task_id"])
+        self.assertEqual(t["state"], "COMPLETED")
+        self.assertIn("sim_output.txt", json.loads(t["changed_files"])["added"])
+        msgs = app.svc.messages(p["id"], c["id"])
+        self.assertTrue(msgs[0]["meta"].get("work"))
+        self.assertTrue(msgs[-1]["meta"].get("work"))
+
     def test_static_and_no_secrets_in_bundle(self):
         st, _, body = self.req("GET", "/app.js")
         self.assertEqual(st, 200)
         self.assertNotIn(b"innerHTML", body)
+        self.assertIn(b'id: "workTog"', body)
+        self.assertNotIn(b'data-tab="agent"', self.req("GET", "/")[2])
         self.assertEqual(self.req("GET", "/../aesop_studio/server.py")[0], 404)
 
 

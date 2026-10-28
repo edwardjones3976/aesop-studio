@@ -295,6 +295,11 @@ class Supervisor:
     def get(self, task_id: str) -> dict | None:
         return self.store.one("SELECT * FROM tasks WHERE id=?", (task_id,))
 
+    def has_live_work(self) -> bool:
+        """A task that is still being prepared or run. A stale process waits for these before it exits."""
+        return self.store.one(
+            "SELECT id FROM tasks WHERE state IN ('CREATED','RESERVED','STARTING','RUNNING') LIMIT 1") is not None
+
     def _busy(self, c, project_id: str):
         """One agent writer per project. An EFFECT_UNKNOWN agent task with an unresolved repair still blocks:
         its process may survive, so a second writer could collide with it until the owner resolves the repair."""
@@ -367,8 +372,9 @@ class Supervisor:
         except Exception as e:  # noqa: BLE001 - nothing was dispatched: release the reservation
             self._end(tid, "FAILED", lid, 0, error=f"could not prepare the task: {type(e).__name__}: {str(e)[:200]}")
             return tid
+        pinned = providers.active_model(self.store, route_id) if route_id in providers.BALANCED else project.get("model")
         threading.Thread(target=self._run, args=(tid, route_id, mode, cwd, prompt, out_path, timeout, lid,
-                                                 project.get("model"), images, study), daemon=True).start()
+                                                 pinned, images, study), daemon=True).start()
         return tid
 
     # ---- research API routes (Firecrawl, Perplexity): one bounded HTTPS call, no subprocess ----
@@ -419,8 +425,7 @@ class Supervisor:
     # ---- metered API route (no subprocess; streamed, reserved, settled from real usage) ----
     def _start_api(self, tid, project, route_id, route, prompt, out_path, timeout, images=None) -> str:
         api = perplexity_api if route_id == "perplexity-orchestrator" else openai_api
-        model = project.get("model") if api is perplexity_api else (
-            project.get("model") if project.get("model") in openai_api.PRICES else openai_api.DEFAULT_MODEL)
+        model = project.get("model") if api is perplexity_api else openai_api.DEFAULT_MODEL
         max_out = api.DEFAULT_MAX_OUTPUT
         rates = None
         try:  # each high-detail image is bounded at IMAGE_TOKEN_BOUND input tokens in the reservation

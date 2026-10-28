@@ -285,6 +285,12 @@ td.wrap { min-width: 220px; }
 .composer-dock { position: sticky; bottom: calc(-1 * var(--s5)); margin: 0 calc(-1 * var(--s5)) calc(-1 * var(--s5)); padding: var(--s3) var(--s5) var(--s5); background: linear-gradient(to bottom, rgba(20, 31, 44, 0), var(--panel) 18px); z-index: 2; }
 .composer { background: var(--sunken); border: 1px solid var(--border-2); border-radius: var(--r-composer); padding: var(--s2) var(--s3) var(--s3); display: flex; flex-direction: column; gap: var(--s2); box-shadow: var(--shadow-2); transition: border-color var(--t-hover) var(--ease), box-shadow var(--t-hover) var(--ease); }
 .composer:focus-within { border-color: var(--focus); box-shadow: var(--shadow-2), 0 0 0 3px rgba(155, 215, 255, .2); }
+.composer.working { border-color: var(--amber); }
+.worktog { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border-2); background: transparent; color: inherit; border-radius: var(--r-ctl); padding: 4px 8px; font: inherit; cursor: pointer; }
+.worktog[aria-pressed="true"] { background: var(--sky-bg, rgba(155, 215, 255, .12)); border-color: var(--sky, #9bd7ff); }
+.workchip { font-size: .78rem; }
+.worktrail { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.workack { margin-top: 4px; }
 .composer textarea { border: 0; background: none; box-shadow: none; padding: 8px 4px; min-height: 96px; max-height: 240px; resize: none; overflow-y: auto; }
 .composer textarea:focus-visible { box-shadow: none; }
 .cfoot { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); flex-wrap: wrap; border-top: 1px solid var(--border); padding-top: var(--s2); }
@@ -394,7 +400,26 @@ details.card > pre.out { margin: 0 14px 14px; }
 .itabs button:hover { color: var(--text); }
 .itabs button[aria-selected="true"] { color: var(--text); }
 .itabs button[aria-selected="true"]::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; border-radius: 2px; background: var(--coral); }
+.insp-plan { flex: 0 1 auto; max-height: 36%; overflow: auto; padding: 8px 12px 10px; border-bottom: 1px solid var(--border); background: var(--panel); min-height: 0; }
+.insp-plan[hidden] { display: none; }
+.insp-plan .plan-head h3 { font-size: 13.5px; }
+.insp-plan .plist { gap: 3px; }
+.insp-plan .pitem { padding: 5px 6px; font-size: 12.5px; }
+.plan-focus { width: 100%; min-height: 36px; margin: 0 0 6px; font: inherit; font-size: 12.5px; }
 .insp-body { flex: 1; min-height: 0; overflow: auto; padding: var(--s4); display: flex; flex-direction: column; gap: var(--s3); scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+.ide { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+.ide-split { display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+.ide-tree { max-height: 140px; overflow: auto; border: 1px solid var(--border); border-radius: var(--r-sm); padding: 6px; background: var(--sunken); font-size: 12.5px; }
+.ide-dir { margin: 0; }
+.ide-dir > summary { cursor: pointer; font-weight: 580; padding: 2px 4px; }
+.ide-kids { padding-left: 10px; }
+.ide-file { display: block; width: 100%; text-align: left; border: 0; background: none; color: inherit; font: inherit; padding: 4px 6px; border-radius: 4px; cursor: pointer; }
+.ide-file:hover { background: var(--raised); }
+.ide-file.on { background: var(--sky-bg); color: var(--sky); }
+.ide-file:disabled { opacity: .45; cursor: not-allowed; }
+.ide-pane { display: flex; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; flex: 1; }
+.ide-tools { display: flex; flex-wrap: wrap; gap: 4px; }
+.ide-pane textarea { flex: 1; min-height: 180px; font-family: var(--mono); font-size: 12.5px; line-height: 1.45; resize: vertical; }
 .insp-body .term { flex: 1; } .insp-body .term pre { max-height: none; }
 .ilist { display: flex; flex-direction: column; gap: 6px; }
 .ilog { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r-ctl); background: var(--sunken); font-size: 12.5px; }

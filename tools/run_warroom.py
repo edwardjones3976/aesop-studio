@@ -25,7 +25,7 @@ Facts about the current UI (from the design contract, 49 QA screenshots at 7 vie
   text #EEF4FA / #AFBED0, one coral primary action #FF916C (dark text), mint #80E1CB for verified, sky focus #9BD7FF.
   Segoe UI Variable; 14px body, 22px workspace heading; 12px panel radius; subtle shadows.
 - Layout: 60px topbar (logo, breadcrumb Project / Workspace / Activity, Ctrl+K search, provider+route chip, help,
-  inspector toggle), 64-68px icon+label rail (Chat, Build, Research, Memory, Saved; Providers/Evidence at bottom),
+  inspector toggle), 64-68px icon+label rail (Chat, Memory, Saved; Work in this folder and Research live inside Chat; Providers/Evidence at bottom),
   220-248px project explorer with initials avatars and a coral 'New project' button, flexible canvas, 320-400px
   inspector with tabs Preview/Files/Changes/Terminal/Logs. Mobile: bottom nav, one column.
 - Chat: message cards with avatar initials, provider name + access-route chip + status pill, cost line for metered

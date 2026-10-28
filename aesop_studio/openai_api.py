@@ -27,7 +27,8 @@ PRICES = {
     "gpt-6.1-sol": (2.00, 10.00),
     "gpt-6-astra": (10.00, 50.00),
 }
-DEFAULT_MODEL = "gpt-6-luna"
+DEFAULT_MODEL = "gpt-6.1-sol"  # middle of luna / sol / astra on price, speed and capability
+REASONING_EFFORT = "medium"
 DEFAULT_MAX_OUTPUT = 2000
 MAX_OUTPUT_CAP = 16000
 SAFETY_MARGIN = 1.10
@@ -140,7 +141,7 @@ def stream(prompt: str, model: str, max_output: int, on_delta, cancel: threading
     payload = prompt if not images else [{"role": "user", "content": [{"type": "input_text", "text": prompt}] + [
         {"type": "input_image", "image_url": u, "detail": "high"} for u in images]}]
     body = json.dumps({"model": model, "input": payload, "max_output_tokens": max_output, "stream": True,
-                       "store": False})
+                       "store": False, "reasoning": {"effort": REASONING_EFFORT}})
     deadline = time.monotonic() + timeout
     stopped = threading.Event()      # set when the caller stops listening: later deltas are discarded
     done = threading.Event()

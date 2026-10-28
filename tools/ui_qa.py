@@ -21,7 +21,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 VIEWPORTS = [(1920, 1080), (1440, 900), (1366, 768), (1024, 768), (768, 1024), (390, 844), (360, 780)]
-VIEWS = [("chat", "tab"), ("agent", "tab"), ("memory", "tab"),
+VIEWS = [("chat", "tab"), ("memory", "tab"),
          ("artifacts", "tab"), ("providers", "global"), ("evidence", "global")]
 ROOT = Path(__file__).resolve().parent.parent
 

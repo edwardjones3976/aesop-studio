@@ -119,16 +119,48 @@ def verify_live(store, rid: str) -> dict:
     import shutil
     cwd = tempfile.mkdtemp(prefix="aesop-verify-")
     t0 = time.time()
+    models: list[str | None] = [None]
+    if rid == "antigravity":
+        pin = BALANCED["antigravity"]["model"]
+        prior = _live_verification(store, rid) or {}
+        if prior.get("exhausted_model") == pin and time.time() < (prior.get("exhausted_until") or 0):
+            models = list(AGY_MODEL_FALLBACKS)
+        else:
+            models = [pin, *AGY_MODEL_FALLBACKS]
+    ok, detail, used = False, "", None
+    exhausted_model, exhausted_until = None, None
     try:
-        argv = build_argv(rid, "chat", cwd, str(Path(cwd) / "last.txt"), None, prompt=prompt)
-        code, out = _contained(argv, 180, cwd=cwd, input_text=None if rid in ARGV_PROMPT_ROUTES else prompt)
-        ok = VERIFY_TOKEN in out
-        detail = "reply matched" if ok else redact(out.strip().splitlines()[-1] if out.strip() else f"exit {code}")
+        for candidate in models:
+            argv = build_argv(rid, "chat", cwd, str(Path(cwd) / "last.txt"), candidate, prompt=prompt)
+            code, out = _contained(argv, 180, cwd=cwd, input_text=None if rid in ARGV_PROMPT_ROUTES else prompt)
+            if VERIFY_TOKEN in out:
+                ok, used = True, candidate or BALANCED.get(rid, {}).get("model")
+                detail = "reply matched"
+                break
+            detail = redact(out.strip().splitlines()[-1] if out.strip() else f"exit {code}")
+            if rid == "antigravity" and model_quota_fault(out):
+                exhausted_model = candidate
+                reset = quota_reset_seconds(out)
+                if reset:
+                    exhausted_until = time.time() + reset
+                continue
+            break
     except (OSError, RuntimeError) as e:
         ok, detail = False, f"{type(e).__name__}: {str(e)[:160]}"
     finally:
         shutil.rmtree(cwd, ignore_errors=True)
+    if ok and exhausted_model:
+        reset_note = ""
+        if exhausted_until:
+            reset_note = " until " + time.strftime("%Y-%m-%d %H:%M", time.localtime(exhausted_until))
+        detail = f"{exhausted_model} quota reached{reset_note}; using {used}"
     rec = {"at": time.time(), "ok": ok, "detail": detail[:200], "latency_s": round(time.time() - t0, 1)}
+    if used:
+        rec["model"] = used
+    if exhausted_model:
+        rec["exhausted_model"] = exhausted_model
+    if exhausted_until:
+        rec["exhausted_until"] = exhausted_until
     store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
             (f"verify:{rid}", json.dumps(rec)))
     store.event("route_live_verification", None, route=rid, ok=ok, latency_s=rec["latency_s"])
@@ -322,9 +354,12 @@ def probe(store=None) -> dict[str, dict]:
         if signed_in is False:
             r.update(state="AUTH_REQUIRED", evidence="cursor-agent status: not signed in; run `cursor-agent login`")
         elif fresh and ver.get("ok"):
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ver["at"]))
+            note = ver.get("detail") or "ok"
+            if ver.get("model") and ver.get("model") not in note:
+                note = f"{ver['model']}: {note}"
             r.update(state="READY_INCLUDED", incremental_cost_status="plan quota (no $ visibility)",
-                     evidence=f"live verification {time.strftime('%Y-%m-%d %H:%M', time.localtime(ver['at']))}: "
-                              f"{ver.get('detail', 'ok')}")
+                     evidence=f"live verification {when}: {note}")
         elif fresh:
             r.update(state="UNAVAILABLE", evidence=f"last live verification failed: {ver.get('detail', '')}"[:300])
         else:
@@ -392,6 +427,17 @@ def _named(routes: dict) -> dict:
     for rid, r in routes.items():
         r["id"] = rid
         r["display_name"], r["family"] = DISPLAY.get(rid, (rid, rid))
+        if rid in BALANCED:
+            r["balanced_model"] = BALANCED[rid]["model"]
+            r["balanced_reasoning"] = BALANCED[rid]["reasoning"]
+        elif rid == "openai-api":
+            from . import openai_api
+            r["balanced_model"] = openai_api.DEFAULT_MODEL
+            r["balanced_reasoning"] = "medium"
+        elif rid == "perplexity":
+            from . import research_routes
+            r["balanced_model"] = research_routes.PPLX_MODEL
+            r["balanced_reasoning"] = None
         if rid in ("grok", "zai"):
             # Capabilities come from the installed adapter, including for cached verification records.
             r["supported_modes"] = ["chat", "agent"]
@@ -411,10 +457,58 @@ def cached(store: Store) -> dict[str, dict]:
             if purpose:  # overlay live spend controls on the probed state
                 routes[rid] = dict(api, state="READY_METERED", incremental_cost_status=f"metered; billing the "
                                    f"{purpose} envelope; {api['incremental_cost_status'].split('; ', 1)[-1]}")
+    alt = active_model(store, "antigravity")
+    if alt and "antigravity" in routes:
+        routes["antigravity"]["balanced_model"] = alt
     return routes
 
 
 STUDY_ROUTES = ("claude", "codex", "simulated")   # CLIs that can load a per-run MCP server and a read-only sandbox
+
+# One setting per provider. Chosen 2026-10-26 with Codex and Claude for resource use, speed,
+# intelligence and capability. Not a ladder: Studio does not offer a higher or lower step.
+# Cursor Fast variants are excluded. Z.ai has no medium effort (low, high, max only).
+# Argon high/medium/low share one quota pool. A 429 there is that pool, not the Antigravity account.
+# The next eligible Studio settings are Flash at the same effort, then Flash low.
+AGY_MODEL_FALLBACKS = ("gemini-3.8-flash-medium", "gemini-3.8-flash-low")
+
+
+def model_quota_fault(text: str) -> bool:
+    low = text.lower()
+    return "resource_exhausted" in low or "individual quota reached" in low
+
+
+def quota_reset_seconds(text: str) -> int | None:
+    match = re.search(r"Resets in (?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?", text)
+    if not match or not any(match.groups()):
+        return None
+    hours, minutes, seconds = (int(part or 0) for part in match.groups())
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def active_model(store, route_id: str) -> str | None:
+    """The pinned model, or Antigravity's next eligible model while the pin's pool is exhausted."""
+    spec = BALANCED.get(route_id)
+    if not spec:
+        return None
+    if route_id != "antigravity" or store is None:
+        return spec["model"]
+    ver = _live_verification(store, route_id) or {}
+    alt = ver.get("model")
+    if alt in AGY_MODEL_FALLBACKS and time.time() < (ver.get("exhausted_until") or 0):
+        return alt
+    return spec["model"]
+
+
+BALANCED = {
+    "codex": {"model": "gpt-6.1-sol", "reasoning": "medium"},
+    "claude": {"model": "sonnet", "reasoning": "medium"},
+    "cursor": {"model": "composer-2.5", "reasoning": None},
+    "antigravity": {"model": "gemini-4-argon-medium", "reasoning": "medium"},
+    "copilot": {"model": "claude-sonnet-5.5", "reasoning": "medium"},
+    "grok": {"model": "grok-4.7", "reasoning": "medium"},
+    "zai": {"model": "glm-5.3", "reasoning": "high"},
+}
 
 
 def usable(route: dict, mode: str) -> bool:
@@ -433,6 +527,12 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
     the explicit config in `study["mcp_config"]` so the run never depends on the owner's global registrations."""
     if mode == "study" and not (study and study.get("mcp_config") and study.get("ref_path")):
         raise RuntimeError("a study needs its MCP config and reference path")
+    if route_id in BALANCED:
+        allowed = {BALANCED[route_id]["model"]}
+        if route_id == "antigravity":
+            allowed.update(AGY_MODEL_FALLBACKS)
+        if model not in allowed:
+            model = None  # a project or caller value cannot move the pin
     if route_id == "codex":
         cmd = _codex_cmd()
         if not cmd:
@@ -450,8 +550,8 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
             argv += ["--ephemeral", "-c", f"mcp_servers.rea.command={json.dumps(REA_COMMAND)}",
                      "-c", f"mcp_servers.rea.args={args_toml}", "-c", "mcp_servers.rea.startup_timeout_sec=60",
                      "--add-dir", study["ref_path"]]
-        if model:
-            argv += ["-m", model]
+        spec = BALANCED["codex"]
+        argv += ["-m", model or spec["model"], "-c", f"model_reasoning_effort={spec['reasoning']}"]
         return argv + ["-"]
     if route_id == "claude":
         cmd = _claude_cmd()
@@ -467,15 +567,15 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         else:
             argv += ["--permission-mode", "acceptEdits",
                      "--disallowedTools", "Bash(rm:*)", "Bash(del:*)", "Bash(Remove-Item:*)", "WebFetch"]
-        if model:
-            argv += ["--model", model]
+        spec = BALANCED["claude"]
+        argv += ["--model", model or spec["model"], "--effort", spec["reasoning"]]
         return argv
     if route_id == "cursor" and mode == "chat":
         cmd = _cursor_cmd()
         if not cmd:
             raise RuntimeError("cursor-agent unavailable")
         argv = cmd + ["-p", "--output-format", "text", "--mode", "ask", "--trust", "--workspace", cwd]
-        return argv + (["--model", model] if model else [])
+        return argv + ["--model", model or BALANCED["cursor"]["model"]]
     if route_id == "antigravity" and mode == "chat":
         cmd = _agy_cmd()
         if not cmd:
@@ -483,13 +583,16 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         if prompt is None or len(prompt) > MAX_ARGV_PROMPT:
             raise RuntimeError(f"Antigravity takes the prompt as an argument; context over {MAX_ARGV_PROMPT:,} "
                                "characters is refused")
-        return cmd + ["--mode", "plan", "--print-timeout", "280s"] + (["--model", model] if model else []) + [
-            "-p=" + prompt]
+        spec = BALANCED["antigravity"]
+        return cmd + ["--mode", "plan", "--print-timeout", "280s", "--model", model or spec["model"],
+                      "--effort", spec["reasoning"], "-p=" + prompt]
     if route_id == "copilot" and mode == "chat":
         cmd = _copilot_cmd()
         if not cmd:
             raise RuntimeError("copilot unavailable")
-        return cmd + ["-s", "--no-color"] + (["--model", model] if model else [])  # prompt via stdin
+        spec = BALANCED["copilot"]
+        return cmd + ["-s", "--no-color", "--model", model or spec["model"],
+                      "--reasoning-effort", spec["reasoning"]]  # prompt via stdin
     if route_id == "grok" and mode in ("chat", "agent"):
         cmd = _grok_cmd()
         if not cmd:
@@ -499,8 +602,9 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
                                "is refused")
         permissions = (["--permission-mode", "default", "--tools", ""] if mode == "chat" else
                        ["--permission-mode", "acceptEdits", "--allow", "Bash"])
-        return cmd + ["--cwd", cwd, "--no-plan"] + permissions + ["--output-format", "plain"] + (["-m", model] if model else []) + [
-            "-p", prompt]
+        spec = BALANCED["grok"]
+        return cmd + ["--cwd", cwd, "--no-plan"] + permissions + ["--output-format", "plain",
+                      "-m", model or spec["model"], "--reasoning-effort", spec["reasoning"], "-p", prompt]
     if route_id == "zai" and mode in ("chat", "agent"):
         cmd = _zai_cmd()
         if not cmd:
@@ -509,8 +613,9 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         # strings, so "--tools ''" arrived as a bare "--tools" and every Z.ai chat failed. Chat uses an explicit deny-list.
         permissions = (["--disallowedTools", "Bash,Edit,Write,WebFetch,WebSearch,NotebookEdit,Task"] if mode == "chat"
                        else ["--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep"])
-        return cmd + (["-Model", model] if model else []) + [
-            "-p", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config"] + permissions
+        spec = BALANCED["zai"]
+        return cmd + ["-Model", model or spec["model"], "--effort", spec["reasoning"],
+                      "-p", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config"] + permissions
     if route_id == "simulated":
         return _sim_cmd() + [mode, out_file]
     raise RuntimeError(f"route {route_id} has no in-app execution path for {mode}")

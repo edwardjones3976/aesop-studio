@@ -17,7 +17,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backup, browse_agent, study, browser as browser_mod, deletion, plan, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare
+from . import backup, browse_agent, study, browser as browser_mod, deletion, plan, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare, workspace
 from .security import MAX_UPLOAD_BYTES, ScopeError, redact
 from .services import Conflict, Services
 from .sessions import SESSION_DAYS, Sessions
@@ -27,6 +27,25 @@ from .tasks import Supervisor
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 HOST = "127.0.0.1"
+
+
+def source_root() -> Path:
+    override = os.environ.get("AESOP_SOURCE_ROOT")
+    return Path(override) if override else STATIC.parent
+
+
+def source_mtime(root: Path | None = None) -> float:
+    """Newest Studio source file. A running process keeps this stamp; a later write means that process is stale."""
+    root = root or source_root()
+    latest = 0.0
+    for folder, pattern in ((root / "aesop_studio", "*.py"), (root / "static", "*.js"),
+                            (root / "static", "*.html"), (root / "static", "*.css")):
+        if not folder.is_dir():
+            continue
+        for f in folder.rglob(pattern):
+            if f.is_file():
+                latest = max(latest, f.stat().st_mtime)
+    return latest
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; "
        "frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 
@@ -58,6 +77,8 @@ def _lock_data_dir(data_dir: str):
 class App:
     def __init__(self, data_dir: str, port: int):
         self.port = port
+        self.source_mtime = source_mtime()
+        self.retiring = False
         self._instance_lock = _lock_data_dir(data_dir)
         self.store = Store(data_dir)
         self.sup = Supervisor(self.store)
@@ -209,7 +230,9 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- API ----------
     @route("GET", r"/api/session")
     def session(self, sess):
-        self.json({"csrf": self._sitem["csrf"], "reconciled": self.app.reconciled, "port": self.app.port})
+        self.json({"csrf": self._sitem["csrf"], "reconciled": self.app.reconciled, "port": self.app.port,
+                   "last_project": self.app.svc.last_project(),
+                   "build": int(self.app.source_mtime * 1000), "retiring": self.app.retiring})
 
     @route("GET", r"/api/routes")
     def routes(self, sess):
@@ -495,7 +518,15 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/projects/(\w+)/conversations/(\w+)/messages/(\w+)/redo")
     def message_redo(self, sess, pid, cid, mid):
         b = self.body()
-        self.json(self.app.svc.redo(pid, cid, mid, b.get("provider") or None, b.get("text")), 202)
+        r = self.app.svc.redo(pid, cid, mid, b.get("provider") or None, b.get("text"))
+        if r.get("work") and r.get("task_id"):
+            try:
+                plan.add_for_task(self.app.store, pid, r["task_id"], r.get("prompt") or b.get("text") or "")
+            except ValueError:
+                pass
+            team.plan(self.app.store, r["task_id"], None)
+            team.watch(self.app.store, self.app.sup, self.app.svc, r["task_id"])
+        self.json(r, 202)
 
     @route("POST", r"/api/projects/(\w+)/conversations/(\w+)/preview")
     def preview(self, sess, pid, cid):
@@ -503,13 +534,29 @@ class Handler(BaseHTTPRequestHandler):
         p = self.app.svc.project(pid)
         prov = b.get("provider") or p["provider_default"]
         ctx = self.app.svc.build_context(pid, cid, b.get("text", ""), b.get("attachment_ids", []), prov)
-        self.json({"provider": prov, "context": ctx, "chars": len(ctx)})
+        if b.get("work"):
+            ctx = "[Studio: work in the project folder. You may edit files here.]\n\n" + ctx
+        self.json({"provider": prov, "context": ctx, "chars": len(ctx), "work": bool(b.get("work"))})
 
     @route("POST", r"/api/projects/(\w+)/conversations/(\w+)/messages")
     def send(self, sess, pid, cid):
         b = self.body()
-        self.json(self.app.svc.send(pid, cid, b.get("text", ""), b.get("attachment_ids", []), b.get("provider"),
-                                    bool(b.get("confirm_switch"))), 202)
+        work = bool(b.get("work"))
+        reviewer = b.get("reviewer") or None
+        if work and reviewer:
+            prov = b.get("provider") or self.app.svc.project(pid)["provider_default"]
+            if reviewer not in team.reviewers(self.app.store, prov):
+                raise ValueError(f"{reviewer} can't review right now; pick another reviewer or none")
+        r = self.app.svc.send(pid, cid, b.get("text", ""), b.get("attachment_ids", []), b.get("provider"),
+                              bool(b.get("confirm_switch")), work=work)
+        if work and r.get("task_id"):
+            try:
+                plan.add_for_task(self.app.store, pid, r["task_id"], b.get("text") or "")
+            except ValueError:
+                pass
+            team.plan(self.app.store, r["task_id"], reviewer)
+            team.watch(self.app.store, self.app.sup, self.app.svc, r["task_id"])
+        self.json(r, 202)
 
     @route("GET", r"/api/projects/(\w+)/artifacts")
     def artifacts(self, sess, pid):
@@ -568,9 +615,32 @@ class Handler(BaseHTTPRequestHandler):
 
     @route("GET", r"/api/projects/(\w+)/plan")
     def plan_list(self, sess, pid):
+        p = self.app.svc.project(pid)
+        self.json(plan.payload(self.app.store, self.app.sup, pid, p["name"]))
+
+    @route("POST", r"/api/projects/(\w+)/plan/focus")
+    def plan_focus(self, sess, pid):
         self.app.svc.project(pid)
-        self.json({"items": plan.list_items(self.app.store, self.app.sup, pid),
-                   "activity": plan.activity(self.app.store, pid)})
+        self.json(plan.set_focus(self.app.store, pid, self.body().get("focus") or ""))
+
+    @route("GET", r"/api/projects/(\w+)/tree")
+    def project_tree(self, sess, pid):
+        p = self.app.svc.project(pid)
+        self.json(workspace.list_tree(p, (self.query.get("path") or [""])[0]))
+
+    @route("GET", r"/api/projects/(\w+)/file")
+    def project_file_get(self, sess, pid):
+        p = self.app.svc.project(pid)
+        rel = (self.query.get("path") or [""])[0]
+        if not rel:
+            raise ValueError("choose a file in this project")
+        self.json(workspace.read_file(p, rel))
+
+    @route("POST", r"/api/projects/(\w+)/file")
+    def project_file_put(self, sess, pid):
+        p = self.app.svc.project(pid)
+        b = self.body()
+        self.json(workspace.write_file(self.app.store, p, b.get("path") or "", b.get("content") if "content" in b else ""))
 
     @route("POST", r"/api/projects/(\w+)/plan")
     def plan_add(self, sess, pid):
@@ -861,21 +931,51 @@ class StudioHTTPServer(ThreadingHTTPServer):
         super().server_bind()
 
 
+def port_candidates(data_dir: str, port: int, tries: int) -> list[int]:
+    """Preferred port first (the one the browser already signed into), then the requested range.
+
+    A new port is a new browser site, so the sign-in key stored for the old port cannot be read.
+    Staying on the last port keeps the project list visible. The database itself does not move.
+    """
+    pref = None
+    try:
+        raw = (Path(data_dir) / "preferred.port").read_text(encoding="utf-8").strip()
+        n = int(raw)
+        if 1 <= n <= 65535:
+            pref = n
+    except (OSError, ValueError):
+        pref = None
+    ordered = []
+    if pref is not None:
+        ordered.append(pref)
+    ordered.extend(range(port, port + max(1, tries)))
+    out = []
+    for p in ordered:
+        if p not in out:
+            out.append(p)
+    return out
+
+
 def make_server(data_dir: str, port: int, tries: int = 1) -> ThreadingHTTPServer:
-    """Bind the first free port in [port, port + tries). The data-directory lock is taken first, as before."""
+    """Bind the preferred port, else the first free port in [port, port + tries)."""
     app = App(data_dir, port)
     handler = type("BoundHandler", (Handler,), {"app": app})
     errors = []
-    for p in range(port, port + max(1, tries)):
+    srv = None
+    for p in port_candidates(data_dir, port, tries):
         try:
             srv = StudioHTTPServer((HOST, p), handler)
             break
         except OSError as e:
             errors.append(f"{p}: {e.strerror or e}")
-    else:
+    if srv is None:
         app._instance_lock.close()
         raise PortUnavailableError("no free loopback port (" + "; ".join(errors) + ")")
-    app.port = p
+    app.port = srv.server_address[1]
+    try:
+        (Path(data_dir) / "preferred.port").write_text(str(app.port), encoding="utf-8")
+    except OSError:
+        pass
     srv.daemon_threads = True
     srv.app = app
     return srv
@@ -928,9 +1028,30 @@ def main(argv=None):
                     print(f"background verification of {rid} failed: {type(e).__name__}")
             time.sleep(600)
 
+    def source_watch():
+        # An idle server whose files changed on disk is stale: it is still executing the code it imported at
+        # startup. Tell signed-in pages, then leave. A live task is allowed to finish first.
+        while not srv.app.retiring:
+            time.sleep(2)
+            try:
+                newer = source_mtime() > srv.app.source_mtime + 0.001
+            except OSError:
+                continue
+            if not newer or srv.app.sup.has_live_work():
+                continue
+            srv.app.retiring = True
+            time.sleep(3)  # one page poll sees retiring and unloads before the process is gone
+            try:
+                srv.app.browser.stop()
+            except Exception:  # noqa: BLE001 - shutdown still has to proceed
+                pass
+            srv.shutdown()
+            return
+
     import threading as _threading
     _threading.Thread(target=relogin_watch, daemon=True).start()
     _threading.Thread(target=reverify_watch, daemon=True).start()
+    _threading.Thread(target=source_watch, daemon=True).start()
     if srv.app.reconciled:
         print(f"Reconciled {len(srv.app.reconciled)} unfinished task(s) from the previous run.")
     try:

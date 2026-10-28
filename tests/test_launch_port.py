@@ -3,6 +3,7 @@ import os
 import shutil
 import socket
 import tempfile
+import time
 import unittest
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -10,7 +11,33 @@ from pathlib import Path
 os.environ["AESOP_SIMULATED_ROUTE"] = "1"
 os.environ["AESOP_PROBE_OFFLINE"] = "1"
 
-from aesop_studio.server import PortUnavailableError, make_server  # noqa: E402
+from aesop_studio.server import PortUnavailableError, make_server, port_candidates, source_mtime  # noqa: E402
+
+
+class TestPortChoice(unittest.TestCase):
+    def test_preferred_port_is_tried_before_the_requested_range(self):
+        d = Path(tempfile.mkdtemp(prefix="aesop-pref-"))
+        try:
+            (d / "preferred.port").write_text("8766\n", encoding="utf-8")
+            self.assertEqual(port_candidates(str(d), 8765, 3), [8766, 8765, 8767])
+            (d / "preferred.port").write_text("nope", encoding="utf-8")
+            self.assertEqual(port_candidates(str(d), 8765, 2), [8765, 8766])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_source_mtime_moves_when_a_studio_file_changes(self):
+        d = Path(tempfile.mkdtemp(prefix="aesop-src-"))
+        try:
+            py = d / "aesop_studio"
+            py.mkdir()
+            f = py / "sample.py"
+            f.write_text("x = 1\n", encoding="utf-8")
+            first = source_mtime(d)
+            time.sleep(0.05)
+            f.write_text("x = 2\n", encoding="utf-8")
+            self.assertGreater(source_mtime(d), first)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 @unittest.skipUnless(os.name == "nt", "exclusive loopback port bind (SO_EXCLUSIVEADDRUSE) is Windows-only")
