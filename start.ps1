@@ -1,7 +1,8 @@
 param(
   [int]$Port = 8765,
   [string]$Data = (Join-Path $env:LOCALAPPDATA "AesopStudio"),
-  [switch]$NoBrowser
+  [switch]$NoBrowser,
+  [switch]$Force
 )
 # $Port is the first port tried after preferred.port (the last port that actually served this data folder).
 # preferred.port is not deleted: a new port is a new browser site and would hide the saved project list.
@@ -25,6 +26,12 @@ if ($state.Running) {
     $n = if ($health.Tasks -gt 0) { $health.Tasks } else { 1 }
     Write-Host "Studio is finishing $n tasks; retry in a minute"
     exit 0
+  }
+  if (-not $health -and -not $Force) {
+    # Unknown is not idle: an older server without /api/health, a timeout or any probe error must never
+    # become a forced kill of work in flight. The owner can override with -Force after checking the app.
+    Write-Host "Could not confirm that the running Studio (port $($state.Port)) is idle; not stopping it. Re-run with -Force to replace it anyway."
+    exit 1
   }
   Write-Host "Aesop Studio on port $($state.Port) is older than its files. Stopping that process."
   & (Join-Path $root "stop.ps1") -Data $Data
