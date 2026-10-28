@@ -34,6 +34,38 @@ class ProviderAgentModes(unittest.TestCase):
                 else:
                     self.assertIn("--strict-mcp-config", agent)
 
+    def test_cursor_chat_is_ask_and_agent_is_forced_edit_mode(self):
+        with patch.object(providers, "_cursor_cmd", return_value=["node", "index.js"]):
+            chat = providers.build_argv("cursor", "chat", "C:/project", "out")
+            agent = providers.build_argv("cursor", "agent", "C:/project", "out")
+        self.assertEqual(chat[chat.index("--mode") + 1], "ask")
+        self.assertNotIn("--force", chat)
+        self.assertNotIn("--mode", agent)  # cursor-agent's default mode is the one that edits
+        self.assertIn("--force", agent)
+        for a in (chat, agent):
+            self.assertEqual(a[a.index("--workspace") + 1], "C:/project")
+            self.assertIn("--trust", a)
+            self.assertEqual(a[a.index("--model") + 1], providers.BALANCED["cursor"]["model"])
+        routes = providers._named({"cursor": {"state": "READY_INCLUDED", "supported_modes": ["chat"]}})
+        self.assertTrue(providers.usable(routes["cursor"], "agent"))
+
+    def test_gemini_and_zcode_argv(self):
+        with patch.object(providers, "_gemini_cmd", return_value=["node", "gemini.js"]):
+            chat = providers.build_argv("gemini", "chat", "C:/project", "out", extra_dirs=["C:/ref"])
+            agent = providers.build_argv("gemini", "agent", "C:/project", "out")
+        self.assertEqual(chat[chat.index("--approval-mode") + 1], "plan")
+        self.assertEqual(agent[agent.index("--approval-mode") + 1], "auto_edit")
+        self.assertEqual(chat[chat.index("--include-directories") + 1], "C:/ref")
+        self.assertIn("--skip-trust", chat)
+        self.assertNotIn("-m", chat)  # no Studio pin: the CLI default model
+        with patch.object(providers, "_zcode_cmd", return_value=["node", "zcode.cjs"]):
+            z = providers.build_argv("zcode", "chat", "C:/project", "out", prompt="hello")
+            self.assertEqual(z[-2:], ["-p", "hello"])
+            with self.assertRaises(RuntimeError):
+                providers.build_argv("zcode", "agent", "C:/project", "out", prompt="hello")
+        self.assertIn("zcode", providers.ARGV_PROMPT_ROUTES)
+        self.assertNotIn("gemini", providers.ARGV_PROMPT_ROUTES)  # context travels on stdin
+
     def test_balanced_pin_ignores_a_caller_model(self):
         cases = (
             ("codex", "chat", "_codex_cmd", ["codex"], None),

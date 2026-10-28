@@ -21,7 +21,7 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # Variables that would redirect a CLI from subscription sign-in to a separately billed route.
 BILLING_ENV = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
                "CLAUDE_CODE_USE_VERTEX", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "AZURE_OPENAI_API_KEY",
-               "PERPLEXITY_API_KEY"}
+               "PERPLEXITY_API_KEY", "XAI_API_KEY"}
 
 
 def _codex_cmd() -> list[str] | None:
@@ -64,6 +64,32 @@ def _copilot_cmd() -> list[str] | None:
     return [exe] if exe else None
 
 
+def _gemini_cmd() -> list[str] | None:
+    """Google's Gemini CLI (npm @google/gemini-cli): node + its bundle, never the .cmd shim."""
+    js = Path(os.environ.get("APPDATA", "")) / "npm" / "node_modules" / "@google" / "gemini-cli" / "bundle" / "gemini.js"
+    node = shutil.which("node")
+    return [node, str(js)] if js.is_file() and node else None
+
+
+ZCODE_RESOURCES = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "ZCode" / "resources"
+
+
+def _zcode_cmd() -> list[str] | None:
+    """Z.ai's ZCode agent CLI, shipped inside the installed ZCode desktop app (resources/glm/zcode.cjs)."""
+    js = ZCODE_RESOURCES / "glm" / "zcode.cjs"
+    node = shutil.which("node")
+    return [node, str(js)] if js.is_file() and node else None
+
+
+def route_env(route_id: str) -> dict[str, str]:
+    """Extra environment a route's CLI needs when launched outside its own launcher (merged over the clean env)."""
+    if route_id == "zcode":
+        # The bundled CLI resolves its provider config relative to a source checkout; point it at the shipped copy.
+        cfg = ZCODE_RESOURCES / "config" / "provider" / "zcode-builtin.json"
+        return {"ZCODE_BUILTIN_PROVIDER_CONFIG_FILE": str(cfg)} if cfg.is_file() else {}
+    return {}
+
+
 def _grok_cmd() -> list[str] | None:
     exe = shutil.which("grok.exe") or str(Path.home() / ".grok" / "bin" / "grok.exe")
     return [exe] if exe and Path(exe).is_file() else None
@@ -71,10 +97,10 @@ def _grok_cmd() -> list[str] | None:
 
 # Routes whose CLI only accepts the prompt as an argument (never via a shell; Windows caps a command line at
 # 32,767 characters, so longer prompts are refused rather than truncated).
-ARGV_PROMPT_ROUTES = {"antigravity", "grok"}
+ARGV_PROMPT_ROUTES = {"antigravity", "grok", "zcode"}
 MAX_ARGV_PROMPT = 24_000
 # Live-verified CLI routes: an owner-triggered minimal call is the only proof of usable access + quota.
-LIVE_VERIFY_ROUTES = {"cursor", "antigravity", "copilot", "grok", "zai"}
+LIVE_VERIFY_ROUTES = {"cursor", "antigravity", "copilot", "grok", "zai", "gemini", "zcode"}
 VERIFY_MAX_AGE_S = 7 * 24 * 3600
 
 
@@ -185,6 +211,8 @@ def _contained(argv: list[str], timeout: int, cwd: str | None = None, input_text
     so a hung CLI (or a descendant holding its pipes) can never hang or leak past the timeout."""
     from . import winjob
     env = {k: v for k, v in os.environ.items() if k.upper() not in BILLING_ENV}
+    if any(a.endswith("zcode.cjs") for a in argv[:2]):
+        env.update(route_env("zcode"))
     try:
         p = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
@@ -301,6 +329,20 @@ def probe(store=None) -> dict[str, dict]:
              cancellation_behavior="stream closed locally; tokens already generated may still bill (kept as exposure)")
     routes["openai-api"] = r
 
+    from . import xai_api
+    r = _base("xai", "api", "api.x.ai /v1/responses (streaming)", ["chat"], "API key (XAI_API_KEY or xai.dpapi)",
+              "metered", "The regular Grok models through xAI's API, with photos and attached files. Metered per "
+              "token with a pre-reserved maximum cost; enabled only by the mission permit or an owner-set monthly "
+              "operating limit. Separate from the Grok CLI's SuperGrok subscription.")
+    r.update(state="READY_METERED_DISABLED" if xai_api.key_present() else "UNAVAILABLE",
+             evidence=(f"Key source: {xai_api.key_source()} (presence only; value never shown)"
+                       if xai_api.key_present() else "No XAI_API_KEY and no xai.dpapi provider secret found"),
+             last_verified_at=now, version=f"models: {', '.join(xai_api.PRICES)}",
+             incremental_cost_status=f"metered; prices: {xai_api.PRICE_SOURCE}",
+             filesystem_scope="none (no file access; only the previewed context and attached photos are sent)",
+             cancellation_behavior="stream closed locally; tokens already generated may still bill (kept as exposure)")
+    routes["xai-api"] = r
+
     from . import perplexity_api
     r = _base("perplexity", "api", "api.perplexity.ai /orchestrator/v1/chat/completions", ["chat"],
               "API key (PERPLEXITY_API_KEY)", "metered",
@@ -326,7 +368,11 @@ def probe(store=None) -> dict[str, dict]:
             ("grok", "xai", _grok_cmd, "xAI sign-in (SuperGrok, grok CLI)",
              "SuperGrok subscription quota (owner-confirmed paid plan)"),
             ("zai", "zai", _zai_cmd, "Z.ai GLM Coding Plan key (claude-zai launcher)",
-             "Z.ai GLM Coding Plan credits (owner-confirmed paid plan); Claude Code client against Z.ai")):
+             "Z.ai GLM Coding Plan credits (owner-confirmed paid plan); Claude Code client against Z.ai"),
+            ("gemini", "google", _gemini_cmd, "Gemini API key in ~/.gemini/.env (gemini CLI)",
+             "Gemini API usage on the owner's key; Google billing not observable here"),
+            ("zcode", "zai", _zcode_cmd, "Z.ai sign-in (zcode login zai)",
+             "Z.ai GLM Coding Plan credits (owner-confirmed paid plan); ZCode agent runtime")):
         r = _base(prov, "official_cli", None, ["chat"], auth, "subscription_included", billing_note)
         r["filesystem_scope"] = ("chat only, read-only/ask/plan mode in an empty temp dir; not an isolation "
                                  "boundary — the CLI runs as your Windows user")
@@ -411,8 +457,8 @@ def refresh(store: Store) -> dict[str, dict]:
 DISPLAY = {
     "codex": ("Codex", "Codex"), "openai-api": ("Codex API", "Codex"), "claude": ("Claude Code", "Claude Code"),
     "cursor": ("Cursor", "Cursor"), "antigravity": ("Antigravity", "Antigravity"),
-    "copilot": ("Copilot CLI", "Copilot CLI"), "grok": ("Grok CLI", "Grok CLI"),
-    "zai": ("Z.ai GLM", "Z.ai GLM"),
+    "copilot": ("Copilot CLI", "Copilot CLI"), "grok": ("Grok CLI", "Grok CLI"), "xai-api": ("Grok API", "Grok"),
+    "zai": ("Z.ai GLM", "Z.ai GLM"), "gemini": ("Gemini CLI", "Gemini CLI"), "zcode": ("ZCode", "ZCode"),
     "perplexity": ("Perplexity", "Perplexity"), "firecrawl": ("Firecrawl", "Firecrawl"),
     "perplexity-orchestrator": ("Perplexity Orchestrator", "Perplexity"),
     "simulated": ("Simulated (test only)", "Simulated"),
@@ -434,14 +480,18 @@ def _named(routes: dict) -> dict:
             from . import openai_api
             r["balanced_model"] = openai_api.DEFAULT_MODEL
             r["balanced_reasoning"] = "medium"
+        elif rid == "xai-api":
+            from . import xai_api
+            r["balanced_model"] = xai_api.DEFAULT_MODEL
+            r["balanced_reasoning"] = None
         elif rid == "perplexity":
             from . import research_routes
             r["balanced_model"] = research_routes.PPLX_MODEL
             r["balanced_reasoning"] = None
-        if rid in ("grok", "zai"):
+        if rid in ("grok", "zai", "cursor", "gemini"):
             # Capabilities come from the installed adapter, including for cached verification records.
             r["supported_modes"] = ["chat", "agent"]
-            r["filesystem_scope"] = ("chat: tools disabled in an empty temp dir; agent: file edits and shell "
+            r["filesystem_scope"] = ("chat: read-only in an empty temp dir; agent: file edits and shell "
                                      "commands in the project root; runs as your Windows user, not an isolation boundary")
     return routes
 
@@ -449,7 +499,7 @@ def _named(routes: dict) -> dict:
 def cached(store: Store) -> dict[str, dict]:
     row = store.one("SELECT v FROM kv WHERE k='routes'")
     routes = _named(json.loads(row["v"]) if row else refresh(store))
-    for rid in ("openai-api", "perplexity", "perplexity-orchestrator"):
+    for rid in ("openai-api", "xai-api", "perplexity", "perplexity-orchestrator"):
         api = routes.get(rid)
         if api and api["state"] == "READY_METERED_DISABLED":
             from . import ledger
@@ -508,6 +558,8 @@ BALANCED = {
     "copilot": {"model": "claude-sonnet-5.5", "reasoning": "medium"},
     "grok": {"model": "grok-4.7", "reasoning": "medium"},
     "zai": {"model": "glm-5.3", "reasoning": "high"},
+    "gemini": {"model": None, "reasoning": None},   # the CLI's own default model; Studio does not pick one
+    "zcode": {"model": None, "reasoning": None},    # ZCode uses the model chosen at zcode login
 }
 
 
@@ -520,13 +572,18 @@ def usable(route: dict, mode: str) -> bool:
 
 
 def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | None = None,
-               prompt: str | None = None, images: list[str] | None = None, study: dict | None = None) -> list[str]:
+               prompt: str | None = None, images: list[str] | None = None, study: dict | None = None,
+               extra_dirs: list[str] | None = None) -> list[str]:
     """argv list (no shell). The prompt is always passed on stdin, never concatenated into a command.
 
     mode "study" (reference study): read-only sandbox, no shell/edit tools, and the R.E.A. MCP server attached from
     the explicit config in `study["mcp_config"]` so the run never depends on the owner's global registrations."""
     if mode == "study" and not (study and study.get("mcp_config") and study.get("ref_path")):
         raise RuntimeError("a study needs its MCP config and reference path")
+    # Owner-listed reference folders: read access beside the working folder, on every CLI that has the flag.
+    add_dirs: list[str] = []
+    for d in extra_dirs or []:
+        add_dirs += ["--add-dir", str(d)]
     if route_id in BALANCED:
         allowed = {BALANCED[route_id]["model"]}
         if route_id == "antigravity":
@@ -550,6 +607,7 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
             argv += ["--ephemeral", "-c", f"mcp_servers.rea.command={json.dumps(REA_COMMAND)}",
                      "-c", f"mcp_servers.rea.args={args_toml}", "-c", "mcp_servers.rea.startup_timeout_sec=60",
                      "--add-dir", study["ref_path"]]
+        argv += add_dirs
         spec = BALANCED["codex"]
         argv += ["-m", model or spec["model"], "-c", f"model_reasoning_effort={spec['reasoning']}"]
         return argv + ["-"]
@@ -569,12 +627,16 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
                      "--disallowedTools", "Bash(rm:*)", "Bash(del:*)", "Bash(Remove-Item:*)", "WebFetch"]
         spec = BALANCED["claude"]
         argv += ["--model", model or spec["model"], "--effort", spec["reasoning"]]
-        return argv
-    if route_id == "cursor" and mode == "chat":
+        return argv + add_dirs
+    if route_id == "cursor" and mode in ("chat", "agent"):
         cmd = _cursor_cmd()
         if not cmd:
             raise RuntimeError("cursor-agent unavailable")
-        argv = cmd + ["-p", "--output-format", "text", "--mode", "ask", "--trust", "--workspace", cwd]
+        # chat: "ask" is cursor-agent's read-only Q&A mode. agent: its default (edit) mode; --force answers the
+        # command prompts a headless run could never answer. Both trust only the task's own folder (+ --add-dir).
+        argv = cmd + ["-p", "--output-format", "text"]
+        argv += ["--mode", "ask"] if mode == "chat" else ["--force"]
+        argv += ["--trust", "--workspace", cwd] + add_dirs
         return argv + ["--model", model or BALANCED["cursor"]["model"]]
     if route_id == "antigravity" and mode == "chat":
         cmd = _agy_cmd()
@@ -585,14 +647,17 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
                                "characters is refused")
         spec = BALANCED["antigravity"]
         return cmd + ["--mode", "plan", "--print-timeout", "280s", "--model", model or spec["model"],
-                      "--effort", spec["reasoning"], "-p=" + prompt]
+                      "--effort", spec["reasoning"]] + add_dirs + ["-p=" + prompt]
     if route_id == "copilot" and mode == "chat":
         cmd = _copilot_cmd()
         if not cmd:
             raise RuntimeError("copilot unavailable")
         spec = BALANCED["copilot"]
+        attach: list[str] = []
+        for img in images or []:  # Copilot CLI takes photos directly: --attachment <path> (image or document)
+            attach += ["--attachment", str(Path(cwd) / img)]
         return cmd + ["-s", "--no-color", "--model", model or spec["model"],
-                      "--reasoning-effort", spec["reasoning"]]  # prompt via stdin
+                      "--reasoning-effort", spec["reasoning"]] + attach + add_dirs  # prompt via stdin
     if route_id == "grok" and mode in ("chat", "agent"):
         cmd = _grok_cmd()
         if not cmd:
@@ -600,9 +665,13 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         if prompt is None or len(prompt) > MAX_ARGV_PROMPT:
             raise RuntimeError(f"Grok takes the prompt as an argument; context over {MAX_ARGV_PROMPT:,} characters "
                                "is refused")
-        permissions = (["--permission-mode", "default", "--tools", ""] if mode == "chat" else
+        # chat: no tools at all, except read_file when photos are staged in the working folder (Grok tool IDs are
+        # lower-case: read_file, grep, list_dir, run_terminal_cmd ...)
+        permissions = (["--permission-mode", "default", "--tools", "read_file" if images else ""] if mode == "chat" else
                        ["--permission-mode", "acceptEdits", "--allow", "Bash"])
         spec = BALANCED["grok"]
+        # No --add-dir here: grok.exe refuses it ("additionalDirectories is not supported: a session works only in
+        # its cwd", observed 2026-10-27). Reference folders reach Grok by path in the prompt only.
         return cmd + ["--cwd", cwd, "--no-plan"] + permissions + ["--output-format", "plain",
                       "-m", model or spec["model"], "--reasoning-effort", spec["reasoning"], "-p", prompt]
     if route_id == "zai" and mode in ("chat", "agent"):
@@ -615,7 +684,27 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
                        else ["--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep"])
         spec = BALANCED["zai"]
         return cmd + ["-Model", model or spec["model"], "--effort", spec["reasoning"],
-                      "-p", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config"] + permissions
+                      "-p", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config"] + permissions\
+            + add_dirs
+    if route_id == "gemini" and mode in ("chat", "agent"):
+        cmd = _gemini_cmd()
+        if not cmd:
+            raise RuntimeError("gemini CLI unavailable")
+        # The context goes in on stdin; -p carries only a short instruction (the CLI appends it to stdin). chat is
+        # the CLI's read-only plan mode; agent auto-approves edits. Reference folders use --include-directories.
+        argv = cmd + ["--skip-trust", "--approval-mode", "plan" if mode == "chat" else "auto_edit",
+                      "-p", "Respond to the latest user message in the input above."]
+        for d in extra_dirs or []:
+            argv += ["--include-directories", str(d)]
+        return argv + (["-m", model] if model else [])
+    if route_id == "zcode" and mode == "chat":
+        cmd = _zcode_cmd()
+        if not cmd:
+            raise RuntimeError("zcode CLI unavailable")
+        if prompt is None or len(prompt) > MAX_ARGV_PROMPT:
+            raise RuntimeError(f"ZCode takes the prompt as an argument; context over {MAX_ARGV_PROMPT:,} characters "
+                               "is refused")
+        return cmd + ["-p", prompt]
     if route_id == "simulated":
         return _sim_cmd() + [mode, out_file]
     raise RuntimeError(f"route {route_id} has no in-app execution path for {mode}")
