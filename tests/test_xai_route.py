@@ -185,6 +185,16 @@ class TestXaiApiDispatch(unittest.TestCase):
             row["settled_usd"], (1200 * pin + 300 * pout) / 1e6, places=9
         )
 
+    def test_stored_grok_model_used_on_xai_api(self):
+        ledger.set_runtime_limit(self.store, 1.0)
+        providers.refresh(self.store)
+        self.svc.update_project(self.p["id"], {"model": "grok-4.7"})
+        FakeResponses.seen.clear()
+        t = self.send()
+        self.assertEqual(t["state"], "COMPLETED", t.get("error"))
+        self.assertEqual(FakeResponses.seen[-1]["body"]["model"], "grok-4.7")
+        self.assertEqual(json.loads(t["checkpoint"])["model"], "grok-4.7")
+
 
 if __name__ == "__main__":
     unittest.main()

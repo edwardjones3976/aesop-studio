@@ -689,21 +689,13 @@ class Supervisor:
             if route_id == "xai-api"
             else openai_api
         )
-        model = (
-            project.get("model")
-            if api is perplexity_api
-            else (
-                project.get("model")
-                if project.get("model") in xai_api.PRICES
-                else xai_api.DEFAULT_MODEL
-                if api is xai_api
-                else (
-                    project.get("model")
-                    if project.get("model") in openai_api.PRICES
-                    else openai_api.DEFAULT_MODEL
-                )
-            )
-        )
+        pm = project.get("model")
+        if api is perplexity_api:
+            model = pm
+        elif api is xai_api:
+            model = pm if pm in xai_api.PRICES else xai_api.DEFAULT_MODEL
+        else:
+            model = pm if pm in openai_api.PRICES else openai_api.DEFAULT_MODEL
         max_out = api.DEFAULT_MAX_OUTPUT
         rates = None
         try:  # each high-detail image is bounded at IMAGE_TOKEN_BOUND input tokens in the reservation

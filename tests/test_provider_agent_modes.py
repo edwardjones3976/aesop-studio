@@ -178,6 +178,48 @@ class ProviderAgentModes(unittest.TestCase):
                     prompt="x" * (providers.MAX_ARGV_PROMPT + 1),
                 )
 
+    def test_verify_live_blocks_gemini_api_key_without_cli(self):
+        store = Store(tempfile.mkdtemp(prefix="aesop-gem-vfy-"))
+        try:
+            with (
+                patch.object(providers, "gemini_api_key_configured", return_value=True),
+                patch.object(providers, "gemini_oauth_included", return_value=False),
+                patch.object(providers, "_contained") as contained,
+            ):
+                rec = providers.verify_live(store, "gemini")
+            self.assertFalse(rec["ok"])
+            self.assertIn("blocked by policy", rec["detail"])
+            self.assertEqual(rec["latency_s"], 0.0)
+            contained.assert_not_called()
+            row = store.one("SELECT v FROM kv WHERE k=?", ("verify:gemini",))
+            self.assertFalse(json.loads(row["v"])["ok"])
+        finally:
+            store.close()
+
+    def test_verify_live_gemini_oauth_runs_normal_path(self):
+        store = Store(tempfile.mkdtemp(prefix="aesop-gem-vfy-"))
+        try:
+            with (
+                patch.object(
+                    providers, "gemini_api_key_configured", return_value=False
+                ),
+                patch.object(providers, "gemini_oauth_included", return_value=True),
+                patch.object(
+                    providers, "_contained", return_value=(0, providers.VERIFY_TOKEN)
+                ),
+                patch.object(
+                    providers, "build_argv", return_value=["node", "gemini.js"]
+                ),
+            ):
+                rec = providers.verify_live(store, "gemini")
+            self.assertTrue(rec["ok"])
+        finally:
+            store.close()
+
+    def test_billing_env_includes_gemini_key_names(self):
+        for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY"):
+            self.assertIn(name, providers.BILLING_ENV)
+
 
 if __name__ == "__main__":
     unittest.main()

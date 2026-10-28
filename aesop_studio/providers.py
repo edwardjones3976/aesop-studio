@@ -41,6 +41,9 @@ BILLING_ENV = {
     "AZURE_OPENAI_API_KEY",
     "PERPLEXITY_API_KEY",
     "XAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_GENAI_API_KEY",
 }
 
 
@@ -248,6 +251,23 @@ def verify_live(store, rid: str) -> dict:
 
     if rid not in LIVE_VERIFY_ROUTES:
         raise ValueError(f"{rid} is not a live-verifiable CLI route")
+    if rid == "gemini" and gemini_api_key_configured() and not gemini_oauth_included():
+        detail = (
+            "blocked by policy: Gemini CLI is configured with an API key (metered Google "
+            "billing is not an authorized biller); sign in with Google for plan quota"
+        )
+        rec = {
+            "at": time.time(),
+            "ok": False,
+            "detail": detail[:200],
+            "latency_s": 0.0,
+        }
+        store.x(
+            "INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (f"verify:{rid}", json.dumps(rec)),
+        )
+        store.event("route_live_verification", None, route=rid, ok=False, latency_s=0.0)
+        return rec
     prompt = f"Reply with exactly: {VERIFY_TOKEN}"
     import shutil
 

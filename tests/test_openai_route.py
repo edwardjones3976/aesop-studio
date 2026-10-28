@@ -139,6 +139,18 @@ class TestOpenAIRoute(unittest.TestCase):
         self.assertEqual(msg["status"], "generated")
         self.assertIn("cost_usd", msg["meta"])
 
+    def test_stored_grok_model_does_not_leak_to_openai_api(self):
+        ledger.set_runtime_limit(self.store, 1.0)
+        providers.refresh(self.store)
+        self.svc.update_project(self.p["id"], {"model": "grok-4.7"})
+        FakeResponses.seen.clear()
+        t = self.send()
+        self.assertEqual(t["state"], "COMPLETED", t.get("error"))
+        self.assertEqual(
+            FakeResponses.seen[-1]["body"]["model"], openai_api.DEFAULT_MODEL
+        )
+        self.assertEqual(json.loads(t["checkpoint"])["model"], openai_api.DEFAULT_MODEL)
+
     def test_mission_permit_uses_mission_envelope(self):
         ledger.set_permit(self.store, True)
         t = self.send()
