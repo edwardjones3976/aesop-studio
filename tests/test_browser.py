@@ -1,4 +1,5 @@
 """Browser drive: guards and action mapping (offline; no real Chrome, no provider calls)."""
+
 import os
 import shutil
 import tempfile
@@ -20,7 +21,12 @@ class FakeBrowser:
 
     def cmd(self, op, **a):
         self.calls.append((op, a))
-        return {"ok": True, "url": a.get("url", "https://x/"), "title": "T", "text": "hello"}
+        return {
+            "ok": True,
+            "url": a.get("url", "https://x/"),
+            "title": "T",
+            "text": "hello",
+        }
 
     def shot_png(self, full=False):
         return b"\x89PNG"
@@ -43,27 +49,35 @@ class TestDrive(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_start_guards(self):
-        with self.assertRaises(ValueError):                       # too short a goal
+        with self.assertRaises(ValueError):  # too short a goal
             self.d.start(self.p, "claude", "x")
-        with self.assertRaises(ValueError):                       # not a vision route
+        with self.assertRaises(ValueError):  # not a vision route
             self.d.start(self.p, "grok", "find the rules of bid whist")
         # vision route but file-sharing off for the project
+        self.svc.update_project(self.p["id"], {"transfer_policy": {"claude": False}})
+        p = self.svc.project(self.p["id"])
         with mock_vision(self.d, ["claude"]):
             with self.assertRaises(ValueError) as e:
-                self.d.start(self.p, "claude", "find the rules of bid whist")
+                self.d.start(p, "claude", "find the rules of bid whist")
             self.assertIn("off for this project", str(e.exception))
 
     def test_action_mapping_and_clamp(self):
-        self.assertEqual(self.d._do({"action": "navigate", "url": "example.com"}), "example.com")
+        self.assertEqual(
+            self.d._do({"action": "navigate", "url": "example.com"}), "example.com"
+        )
         self.d._do({"action": "click", "x": 99999, "y": -5})
-        self.assertEqual(self.fb.calls[-1], ("click", {"x": 1366, "y": 0}))   # clamped to the viewport
+        self.assertEqual(
+            self.fb.calls[-1], ("click", {"x": 1366, "y": 0})
+        )  # clamped to the viewport
         self.d._do({"action": "scroll", "dy": 400})
         self.assertEqual(self.fb.calls[-1][0], "scroll")
         self.d._do({"action": "key", "key": "Enter"})
         self.assertEqual(self.fb.calls[-1], ("key", {"key": "Enter"}))
         self.assertEqual(self.d._do({"action": "read"}), "(read the page)")
         self.d._do({"action": "type", "text": "hi"})
-        self.assertTrue(self.fb.calls[-1][1].get("agent"))   # the provider's typing is flagged so passwords are refused
+        self.assertTrue(
+            self.fb.calls[-1][1].get("agent")
+        )  # the provider's typing is flagged so passwords are refused
 
     def test_status_shape(self):
         st = self.d.status()

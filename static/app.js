@@ -1548,8 +1548,8 @@ async function projectSettings() {
     fields.push({ name: "model", label: "Model", value: p.model || "", help: "Orchestrator still needs a model from its catalog. Every other provider uses one fixed Studio setting." });
   }
   fields.push({ name: "retention_days", label: "Conversation retention (days)", type: "number", value: String(p.retention_days) });
-  fields.push({ name: "reference_dirs", label: "Reference folders (one absolute path per line)", type: "textarea", value: (p.reference_dirs || []).join("\n"),
-    help: "Work tasks may read these folders besides the project folder (passed to each CLI as --add-dir). Writes still stay in the project folder. Home, Windows and credential folders are refused." });
+  fields.push({ name: "reference_dirs", label: "Working folders (one absolute path per line)", type: "textarea", value: (p.reference_dirs || []).join("\n"),
+    help: "Work tasks may read and write these folders besides the project folder (passed to each CLI as --add-dir or equivalent). Home, Windows and credential folders are refused." });
   const pending = dialog("Project settings", [
     ...fields,
     ...Object.keys(S.routes).filter((k) => USABLE.includes(S.routes[k].state)).map((k) => ({ name: "tp_" + k, label: `Allow sending attached project files to ${routeName(k)}?`, type: "select", value: pol[k] ? "yes" : "no", options: [{ value: "no", label: "No" }, { value: "yes", label: "Yes" }] })),

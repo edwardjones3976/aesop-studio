@@ -258,6 +258,8 @@ class TestImages(unittest.TestCase):
                     rid, mode, "C:/t", "C:/t/o.txt", prompt="p", extra_dirs=[ref]
                 )
                 self.assertEqual(a[a.index("--add-dir") + 1], ref)
+                if rid == "codex" and mode == "agent":
+                    self.assertEqual(a[a.index("-s") + 1], "danger-full-access")
                 if (
                     rid == "antigravity"
                 ):  # the argv prompt stays last so --add-dir can never swallow it
@@ -275,6 +277,15 @@ class TestImages(unittest.TestCase):
                 "grok", "agent", "C:/t", "C:/t/o.txt", prompt="p", extra_dirs=[ref]
             )
             self.assertNotIn("--add-dir", a)
+        with patch.object(providers, "_gemini_cmd", return_value=["gemini"]):
+            a = providers.build_argv(
+                "gemini",
+                "agent",
+                "C:/t",
+                "C:/t/o.txt",
+                extra_dirs=[ref],
+            )
+            self.assertEqual(a[a.index("--include-directories") + 1], ref)
 
     def test_reference_dirs_validated_and_in_work_preview_only(self):
         ref = self.tmp / "ref"
@@ -298,18 +309,18 @@ class TestImages(unittest.TestCase):
         )  # refusals change nothing
         note = self.svc.reference_note(self.svc.project(self.p["id"]))
         self.assertIn(str(ref.resolve()), note)
-        self.assertIn("read-only", note)
+        self.assertIn("read and write", note)
         chat_ctx = self.svc.build_context(
             self.p["id"], self.c["id"], "x", [], "simulated"
         )
         self.assertNotIn(
-            "Reference folders", chat_ctx
+            "Working folders", chat_ctx
         )  # chat runs in a sandbox with no file tools: no false promise
         mem = self.store.q(
             "SELECT content FROM memory WHERE project_id=? AND kind='permission'",
             (self.p["id"],),
         )
-        self.assertTrue(any("Reference folders" in m["content"] for m in mem))
+        self.assertTrue(any("Working folders" in m["content"] for m in mem))
 
     def test_data_urls_for_metered_route(self):
         f = self.tmp / "x.jpg"

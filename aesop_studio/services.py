@@ -185,7 +185,15 @@ class Services:
         self.s.x(
             "INSERT INTO projects(id,name,root,provider_default,transfer_policy,created,updated) "
             "VALUES(?,?,?,?,?,?,?)",
-            (pid, name, str(resolved), provider, json.dumps({}), now, now),
+            (
+                pid,
+                name,
+                str(resolved),
+                provider,
+                json.dumps(providers.default_transfer_policy(self.s)),
+                now,
+                now,
+            ),
         )
         self.s.x(
             "INSERT INTO memory(id,project_id,layer,kind,content,status,created) VALUES(?,?,?,?,?,?,?)",
@@ -228,7 +236,7 @@ class Services:
         return p
 
     def _reference_dirs(self, p: dict, raw) -> list[str]:
-        """Absolute folders agents may read (not write) in Work tasks. Same refusals as a project root: no drive
+        """Absolute working folders agents may read and write in Work tasks. Same refusals as a project root: no drive
         roots, home, Windows or credential trees, no links. The project root itself is never listed twice."""
         from .security import validate_root
 
@@ -247,19 +255,21 @@ class Services:
             out.append(resolved)
         if len(out) > MAX_REFERENCE_DIRS:
             raise ValueError(
-                f"at most {MAX_REFERENCE_DIRS} reference folders per project"
+                f"at most {MAX_REFERENCE_DIRS} working folders per project"
             )
         return out
 
     @staticmethod
     def reference_note(p: dict) -> str:
-        """Prompt line for Work tasks: the folders the owner opened for reading besides the project folder."""
+        """Prompt line for Work tasks: working folders the owner opened besides the project folder."""
         dirs = p.get("reference_dirs") or []
         if not dirs:
             return ""
         return (
-            "[Reference folders the owner opened for reading (read-only; the project folder is still the only "
-            "place to write): " + "; ".join(dirs) + "]\n\n"
+            "[Working folders the owner opened for read and write (the project folder is the primary "
+            "workspace; these paths are writable through the CLI flags Studio passes): "
+            + "; ".join(dirs)
+            + "]\n\n"
         )
 
     def projects(self) -> list[dict]:
@@ -297,7 +307,7 @@ class Services:
             self._authoritative(
                 pid,
                 "permission",
-                "Reference folders (read access for Work tasks): "
+                "Working folders (read/write for Work tasks): "
                 + (", ".join(dirs) if dirs else "none"),
             )
         if allowed:

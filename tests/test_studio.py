@@ -1,4 +1,5 @@
 """Offline tests. The SIMULATED route is an adapter simulation and never counts as a live provider."""
+
 import http.client
 import json
 import os
@@ -14,7 +15,14 @@ os.environ["AESOP_SIMULATED_ROUTE"] = "1"
 os.environ["AESOP_PROBE_OFFLINE"] = "1"  # never launch real provider CLIs in tests
 
 from aesop_studio import backup, ledger  # noqa: E402
-from aesop_studio.security import ScopeError, contained_path, extract, redact, safe_fetch, FetchError  # noqa: E402
+from aesop_studio.security import (
+    ScopeError,
+    contained_path,
+    extract,
+    redact,
+    safe_fetch,
+    FetchError,
+)  # noqa: E402
 from aesop_studio.server import make_server  # noqa: E402
 from aesop_studio.services import Conflict, Services  # noqa: E402
 from aesop_studio.store import Store  # noqa: E402
@@ -40,20 +48,43 @@ class Base(unittest.TestCase):
         self.sup = Supervisor(self.store)
         self.svc = Services(self.store, self.sup)
         from aesop_studio import providers
+
         providers.refresh(self.store)
         self.p = self.svc.create_project("Demo", str(self.root), "simulated")
-        self.store.x("INSERT INTO kv(k,v) VALUES(?, 'on')", (f"agent_ack:{self.p['id']}",))
+        self.store.x(
+            "INSERT INTO kv(k,v) VALUES(?, 'on')", (f"agent_ack:{self.p['id']}",)
+        )
 
     def tearDown(self):
         self.store.close()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
+class TestDefaultTransferPolicy(Base):
+    def test_new_project_allows_in_app_routes_not_research(self):
+        from aesop_studio import providers
+
+        fresh_root = self.tmp / "fresh"
+        fresh_root.mkdir()
+        p = self.svc.create_project("Fresh", str(fresh_root), "simulated")
+        pol = p["transfer_policy"]
+        self.assertTrue(pol.get("simulated"))
+        routes = providers.cached(self.store)
+        for rid, r in routes.items():
+            if r.get("transport") == "research":
+                self.assertNotIn(rid, pol)
+            else:
+                self.assertTrue(pol.get(rid), rid)
+
+
 class TestWorkflow(Base):
     def test_ac01_chat_save_restart_resume(self):
-        a = self.svc.attach(self.p["id"], "notes.md", b"# Synthetic\nThe launch code is AURORA.")
+        a = self.svc.attach(
+            self.p["id"], "notes.md", b"# Synthetic\nThe launch code is AURORA."
+        )
         self.assertEqual(a["extract_status"], "extracted")
         c = self.svc.new_conversation(self.p["id"])
+        self.svc.update_project(self.p["id"], {"transfer_policy": {"simulated": False}})
         with self.assertRaises(PermissionError):
             self.svc.send(self.p["id"], c["id"], "summarize", [a["id"]], None)
         self.svc.update_project(self.p["id"], {"transfer_policy": {"simulated": True}})
@@ -62,7 +93,9 @@ class TestWorkflow(Base):
         msgs = self.svc.messages(self.p["id"], c["id"])
         self.assertEqual(msgs[-1]["status"], "generated")
         self.assertIn("[REDACTED]", msgs[-1]["content"])  # provider output is redacted
-        self.svc.save_artifact(self.p["id"], "chat_answer", "t", msgs[-1]["content"], msgs[-1]["id"])
+        self.svc.save_artifact(
+            self.p["id"], "chat_answer", "t", msgs[-1]["content"], msgs[-1]["id"]
+        )
         # restart: new store/services on the same data dir
         self.store.close()
         s2 = Store(self.tmp / "data")
@@ -82,7 +115,9 @@ class TestWorkflow(Base):
     def test_chat_work_edits_project_folder(self):
         self.svc.update_project(self.p["id"], {"transfer_policy": {"simulated": True}})
         c = self.svc.new_conversation(self.p["id"])
-        r = self.svc.send(self.p["id"], c["id"], "WRITE a file from chat", [], "simulated", work=True)
+        r = self.svc.send(
+            self.p["id"], c["id"], "WRITE a file from chat", [], "simulated", work=True
+        )
         self.assertTrue(r["work"])
         t = wait_state(self.sup, r["task_id"])
         self.assertEqual(t["state"], "COMPLETED")
@@ -137,7 +172,9 @@ class TestAgent(Base):
         self.assertEqual(t["state"], "COMPLETED")
         self.assertIn("sim_output.txt", json.loads(t["changed_files"])["added"])
 
-    @unittest.skipUnless(os.name == "nt", "process-tree cancel uses Windows Job Objects / taskkill")
+    @unittest.skipUnless(
+        os.name == "nt", "process-tree cancel uses Windows Job Objects / taskkill"
+    )
     def test_ac03_cancel_kills_owned_tree(self):
         tid = self.sup.create(self.p, "simulated", "SLEEP", mode="agent")
         wait_state(self.sup, tid, {"RUNNING"})
@@ -149,12 +186,16 @@ class TestAgent(Base):
         t = wait_state(self.sup, tid)
         self.assertEqual(t["state"], "CANCELLED")
         from aesop_studio.tasks import pid_alive
+
         self.assertFalse(pid_alive(pid))
 
-    @unittest.skipUnless(os.name == "nt", "ORPHAN/job-object grandchild cleanup is Windows-specific")
+    @unittest.skipUnless(
+        os.name == "nt", "ORPHAN/job-object grandchild cleanup is Windows-specific"
+    )
     def test_detached_descendant_terminated_via_job(self):
         import re
         from aesop_studio.tasks import pid_alive
+
         start = time.time()
         tid = self.sup.create(self.p, "simulated", "ORPHAN", mode="agent")
         t = wait_state(self.sup, tid, timeout=40)
@@ -167,7 +208,9 @@ class TestAgent(Base):
             self.assertIn("job object", t["error"])
 
     def test_failure_recorded(self):
-        t = wait_state(self.sup, self.sup.create(self.p, "simulated", "FAIL", mode="agent"))
+        t = wait_state(
+            self.sup, self.sup.create(self.p, "simulated", "FAIL", mode="agent")
+        )
         self.assertEqual(t["state"], "FAILED")
         self.assertEqual(t["exit_code"], 3)
 
@@ -177,45 +220,83 @@ class TestAgent(Base):
 
     def test_ac04_restart_reconciliation_no_replay(self):
         now = time.time()
-        for tid, st, pid in (("task_a", "RUNNING", 999999), ("task_b", "RESERVED", None)):
-            self.store.x("INSERT INTO tasks(id,project_id,provider,prompt,state,pid,created,checkpoint) VALUES(?,?,?,?,?,?,?,?)",
-                         (tid, self.p["id"], "simulated", "x", st, pid, now, "{}"))
+        for tid, st, pid in (
+            ("task_a", "RUNNING", 999999),
+            ("task_b", "RESERVED", None),
+        ):
+            self.store.x(
+                "INSERT INTO tasks(id,project_id,provider,prompt,state,pid,created,checkpoint) VALUES(?,?,?,?,?,?,?,?)",
+                (tid, self.p["id"], "simulated", "x", st, pid, now, "{}"),
+            )
         out = {o["task_id"]: o["to"] for o in Supervisor(self.store).reconcile()}
         self.assertEqual(out, {"task_a": "INTERRUPTED", "task_b": "INTERRUPTED"})
         rep = self.store.q("SELECT * FROM repairs WHERE task_id='task_a'")
         self.assertEqual(len(rep), 1)
-        pkt = json.loads(Supervisor(self.store).export_repair(rep[0]["id"]).read_text(encoding="utf-8"))
-        for k in ("failure_signature", "reproducer", "affected_contract", "allowed_paths", "required_tests",
-                  "scope", "budget_usd", "rollback", "owner"):
+        pkt = json.loads(
+            Supervisor(self.store)
+            .export_repair(rep[0]["id"])
+            .read_text(encoding="utf-8")
+        )
+        for k in (
+            "failure_signature",
+            "reproducer",
+            "affected_contract",
+            "allowed_paths",
+            "required_tests",
+            "scope",
+            "budget_usd",
+            "rollback",
+            "owner",
+        ):
             self.assertIn(k, pkt)
-        self.assertEqual(self.store.one("SELECT status FROM repairs WHERE id=?", (rep[0]["id"],))["status"],
-                         "EXPORTED_FOR_FOREMAN")
-        self.assertEqual(self.store.one("SELECT count(*) n FROM tasks WHERE state='RUNNING'")["n"], 0)
+        self.assertEqual(
+            self.store.one("SELECT status FROM repairs WHERE id=?", (rep[0]["id"],))[
+                "status"
+            ],
+            "EXPORTED_FOR_FOREMAN",
+        )
+        self.assertEqual(
+            self.store.one("SELECT count(*) n FROM tasks WHERE state='RUNNING'")["n"], 0
+        )
 
 
 class TestResearchMemory(Base):
     def test_ac05_local_citations_and_export(self):
-        a = self.svc.attach(self.p["id"], "synthetic.txt", b"Synthetic study: widgets improved 3%.")
+        a = self.svc.attach(
+            self.p["id"], "synthetic.txt", b"Synthetic study: widgets improved 3%."
+        )
         s = self.svc.add_local_source(self.p["id"], a["id"])
         f = self.svc.add_finding(self.p["id"], "Widgets improved 3%", s["id"], "line 1")
         self.assertEqual(f["status"], "cited")
-        self.assertEqual(self.svc.add_finding(self.p["id"], "Unsupported claim", None, "")["status"], "unsupported")
+        self.assertEqual(
+            self.svc.add_finding(self.p["id"], "Unsupported claim", None, "")["status"],
+            "unsupported",
+        )
         pub = self.svc.export_notebook(self.p["id"], include_private=False)
         self.assertNotIn("Widgets improved", pub)  # private source not leaked
-        self.assertIn("Widgets improved", self.svc.export_notebook(self.p["id"], include_private=True))
+        self.assertIn(
+            "Widgets improved",
+            self.svc.export_notebook(self.p["id"], include_private=True),
+        )
 
     def test_ac06_memory_isolation_and_correction(self):
         other_root = self.tmp / "other"
         other_root.mkdir()
         other = self.svc.create_project("Other", str(other_root), "simulated")
-        m = self.svc.add_memory(other["id"], "authoritative", "note", "SECRET-OTHER", [])
-        self.assertFalse(any("SECRET-OTHER" in x["content"] for x in self.svc.memory(self.p["id"])))
+        m = self.svc.add_memory(
+            other["id"], "authoritative", "note", "SECRET-OTHER", []
+        )
+        self.assertFalse(
+            any("SECRET-OTHER" in x["content"] for x in self.svc.memory(self.p["id"]))
+        )
         self.assertEqual(self.svc.search(self.p["id"], "SECRET-OTHER"), [])
         with self.assertRaises(KeyError):
             self.svc.correct_memory(self.p["id"], m["id"], "x")
         with self.assertRaises(ValueError):
             self.svc.add_memory(self.p["id"], "derived", "summary", "no sources", [])
-        mine = self.svc.add_memory(self.p["id"], "derived", "summary", "Old summary", ["att_x"])
+        mine = self.svc.add_memory(
+            self.p["id"], "derived", "summary", "Old summary", ["att_x"]
+        )
         new = self.svc.correct_memory(self.p["id"], mine["id"], "Corrected")
         states = {x["id"]: x["status"] for x in self.svc.memory(self.p["id"])}
         self.assertEqual(states[mine["id"]], "superseded")
@@ -238,6 +319,7 @@ class TestLedger(Base):
                 ok.append(ledger.reserve(self.store, "openai", "api", "metered", 10))
             except ledger.BudgetError:
                 errs.append(1)
+
         th = [threading.Thread(target=worker) for _ in range(30)]
         [t.start() for t in th]
         [t.join() for t in th]
@@ -253,7 +335,9 @@ class TestBoundaries(unittest.TestCase):
     def test_ac08_paths(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "a").mkdir()
-            self.assertTrue(str(contained_path(d, "a/x.txt")).startswith(str(Path(d).resolve())))
+            self.assertTrue(
+                str(contained_path(d, "a/x.txt")).startswith(str(Path(d).resolve()))
+            )
             bad = ["../x", "a/../../x", "/etc/passwd"]
             if os.name == "nt":
                 bad.extend(["..\\x", r"C:\Windows\x"])
@@ -269,19 +353,32 @@ class TestBoundaries(unittest.TestCase):
                 contained_path(d, "lnk/x")
 
     def test_ac08_ssrf(self):
-        for u in ("http://127.0.0.1/", "http://localhost:8765/", "http://169.254.169.254/latest", "http://10.0.0.1/",
-                  "file:///C:/Windows/win.ini", "http://user:pw@example.com/"):
+        for u in (
+            "http://127.0.0.1/",
+            "http://localhost:8765/",
+            "http://169.254.169.254/latest",
+            "http://10.0.0.1/",
+            "file:///C:/Windows/win.ini",
+            "http://user:pw@example.com/",
+        ):
             with self.assertRaises(FetchError):
                 safe_fetch(u)
 
     def test_ac09_redaction(self):
-        s = redact("key sk-proj-abcdefghijklmnopqrstu and ghp_abcdefghijklmnopqrstuvwxyz12 api_key=supersecretvalue")
+        s = redact(
+            "key sk-proj-abcdefghijklmnopqrstu and ghp_abcdefghijklmnopqrstuvwxyz12 api_key=supersecretvalue"
+        )
         self.assertNotIn("abcdefghijklmnop", s)
         self.assertNotIn("supersecretvalue", s)
-        for secret, probe in (("Authorization: Bearer abcdefghijklmnop1234", "abcdefghijklmnop1234"),
-                              ('{"password": "hunter2hunter2"}', "hunter2hunter2"),
-                              ("AIza" + "A" * 35, "A" * 35),
-                              ("-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJB\n-----END RSA PRIVATE KEY-----", "MIIBOgIBAAJB")):
+        for secret, probe in (
+            ("Authorization: Bearer abcdefghijklmnop1234", "abcdefghijklmnop1234"),
+            ('{"password": "hunter2hunter2"}', "hunter2hunter2"),
+            ("AIza" + "A" * 35, "A" * 35),
+            (
+                "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJB\n-----END RSA PRIVATE KEY-----",
+                "MIIBOgIBAAJB",
+            ),
+        ):
             self.assertNotIn(probe, redact(secret))
 
     def test_ac08_ssrf_cgnat(self):
@@ -324,9 +421,13 @@ class TestHttp(unittest.TestCase):
         c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
         h = {"Host": f"127.0.0.1:{self.port}"}
         h.update(headers or {})
-        if "|KEY|" in h.get("Cookie", ""):  # test helper: cookie + origin key travel together
+        if "|KEY|" in h.get(
+            "Cookie", ""
+        ):  # test helper: cookie + origin key travel together
             h["Cookie"], h["X-Aesop-Key"] = h["Cookie"].split("|KEY|")
-        c.request(method, path, body=json.dumps(body) if body is not None else None, headers=h)
+        c.request(
+            method, path, body=json.dumps(body) if body is not None else None, headers=h
+        )
         r = c.getresponse()
         data = r.read()
         return r.status, dict(r.getheaders()), data
@@ -337,7 +438,9 @@ class TestHttp(unittest.TestCase):
             return self.__class__._cookie, self.__class__._csrf
         st, hd, _ = self.req("GET", f"/login?code={code}")
         self.assertEqual(st, 303)
-        cookie = hd["Set-Cookie"].split(";")[0] + "|KEY|" + hd["Location"].split("#k=")[1]
+        cookie = (
+            hd["Set-Cookie"].split(";")[0] + "|KEY|" + hd["Location"].split("#k=")[1]
+        )
         self.assertIn("HttpOnly", hd["Set-Cookie"])
         _, _, d = self.req("GET", "/api/session", headers={"Cookie": cookie})
         self.__class__._cookie, self.__class__._csrf = cookie, json.loads(d)["csrf"]
@@ -357,14 +460,38 @@ class TestHttp(unittest.TestCase):
     def test_ac08_auth_origin_csrf_host(self):
         cookie, csrf = self.login()
         self.assertEqual(self.req("GET", "/api/projects")[0], 401)
-        self.assertEqual(self.req("GET", "/api/projects", headers={"Cookie": cookie, "Host": "evil.com"})[0], 421)
+        self.assertEqual(
+            self.req(
+                "GET", "/api/projects", headers={"Cookie": cookie, "Host": "evil.com"}
+            )[0],
+            421,
+        )
         base = {"Cookie": cookie, "Content-Type": "application/json"}
         body = {"name": "x", "root": str(self.tmp)}
-        self.assertEqual(self.req("POST", "/api/projects", body, {**base, "Origin": "http://evil.com",
-                                                                   "X-CSRF-Token": csrf})[0], 403)
-        self.assertEqual(self.req("POST", "/api/projects", body, {**base, "Origin": f"http://127.0.0.1:{self.port}"})[0], 403)
-        st, hd, _ = self.req("POST", "/api/projects", body, {**base, "Origin": f"http://127.0.0.1:{self.port}",
-                                                              "X-CSRF-Token": csrf})
+        self.assertEqual(
+            self.req(
+                "POST",
+                "/api/projects",
+                body,
+                {**base, "Origin": "http://evil.com", "X-CSRF-Token": csrf},
+            )[0],
+            403,
+        )
+        self.assertEqual(
+            self.req(
+                "POST",
+                "/api/projects",
+                body,
+                {**base, "Origin": f"http://127.0.0.1:{self.port}"},
+            )[0],
+            403,
+        )
+        st, hd, _ = self.req(
+            "POST",
+            "/api/projects",
+            body,
+            {**base, "Origin": f"http://127.0.0.1:{self.port}", "X-CSRF-Token": csrf},
+        )
         self.assertEqual(st, 201)
         self.assertNotIn("Access-Control-Allow-Origin", hd)
         self.assertIn("default-src 'self'", hd["Content-Security-Policy"])
@@ -375,8 +502,16 @@ class TestHttp(unittest.TestCase):
         if not node:
             self.skipTest("node not installed")
         import subprocess
-        r = subprocess.run([node, "--check", str(Path(__file__).resolve().parent.parent / "static" / "app.js")],
-                           capture_output=True, text=True)
+
+        r = subprocess.run(
+            [
+                node,
+                "--check",
+                str(Path(__file__).resolve().parent.parent / "static" / "app.js"),
+            ],
+            capture_output=True,
+            text=True,
+        )
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_build_list_excludes_chat_tasks(self):
@@ -387,9 +522,21 @@ class TestHttp(unittest.TestCase):
         p = app.svc.create_project("B", str(root), "simulated")
         now = time.time()
         for tid, mode in (("task_chatx", "chat"), ("task_agentx", "agent")):
-            app.store.x("INSERT INTO tasks(id,project_id,provider,prompt,state,created,checkpoint) VALUES(?,?,?,?,?,?,?)",
-                        (tid, p["id"], "simulated", "x", "COMPLETED", now, json.dumps({"mode": mode})))
-        st, _, body = self.req("GET", f"/api/projects/{p['id']}/tasks", headers={"Cookie": cookie})
+            app.store.x(
+                "INSERT INTO tasks(id,project_id,provider,prompt,state,created,checkpoint) VALUES(?,?,?,?,?,?,?)",
+                (
+                    tid,
+                    p["id"],
+                    "simulated",
+                    "x",
+                    "COMPLETED",
+                    now,
+                    json.dumps({"mode": mode}),
+                ),
+            )
+        st, _, body = self.req(
+            "GET", f"/api/projects/{p['id']}/tasks", headers={"Cookie": cookie}
+        )
         self.assertEqual(st, 200)
         self.assertEqual([t["id"] for t in json.loads(body)], ["task_agentx"])
 
@@ -404,9 +551,21 @@ class TestHttp(unittest.TestCase):
         app.svc.update_project(p["id"], {"transfer_policy": {"simulated": True}})
         c = app.svc.new_conversation(p["id"])
         st, _, body = self.req(
-            "POST", f"/api/projects/{p['id']}/conversations/{c['id']}/messages",
-            {"text": "WRITE a file from chat", "attachment_ids": [], "provider": "simulated", "work": True},
-            {"Cookie": cookie, "Content-Type": "application/json", "Origin": origin, "X-CSRF-Token": csrf})
+            "POST",
+            f"/api/projects/{p['id']}/conversations/{c['id']}/messages",
+            {
+                "text": "WRITE a file from chat",
+                "attachment_ids": [],
+                "provider": "simulated",
+                "work": True,
+            },
+            {
+                "Cookie": cookie,
+                "Content-Type": "application/json",
+                "Origin": origin,
+                "X-CSRF-Token": csrf,
+            },
+        )
         self.assertEqual(st, 202)
         r = json.loads(body)
         self.assertTrue(r["work"])

@@ -1,4 +1,5 @@
 """SQLite store: authoritative local records for every Aesop Studio project."""
+
 from __future__ import annotations
 
 import json
@@ -72,15 +73,27 @@ class Store:
         with self.conn() as c:
             c.executescript(SCHEMA)
             cols = {r[1] for r in c.execute("PRAGMA table_info(ledger)")}
-            if "purpose" not in cols:  # migrate stores created before the runtime envelope existed
-                c.execute("ALTER TABLE ledger ADD COLUMN purpose TEXT NOT NULL DEFAULT 'mission'")
-                c.execute("UPDATE ledger SET purpose='included' WHERE billing_basis='subscription_included'")
+            if (
+                "purpose" not in cols
+            ):  # migrate stores created before the runtime envelope existed
+                c.execute(
+                    "ALTER TABLE ledger ADD COLUMN purpose TEXT NOT NULL DEFAULT 'mission'"
+                )
+                c.execute(
+                    "UPDATE ledger SET purpose='included' WHERE billing_basis='subscription_included'"
+                )
             pcols = {r[1] for r in c.execute("PRAGMA table_info(projects)")}
-            if "reference_dirs" not in pcols:  # read-only folders agents may open besides the project root
-                c.execute("ALTER TABLE projects ADD COLUMN reference_dirs TEXT NOT NULL DEFAULT '[]'")
+            if (
+                "reference_dirs" not in pcols
+            ):  # working folders (reference_dirs) beside the project root
+                c.execute(
+                    "ALTER TABLE projects ADD COLUMN reference_dirs TEXT NOT NULL DEFAULT '[]'"
+                )
 
     def _connect(self) -> sqlite3.Connection:
-        c = sqlite3.connect(self.path, timeout=30, isolation_level=None, check_same_thread=False)
+        c = sqlite3.connect(
+            self.path, timeout=30, isolation_level=None, check_same_thread=False
+        )
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA foreign_keys=ON")
@@ -117,9 +130,13 @@ class Store:
         with self.tx() as c:
             c.execute(sql, args)
 
-    def event(self, kind: str, project_id: str | None, /, **data) -> None:  # positional-only: data may use "kind"
-        self.x("INSERT INTO events(kind,project_id,data,created) VALUES(?,?,?,?)",
-               (kind, project_id, json.dumps(data), time.time()))
+    def event(
+        self, kind: str, project_id: str | None, /, **data
+    ) -> None:  # positional-only: data may use "kind"
+        self.x(
+            "INSERT INTO events(kind,project_id,data,created) VALUES(?,?,?,?)",
+            (kind, project_id, json.dumps(data), time.time()),
+        )
 
     def close(self) -> None:
         c = getattr(self._local, "c", None)

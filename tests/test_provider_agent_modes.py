@@ -17,6 +17,19 @@ class ProviderAgentModes(unittest.TestCase):
                 self.assertEqual(providers.usable(routes[rid], "agent"), ready)
                 self.assertEqual(routes[rid]["state"], state)
 
+    def test_administrator_agent_argv(self):
+        with patch.object(providers, "_claude_cmd", return_value=["claude"]):
+            agent = providers.build_argv("claude", "agent", "C:/project", "out")
+            self.assertEqual(
+                agent[agent.index("--permission-mode") + 1], "bypassPermissions"
+            )
+            self.assertNotIn("--disallowedTools", agent)
+        with patch.object(providers, "_codex_cmd", return_value=["codex"]):
+            chat = providers.build_argv("codex", "chat", "C:/project", "out")
+            agent = providers.build_argv("codex", "agent", "C:/project", "out")
+            self.assertEqual(chat[chat.index("-s") + 1], "read-only")
+            self.assertEqual(agent[agent.index("-s") + 1], "danger-full-access")
+
     def test_chat_cannot_write_but_agent_can(self):
         for rid in ("grok", "zai"):
             with (

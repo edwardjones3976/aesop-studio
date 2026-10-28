@@ -907,6 +907,18 @@ def _named(routes: dict) -> dict:
     return routes
 
 
+ADMIN_AGENT_ROUTES = ("claude", "codex", "cursor")
+
+
+def default_transfer_policy(store: Store) -> dict[str, bool]:
+    """New projects: attachments allowed on every in-app route (research APIs take no files)."""
+    return {
+        rid: True
+        for rid, r in cached(store).items()
+        if r.get("transport") != "research"
+    }
+
+
 def cached(store: Store) -> dict[str, dict]:
     row = store.one("SELECT v FROM kv WHERE k='routes'")
     routes = _named(json.loads(row["v"]) if row else refresh(store))
@@ -995,7 +1007,7 @@ def build_argv(
         study and study.get("mcp_config") and study.get("ref_path")
     ):
         raise RuntimeError("a study needs its MCP config and reference path")
-    # Owner-listed reference folders: read access beside the working folder, on every CLI that has the flag.
+    # Owner-listed working folders (reference_dirs): read/write beside the project root on CLIs that support it.
     add_dirs: list[str] = []
     for d in extra_dirs or []:
         add_dirs += ["--add-dir", str(d)]
@@ -1007,7 +1019,12 @@ def build_argv(
         cmd = _codex_cmd()
         if not cmd:
             raise RuntimeError("codex unavailable")
-        sandbox = "read-only" if mode in ("chat", "study") else "workspace-write"
+        if mode in ("chat", "study"):
+            sandbox = "read-only"
+        elif route_id in ADMIN_AGENT_ROUTES and mode == "agent":
+            sandbox = "danger-full-access"
+        else:
+            sandbox = "workspace-write"
         argv = cmd + ["exec"]
         for img in (
             images or []
@@ -1084,6 +1101,8 @@ def build_argv(
                 "WebSearch",
                 "Task",
             ]
+        elif route_id in ADMIN_AGENT_ROUTES and mode == "agent":
+            argv += ["--permission-mode", "bypassPermissions"]
         else:
             argv += [
                 "--permission-mode",
@@ -1173,7 +1192,7 @@ def build_argv(
         )
         spec = BALANCED["grok"]
         # No --add-dir here: grok.exe refuses it ("additionalDirectories is not supported: a session works only in
-        # its cwd", observed 2026-10-27). Reference folders reach Grok by path in the prompt only.
+        # its cwd", observed 2026-10-27). Working folders reach Grok by path in the prompt only.
         return (
             cmd
             + ["--cwd", cwd, "--no-plan"]
@@ -1230,7 +1249,7 @@ def build_argv(
         if not cmd:
             raise RuntimeError("gemini CLI unavailable")
         # The context goes in on stdin; -p carries only a short instruction (the CLI appends it to stdin). chat is
-        # the CLI's read-only plan mode; agent auto-approves edits. Reference folders use --include-directories.
+        # the CLI's read-only plan mode; agent auto-approves edits. Working folders use --include-directories.
         argv = cmd + [
             "--skip-trust",
             "--approval-mode",

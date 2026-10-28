@@ -179,9 +179,12 @@ TRANSIENT_MARKERS = (
     "try again",
 )
 AGENT_ACK_STATEMENT = (
-    "Agent tasks run the provider's official CLI as your Windows user. The project folder is its "
-    "working directory, not a sandbox: it can read files outside the folder that you can read. "
-    "Studio records the files it changed inside the folder."
+    "Agent tasks run the provider's official CLI as your Windows user. Administrators "
+    "(Claude Code, Codex, Cursor) run with the highest autonomy those CLIs offer in agent mode. "
+    "Worker providers use their normal edit-capable agent settings. The project folder is the "
+    "primary working directory, not a sandbox: tasks can also read and write owner-listed working "
+    "folders and read other files your user can read. Studio records the files changed inside the "
+    "project folder."
 )
 
 

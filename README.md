@@ -71,8 +71,11 @@ Each request is capped at 2,000 output tokens. Its worst-case cost (input estima
 
 ## Permissions model
 
-- Each project has one selected root folder. Agent tasks run there and nowhere else. Drive roots, your home folder, and credential folders are refused.
-- Sending attached files to a provider needs a per-project, per-provider transfer permission (Settings). The chat text itself goes to the project's provider.
+- Each project has one selected root folder. Agent tasks run there as the primary workspace. Drive roots, your home folder, and credential folders are refused.
+- **Working folders** (Settings): optional absolute paths where Work tasks may also read and write via each CLI's directory flags (`reference_dirs` in the database). Grok and ZCode get the paths in the prompt only.
+- New projects default to allowing attached files on every in-app provider route (research APIs still take no uploads). Older projects keep their transfer policy; use **Allow for X** in the composer or Settings to grant a route.
+- Sending attached files to a provider still respects the per-project transfer policy when you change it. The chat text itself goes to the project's provider.
+- **Administrator agent tasks** (Claude Code, Codex, Cursor) use each CLI's highest autonomy in agent mode (`bypassPermissions`, `danger-full-access`, `--force`). Worker CLIs keep their normal edit-capable agent flags. Chat mode stays read-only/plan in a temp sandbox.
 - Switching away from a project's default provider requires an explicit confirmation. There is no automatic fallback.
 - Only one agent writer runs per project at a time. Archiving a project hides it and never deletes files.
 
