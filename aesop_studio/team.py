@@ -26,21 +26,34 @@ DIFF_CHARS = 40_000
 MAX_ROUNDS = 3
 REVIEW_TIMEOUT = 300
 NOT_REVIEWERS = {"firecrawl", "perplexity"}
+_WATCHERS: dict[str, threading.Thread] = {}
 
 
 def _key(tid: str) -> str:
     return f"team:{tid}"
 
 
+def _watcher_alive(tid: str) -> bool:
+    th = _WATCHERS.get(tid)
+    return th is not None and th.is_alive()
+
+
 def has_live_work(store) -> bool:
-    """Post-build tests and in-flight reviews keep a retiring server alive after the build task finishes."""
+    """Post-build tests, in-flight reviews, and active team watchers keep a retiring server alive."""
     for row in store.q("SELECT v FROM kv WHERE k LIKE 'team:%'"):
         rec = json.loads(row["v"])
         if rec.get("state") == "REVIEWING":
             return True
-        if (rec.get("tests") or {}).get("state") in ("WAITING", "RUNNING"):
+        if (rec.get("tests") or {}).get("state") == "RUNNING":
+            return True
+        if _watcher_alive(rec["build_task"]):
             return True
     return False
+
+
+def busy(store) -> bool:
+    """Team pipeline still running (WAITING tests alone do not count)."""
+    return has_live_work(store)
 
 
 def get(store, tid: str) -> dict | None:
@@ -341,26 +354,37 @@ def watch(store, sup, svc, build_tid: str) -> None:
     """Background: wait for the build to finish, run the project's tests, then review it (if a reviewer is set)."""
 
     def go():
-        while True:
-            t = sup.final(build_tid)
-            if (
-                t
-                and t["state"] in TERMINAL
-                and not json.loads(t["checkpoint"] or "{}").get("retried_as")
-            ):
-                break
-            time.sleep(1.5)
         try:
-            rec = get(store, build_tid) or {}
-            if (rec.get("tests") or {}).get("state") in (None, "WAITING", "RUNNING"):
-                run_tests(store, sup, svc, build_tid)
-            run_review(store, sup, svc, build_tid)
-        except Exception as e:  # noqa: BLE001 - record, never crash the server
-            rec = get(store, build_tid) or {}
-            rec.update(state="FAILED", note=f"review could not run: {type(e).__name__}")
-            _put(store, build_tid, rec)
+            while True:
+                t = sup.final(build_tid)
+                if (
+                    t
+                    and t["state"] in TERMINAL
+                    and not json.loads(t["checkpoint"] or "{}").get("retried_as")
+                ):
+                    break
+                time.sleep(1.5)
+            try:
+                rec = get(store, build_tid) or {}
+                if (rec.get("tests") or {}).get("state") in (
+                    None,
+                    "WAITING",
+                    "RUNNING",
+                ):
+                    run_tests(store, sup, svc, build_tid)
+                run_review(store, sup, svc, build_tid)
+            except Exception as e:  # noqa: BLE001 - record, never crash the server
+                rec = get(store, build_tid) or {}
+                rec.update(
+                    state="FAILED", note=f"review could not run: {type(e).__name__}"
+                )
+                _put(store, build_tid, rec)
+        finally:
+            _WATCHERS.pop(build_tid, None)
 
-    threading.Thread(target=go, daemon=True).start()
+    th = threading.Thread(target=go, daemon=True)
+    _WATCHERS[build_tid] = th
+    th.start()
 
 
 def resume(store, sup, svc) -> int:
@@ -434,7 +458,15 @@ def send_fixes(
     )
     tid = sup.create(project, build["provider"], prompt, mode="agent", timeout=900)
     nxt = plan(store, tid, rec["reviewer"], rec.get("round", 1) + 1, parent=build_tid)
-    if sup.get(tid)["state"] not in TERMINAL:
+    fix = sup.get(tid)
+    if fix["state"] in TERMINAL:
+        nxt = get(store, tid) or nxt
+        nxt["tests"] = {
+            "state": "SKIPPED",
+            "note": f"the build ended {fix['state'].lower()}",
+        }
+        _put(store, tid, nxt)
+    else:
         watch(store, sup, svc, tid)
     rec["fix_task"] = tid
     _put(store, build_tid, rec)

@@ -2,6 +2,20 @@
 # bound; these helpers trust those files plus an HTTP probe, not netstat, because Windows sometimes reports a
 # listener's owner as PID 0 and the Store python alias is a launcher stub whose pid is not the server's.
 
+function Get-StudioHealth([int]$Port) {
+  try {
+    $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/api/health")
+    $req.Timeout = 2000
+    $resp = $req.GetResponse()
+    $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+    $body = $reader.ReadToEnd()
+    $reader.Close()
+    $resp.Close()
+    $j = $body | ConvertFrom-Json
+    return @{ Busy = [bool]$j.busy; Tasks = [int]$j.tasks }
+  } catch { return $null }
+}
+
 function Test-StudioPort([int]$Port) {
   # Studio answers every request with "Server: AesopStudio" (a 401 for an unsigned /api call is fine).
   try {

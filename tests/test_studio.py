@@ -457,6 +457,15 @@ class TestHttp(unittest.TestCase):
         self.assertEqual(data["build"], int(self.srv.app.source_mtime * 1000))
         self.assertFalse(data["retiring"])
 
+    def test_health_unauthenticated(self):
+        st, _, body = self.req("GET", "/api/health")
+        self.assertEqual(st, 200)
+        data = json.loads(body)
+        self.assertIn("busy", data)
+        self.assertIn("tasks", data)
+        self.assertIsInstance(data["busy"], bool)
+        self.assertIsInstance(data["tasks"], int)
+
     def test_ac08_auth_origin_csrf_host(self):
         cookie, csrf = self.login()
         self.assertEqual(self.req("GET", "/api/projects")[0], 401)

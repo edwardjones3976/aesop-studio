@@ -20,6 +20,12 @@ if ($state.Running) {
     Write-Host "Aesop Studio is already running on port $($state.Port). Use open.ps1 (or the desktop shortcut) to sign in."
     exit 0
   }
+  $health = Get-StudioHealth $state.Port
+  if ($health -and $health.Busy) {
+    $n = if ($health.Tasks -gt 0) { $health.Tasks } else { 1 }
+    Write-Host "Studio is finishing $n tasks; retry in a minute"
+    exit 0
+  }
   Write-Host "Aesop Studio on port $($state.Port) is older than its files. Stopping that process."
   & (Join-Path $root "stop.ps1") -Data $Data
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

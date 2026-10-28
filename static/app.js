@@ -1900,8 +1900,14 @@ async function inspEditor(body, pid, gen, alive) {
   const ta = h("textarea", { "aria-label": "File contents", spellcheck: "false", disabled: true, placeholder: "Open a text file from the tree." });
   let current = S.editorPath || "";
   let original = "";
+  let loaded = false;
+  let saveBtn;
+  const syncSave = () => { if (saveBtn) saveBtn.disabled = !loaded || ta.disabled || !current; };
   const tools = h("div", { class: "ide-tools" });
-  const setBusy = (on) => [...tools.querySelectorAll("button")].forEach((b) => { b.disabled = on; });
+  const setBusy = (on) => {
+    [...tools.querySelectorAll("button")].forEach((b) => { b.disabled = on; });
+    if (!on) syncSave();
+  };
   const excerpt = () => {
     const raw = ta.value || "";
     const pick = raw.slice(ta.selectionStart, ta.selectionEnd).trim() || raw;
@@ -1920,21 +1926,25 @@ async function inspEditor(body, pid, gen, alive) {
     composeIntoChat(prompts[kind], kind === "work");
   };
   const save = () => guard(async () => {
-    if (!current) return;
+    if (!current || !loaded || ta.disabled) return;
     setBusy(true);
     try {
       await api("POST", `/api/projects/${pid}/file`, { path: current, content: ta.value });
       original = ta.value; banner("Saved " + current + " in this project.", "ok");
-    } catch (e) { banner(e.message, "bad"); } finally { setBusy(false); }
+    } catch (e) { banner(e.message, "bad"); } finally { setBusy(false); syncSave(); }
   });
   const openFile = (entry) => guard(async () => {
     if (!entry.text) { banner("The editor opens text files only.", "bad"); return; }
     if (current && ta.value !== original && !confirm("Discard unsaved edits to " + current + "?")) return;
+    loaded = false;
+    syncSave();
     const f = await api("GET", `/api/projects/${pid}/file?path=${encodeURIComponent(entry.path)}`);
     if (!live()) return;
     current = f.path; S.editorPath = f.path; original = f.content; ta.disabled = false; ta.value = f.content;
+    loaded = true;
     status.textContent = f.path + " · " + f.chars + " chars · this project only";
     paintTree();
+    syncSave();
   });
   const fileTree = () => {
     const kids = {};
@@ -1947,8 +1957,10 @@ async function inspEditor(body, pid, gen, alive) {
   };
   let treeEl = fileTree();
   const paintTree = () => { const next = fileTree(); treeEl.replaceWith(next); treeEl = next; };
+  saveBtn = abtn("Save", save, "sm", "bookmark");
+  syncSave();
   tools.replaceChildren(
-    abtn("Save", save, "sm", "bookmark"),
+    saveBtn,
     abtn("Ask", () => ask("ask"), "ghost sm", "chat"),
     abtn("Learn", () => ask("learn"), "ghost sm", "sparkle"),
     abtn("Practice", () => ask("practice"), "ghost sm", "check"),
@@ -2760,7 +2772,7 @@ async function renderChat() {
     }
     return bits.length ? bits : null;
   };
-  const openFixTask = (id) => { S.taskSel = id; setItab("changes"); renderInspector(); };
+  const openFixTask = (id) => { S.taskSel = id; openInspector("changes"); };
   function msgView(m) {
     const meta = m.meta || {}; const user = m.role === "user"; const r = S.routes[m.provider];
     const costBits = [];

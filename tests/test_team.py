@@ -210,6 +210,40 @@ class TestBuildTests(TestTeam):
         )
         self.assertFalse(self.sup.has_live_work())
 
+    def test_waiting_tests_without_watcher_not_live_work(self):
+        tid = self.sup.create(self.p, "simulated", "WRITE x", mode="agent", timeout=30)
+        self.store.x("UPDATE tasks SET state=? WHERE id=?", ("BLOCKED_OWNER", tid))
+        team.plan(self.store, tid, "simulated")
+        self.assertFalse(team.has_live_work(self.store))
+        self.assertFalse(team.busy(self.store))
+
+    def test_blocked_owner_fix_task_not_live_work(self):
+        self.svc.update_project(self.p["id"], {"transfer_policy": {"simulated": True}})
+        tid = self.sup.create(
+            self.p, "simulated", "WRITE a file", mode="agent", timeout=30
+        )
+        team.plan(self.store, tid, "simulated")
+        team.watch(self.store, self.sup, self.svc, tid)
+        r = self.wait_review(tid)
+        self.assertEqual(r["state"], "DONE", r)
+        r["issues"] = [
+            {
+                "file": "sim_output.txt",
+                "line": None,
+                "severity": "medium",
+                "problem": "typo",
+                "fix": "fix it",
+            }
+        ]
+        team._put(self.store, tid, r)
+        # No agent ack: the fix task ends BLOCKED_OWNER before any watcher runs.
+        self.store.x("DELETE FROM kv WHERE k=?", (f"agent_ack:{self.p['id']}",))
+        out = team.send_fixes(self.store, self.sup, self.svc, tid, [0], "please")
+        fix = out["task"]["id"]
+        self.assertEqual(self.sup.get(fix)["state"], "BLOCKED_OWNER")
+        self.assertFalse(self.sup.has_live_work())
+        self.assertFalse(team.busy(self.store))
+
     def test_no_tests_found(self):
         from aesop_studio import testrun
 

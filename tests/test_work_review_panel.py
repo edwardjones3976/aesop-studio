@@ -30,7 +30,7 @@ class TestWorkReviewPanelMount(unittest.TestCase):
         app_js = Path(__file__).resolve().parent.parent / "static" / "app.js"
         chunk = app_js.read_text(encoding="utf-8")
         self.assertIn(
-            'const openFixTask = (id) => { S.taskSel = id; setItab("changes"); renderInspector(); };',
+            'const openFixTask = (id) => { S.taskSel = id; openInspector("changes"); };',
             chunk,
         )
         self.assertIn("reviewPanel(meta.task_id, box, openFixTask, rv)", chunk)
