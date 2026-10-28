@@ -13,7 +13,7 @@ function Get-StudioHealth([int]$Port) {
     $resp.Close()
     $j = $body | ConvertFrom-Json
     # A reply without an explicit busy field is unknown, not idle: the caller must then refuse to force-stop.
-    if ($null -eq $j -or $null -eq $j.PSObject.Properties["busy"]) { return $null }
+    if ($null -eq $j -or -not ($j.busy -is [bool])) { return $null }  # only an explicit true/false is an answer
     return @{ Busy = [bool]$j.busy; Tasks = [int]$j.tasks }
   } catch { return $null }
 }
