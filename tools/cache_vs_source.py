@@ -12,8 +12,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from aesop_studio import providers  # noqa: E402
-from aesop_studio.store import Store  # noqa: E402
+from aesop_studio import providers
+from aesop_studio.store import Store
 
 
 def main() -> int:
