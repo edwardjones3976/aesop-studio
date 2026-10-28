@@ -5,8 +5,8 @@ for (const P of [Element.prototype, DocumentFragment.prototype]) for (const m of
 }
 // All untrusted text is rendered with textContent via h(); never assign raw HTML.
 const S = { csrf: "", routes: {}, projects: [], project: null, tab: "chat", conv: null, convTitle: "", global: null, poll: null,
-  streams: {}, streamUpd: {}, streamConv: null, chatGen: 0, msgSig: "", taskSel: null, preview: null,
-  itab: "preview", inspPref: true, ov: null, lay: { tab: "chat", w: {} }, activity: "", wantWork: false, pendingCompose: null, editorPath: "" };
+  streams: {}, streamUpd: {}, streamConv: null, chatGen: 0, msgSig: "", taskSel: null,
+  itab: "files", inspPref: true, ov: null, lay: { tab: "chat", w: {} }, activity: "", wantWork: false, pendingCompose: null, editorPath: "" };
 
 function h(tag, attrs = {}, ...kids) {
   const el = document.createElement(tag);
@@ -314,7 +314,7 @@ function setupShell() {
   decorateIcons();
   S.inspPref = localStorageGet("aesop.inspector") !== "0";
   const it = localStorageGet("aesop.itab") === "logs" ? "plan" : localStorageGet("aesop.itab");
-  if (["preview", "files", "changes", "terminal", "plan", "browser"].includes(it)) S.itab = it;
+  if (["files", "changes", "terminal", "plan", "browser"].includes(it)) S.itab = it;
   setupSeparator("explorerSep", "e"); setupSeparator("inspectorSep", "i");
   $("explorerBtn").onclick = (e) => (S.ov && S.ov.name === "explorer" ? closeOverlay() : openOverlay("explorer", e.currentTarget));
   $("explorerClose").onclick = () => closeOverlay();
@@ -396,7 +396,7 @@ function paletteItems() {
   it.push({ g: "Studio", ico: "providers", label: "Open Providers", run: () => openGlobal("providers") });
   it.push({ g: "Studio", ico: "evidence", label: "Open Evidence", run: () => openGlobal("evidence") });
   it.push({ g: "View", ico: "panel", label: "Toggle inspector", run: () => toggleInspector($("inspectorBtn")) });
-  for (const t of ["preview", "files", "changes", "terminal", "logs"]) it.push({ g: "View", ico: "panel", label: `Inspector: ${t[0].toUpperCase() + t.slice(1)}`, run: () => openInspector(t, $("inspectorBtn")) });
+  for (const t of ["files", "changes", "terminal", "logs"]) it.push({ g: "View", ico: "panel", label: `Inspector: ${t[0].toUpperCase() + t.slice(1)}`, run: () => openInspector(t, $("inspectorBtn")) });
   if (S.project) it.push({ g: "Action", ico: "users", label: "Roundtable history", run: async () => { await setTab("artifacts"); const el = $("rtHistory"); if (el) el.scrollIntoView({ block: "start" }); } });
   it.push({ g: "Help", ico: "help", label: "Keyboard shortcuts", key: "?", run: showShortcuts });
   return it;
@@ -1591,14 +1591,14 @@ async function projectSettings() {
 
 async function openProject(id) {
   navBump(); const nav = S.navGen;
-  S.global = null; S.conv = null; S.taskSel = null; S.preview = null; stopWatch(); markNav();
+  S.global = null; S.conv = null; S.taskSel = null; stopWatch(); markNav();
   await guard(async () => {
     const p = await api("GET", `/api/projects/${id}`);
     if (nav !== S.navGen) return; // a newer selection won
     S.project = p;
     localStorageSet("aesop.project", id);
     const savedTab = localStorageGet("aesop.itab." + id);
-    if (["preview", "files", "changes", "terminal", "plan", "browser"].includes(savedTab)) S.itab = savedTab;
+    if (["files", "changes", "terminal", "plan", "browser"].includes(savedTab)) S.itab = savedTab;
     S.lay = loadJSON(layKey(), { tab: "chat", w: {} });
     layout(); renderHeader(); await loadProjects();
     if (nav !== S.navGen) return;
@@ -1717,7 +1717,6 @@ async function renderInspector() {
     if (S.itab === "browser") return inspBrowser(body, pid, gen);
     if (S.itab === "plan") return inspPlan(body, pid, gen);
     if (S.itab === "files") return await inspEditor(body, pid, gen);
-    if (S.itab === "preview") return await inspPreview(body, pid, gen);
     const tasks = await api("GET", `/api/projects/${pid}/tasks`);
     if (gen !== inspGen) return;
     const tid = S.taskSel && tasks.some((t) => t.id === S.taskSel) ? S.taskSel : tasks[0] && tasks[0].id;
@@ -1986,14 +1985,6 @@ async function inspFiles(body, pid, gen) {
       a.extract_note ? h("div", { class: "fm" }, a.extract_note) : null,
       h("div", { class: "fm" }, `${(a.size / 1024).toFixed(1)} KB · `, h("code", { title: a.sha256 }, a.sha256.slice(0, 12)), ` · ${fmtTime(a.created)}`))))
       : empty("file", "No files yet", "Uploaded text files can be attached to chat messages and used as local research sources."));
-}
-async function inspPreview(body, pid, gen) {
-  const arts = await api("GET", `/api/projects/${pid}/artifacts`);
-  if (gen !== inspGen) return;
-  const a = arts.find((x) => x.id === S.preview) || arts[0];
-  if (!a) { body.replaceChildren(empty("eye", "Nothing to preview", "Save a chat answer or a task result. Saved items are previewed here as plain text.")); return; }
-  body.replaceChildren(h("div", { class: "card-head" }, h("div", { class: "ttl" }, statePill(a.kind)), h("span", { class: "faint" }, a.id === S.preview ? fmtTime(a.created) : "Most recent saved item · " + fmtTime(a.created))),
-    h("h2", {}, a.title), h("p", { class: "faint" }, "Shown as plain text. HTML in saved items is never rendered or executed."), h("pre", { class: "out" }, a.content));
 }
 // The Plan tab: a live checklist. Folder-work messages file their own items and follow them (doing -> done/failed); the
 // owner adds, checks, edits; a provider can draft next steps from the conversation. Below it, recent activity.
@@ -2612,12 +2603,6 @@ async function renderChat() {
     } finally { sending = false; sendBtn.removeAttribute("aria-busy"); paintWork(); }
   };
   const sendBtn = btn("Send", () => send(false), "primary", "send");
-  const preview = async () => guard(async () => {
-    const provider = messageProvider();
-    const r = await api("POST", `/api/projects/${pid}/conversations/${cid}/preview`,
-      { text: ta.value, attachment_ids: [...chosen(), ...readyFiles(), ...readyPhotos()], provider, work: workOn });
-    await dialog(`Context that will be sent to ${routeName(r.provider)} (${r.chars} chars)`, [{ name: "ctx", label: "Exact payload", type: "textarea", value: r.context, tall: true, readonly: true }], "Close");
-  });
   ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(false); } });
   const grow = autosize(ta);
   // Files already in the project: a compact searchable picker instead of one chip per file.
@@ -2715,7 +2700,7 @@ async function renderChat() {
           const paint = () => { b.textContent = predictOn() ? "✦ predict on" : "predict off"; b.classList.toggle("off", !predictOn()); };
           b.onclick = () => { try { localStorage.setItem("aesop.predict", predictOn() ? "0" : "1"); } catch { /* */ } paint(); ta.focus(); };
           paint(); return b; })()),
-      h("div", { class: "row" }, btn("Preview context", preview, "ghost", "eye"), sendBtn)));
+      h("div", { class: "row" }, sendBtn)));
   paintWork();
   if (S.pendingCompose) {
     const pending = S.pendingCompose; S.pendingCompose = null;
@@ -2817,7 +2802,7 @@ async function renderChat() {
       save = h("button", { type: "button", class: "linkish msave", "aria-label": "Save this answer to the project" }, icon("bookmark", "sm"), "Save");
       save.onclick = async () => {
         if (save.disabled) return; save.disabled = true;
-        try { await guard(async () => { const a = await api("POST", `/api/projects/${pid}/artifacts`, { kind: "chat_answer", title: m.content.slice(0, 60), content: m.content, source_ref: m.id }); S.preview = a && a.id; banner("Saved to project.", "ok"); if (S.itab === "preview") renderInspector(); }); }
+        try { await guard(async () => { await api("POST", `/api/projects/${pid}/artifacts`, { kind: "chat_answer", title: m.content.slice(0, 60), content: m.content, source_ref: m.id }); banner("Saved to project.", "ok"); }); }
         finally { save.disabled = false; }
       };
     }
@@ -2906,7 +2891,7 @@ async function renderAgent() {
 function showTask(tid, el, openTask, rv) {
   const title = h("h3", {}, `Task ${tid}`); const pill = h("span");
   const cancelBtn = abtn("Cancel", () => guard(async () => { const c = await api("POST", `/api/tasks/${tid}/cancel`); banner(c.note, ""); }), "danger sm", "stop");
-  const saveBtn = abtn("Save result", () => guard(async () => { const a = await api("POST", `/api/tasks/${tid}/save`); S.preview = a && a.id; banner("Task result saved to project.", "ok"); }), "sm", "bookmark");
+  const saveBtn = abtn("Save result", () => guard(async () => { await api("POST", `/api/tasks/${tid}/save`); banner("Task result saved to project.", "ok"); }), "sm", "bookmark");
   cancelBtn.hidden = true; saveBtn.hidden = true;
   const fProv = h("b"), fCwd = h("b"), fStart = h("b"), fEnd = h("b"), fExit = h("b");
   const exitSpan = h("span", {}, "exit ", fExit);
@@ -3326,7 +3311,7 @@ async function renderArtifacts() {
         if (S.project && S.project.id === pid) { S.project = null; stopWatch(); renderHeader(); await loadProjects(); renderWelcome(); } else loadProjects();
       }), "danger", "archive"))),
     ...(arts.length ? arts.map((a) => h("details", { class: "card" }, h("summary", {}, statePill(a.kind), h("span", { class: "st" }, a.title), h("span", { class: "faint" }, fmtTime(a.created)),
-      h("button", { type: "button", class: "linkish", onclick: (e) => { e.preventDefault(); S.preview = a.id; openInspector("preview", e.currentTarget); } }, icon("eye", "sm"), "Preview")), h("pre", { class: "out" }, a.content)))
+      ), h("pre", { class: "out" }, a.content)))
       : [empty("bookmark", "Nothing saved yet", "Save chat answers or task results to keep them here.")]),
     hist);
   loadRtHistory(hist, gen);
