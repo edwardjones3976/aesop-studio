@@ -27,7 +27,40 @@ class TestFrontendEditor(unittest.TestCase):
             [node, str(HARNESS)],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=15,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr or r.stdout)
+
+    def test_a2_editor_compose_work_mode(self):
+        chunk = APP_JS.read_text(encoding="utf-8")
+        self.assertIn('else { workOn = false; ssSet(workKey, ""); }', chunk)
+
+    def test_a3_editor_save_baseline_before_await(self):
+        chunk = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("const path = current, sent = ta.value", chunk)
+        self.assertIn("if (current === path) original = sent", chunk)
+
+    def test_a4_editor_dirty_guards(self):
+        chunk = APP_JS.read_text(encoding="utf-8")
+        self.assertIn("function editorDirty()", chunk)
+        self.assertIn("function confirmDiscardEditors()", chunk)
+        self.assertIn("syncEditorBeforeUnload", chunk)
+
+    def test_a5_draft_replace_confirm(self):
+        chunk = APP_JS.read_text(encoding="utf-8")
+        self.assertIn(
+            "Replace your unsent chat draft with text from the editor?", chunk
+        )
+
+    def test_harness_a2_through_a5(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        r = subprocess.run(
+            [node, str(HARNESS)],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         self.assertEqual(r.returncode, 0, r.stderr or r.stdout)
 

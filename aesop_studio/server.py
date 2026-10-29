@@ -128,6 +128,8 @@ class App:
         self.reconciled += self.broker.reconcile()
         team.resume(self.store, self.sup, self.svc)
         providers.refresh(self.store)
+        self._retire_lock = threading.Lock()
+        self._in_flight = 0
         # The mission permit is the owner's switch (Evidence -> Spend controls). It survives restarts (owner request
         # 2026-10-23: "switch all API routes to on"); a fresh install starts off, and the $165 mission ceiling
         # still bounds every reservation.
@@ -145,6 +147,80 @@ def route(method: str, pattern: str):
         return fn
 
     return deco
+
+
+RETIRING_DENY = "Studio is restarting for maintenance; nothing was sent."
+
+# POST/PATCH handlers that can reach Supervisor.create, a provider, or a metered API.
+WORK_START_HANDLERS = frozenset(
+    {
+        "routes_refresh",
+        "route_verify",
+        "rt_compare",
+        "rt_start",
+        "rt_research",
+        "rt_followup_save",
+        "browser_navigate",
+        "browser_act",
+        "browser_drive_start",
+        "browser_attach",
+        "message_redo",
+        "preview",
+        "send",
+        "task_new",
+        "study_start",
+        "task_review_again",
+        "task_tests",
+        "task_fixes",
+        "draft_findings",
+        "summarize",
+    }
+)
+
+
+def run_source_retire_watcher(
+    app: App,
+    srv,
+    *,
+    source_mtime_fn=source_mtime,
+    sleep_fn=time.sleep,
+    has_live_work_fn=None,
+    stop_browser_fn=None,
+    shutdown_fn=None,
+):
+    """When Studio sources change on disk, retire only after in-flight work-start requests drain."""
+    if has_live_work_fn is None:
+        has_live_work_fn = app.sup.has_live_work
+    if stop_browser_fn is None:
+        stop_browser_fn = app.browser.stop
+    if shutdown_fn is None:
+        shutdown_fn = srv.shutdown
+
+    while not app.retiring:
+        sleep_fn(2)
+        try:
+            newer = source_mtime_fn() > app.source_mtime + 0.001
+        except OSError:
+            continue
+        if not newer:
+            continue
+        with app._retire_lock:
+            if app._in_flight > 0 or has_live_work_fn():
+                continue
+            app.retiring = True
+        sleep_fn(3)
+        while True:
+            with app._retire_lock:
+                inflight = app._in_flight
+            if inflight == 0 and not has_live_work_fn():
+                break
+            sleep_fn(0.05)
+        try:
+            stop_browser_fn()
+        except Exception:  # noqa: BLE001 - shutdown still has to proceed
+            pass
+        shutdown_fn()
+        return
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -194,6 +270,17 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b"{}"
         return json.loads(raw or b"{}")
 
+    def _admit_work_start(self) -> bool:
+        with self.app._retire_lock:
+            if self.app.retiring:
+                return False
+            self.app._in_flight += 1
+            return True
+
+    def _release_work_start(self) -> None:
+        with self.app._retire_lock:
+            self.app._in_flight = max(0, self.app._in_flight - 1)
+
     # ---------- dispatch ----------
     def do_GET(self):
         self._dispatch("GET")
@@ -241,6 +328,13 @@ class Handler(BaseHTTPRequestHandler):
                 mt = pat.match(path)
                 if mt:
                     try:
+                        if method in ("POST", "PATCH") and name in WORK_START_HANDLERS:
+                            if not self._admit_work_start():
+                                return self.err(503, RETIRING_DENY)
+                            try:
+                                return getattr(self, name)(sess, *mt.groups())
+                            finally:
+                                self._release_work_start()
                         return getattr(self, name)(sess, *mt.groups())
                     except KeyError as e:
                         return self.err(404, str(e).strip("'"))
@@ -1468,26 +1562,7 @@ def main(argv=None):
             time.sleep(600)
 
     def source_watch():
-        # An idle server whose files changed on disk is stale: it is still executing the code it imported at
-        # startup. Tell signed-in pages, then leave. A live task is allowed to finish first.
-        while not srv.app.retiring:
-            time.sleep(2)
-            try:
-                newer = source_mtime() > srv.app.source_mtime + 0.001
-            except OSError:
-                continue
-            if not newer or srv.app.sup.has_live_work():
-                continue
-            srv.app.retiring = True
-            time.sleep(
-                3
-            )  # one page poll sees retiring and unloads before the process is gone
-            try:
-                srv.app.browser.stop()
-            except Exception:  # noqa: BLE001 - shutdown still has to proceed
-                pass
-            srv.shutdown()
-            return
+        run_source_retire_watcher(srv.app, srv)
 
     import threading as _threading
 

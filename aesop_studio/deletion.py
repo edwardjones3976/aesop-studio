@@ -4,16 +4,23 @@ Deleting removes the records and scrubs every derived local copy Studio holds (r
 logs, events). It cannot delete anything a provider retained on its side, and existing backup archives keep
 their snapshot until they are deleted; both facts are returned so the UI can say so.
 """
+
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
+from pathlib import Path
 
+from . import plan, team
+from .security import ScopeError, contained_path
 from .store import Store
 
-NOTE = ("Deleted from Studio, including request prompts and output logs. Copies already sent to providers and "
-        "older backup archives are not affected.")
+NOTE = (
+    "Deleted from Studio, including request prompts and output logs. Copies already sent to providers and "
+    "older backup archives are not affected."
+)
 
 
 def _scrub_tasks(store: Store, task_ids: set[str]) -> int:
@@ -28,15 +35,91 @@ def _scrub_tasks(store: Store, task_ids: set[str]) -> int:
                     os.remove(t["output_path"] + suffix)
             except OSError:
                 pass
-        store.x("UPDATE tasks SET prompt='[deleted by owner]', checkpoint=json_set(COALESCE(checkpoint,'{}'),"
-                "'$.result','[deleted by owner]') WHERE id=?", (tid,))
+        store.x(
+            "UPDATE tasks SET prompt='[deleted by owner]', checkpoint=json_set(COALESCE(checkpoint,'{}'),"
+            "'$.result','[deleted by owner]') WHERE id=?",
+            (tid,),
+        )
         n += 1
     return n
 
 
+def _expand_team_tasks(store: Store, seeds: set[str]) -> set[str]:
+    """Follow team records from message task ids (cycle-safe)."""
+    out: set[str] = set()
+    stack = list(seeds)
+    expanded: set[str] = set()
+    while stack:
+        tid = stack.pop()
+        if tid in out:
+            continue
+        out.add(tid)
+        if tid in expanded:
+            continue
+        expanded.add(tid)
+        rec = team.get(store, tid)
+        if not rec:
+            continue
+        for key in ("review_task", "fix_task"):
+            nxt = rec.get(key)
+            if nxt:
+                stack.append(nxt)
+    return out
+
+
+def _delete_team_records(store: Store, task_ids: set[str]) -> None:
+    for tid in task_ids:
+        store.x("DELETE FROM kv WHERE k=?", (f"team:{tid}",))
+
+
+def _delete_build_plan_items(store: Store, task_ids: set[str]) -> int:
+    if not task_ids:
+        return 0
+    plan.ensure_schema(store)
+    ph = ",".join("?" * len(task_ids))
+    return store.x(
+        f"DELETE FROM plan_items WHERE source='build' AND task_ref IN ({ph})",
+        tuple(task_ids),
+    )
+
+
+def _remove_staged_photo_dirs(store: Store, task_ids: set[str]) -> int:
+    """Remove .aesop/photos/<task id>/ under each task cwd (never follow directory symlinks)."""
+    removed = 0
+    for tid in task_ids:
+        row = store.one("SELECT cwd FROM tasks WHERE id=?", (tid,))
+        if not row or not row["cwd"]:
+            continue
+        cwd_path = Path(row["cwd"])
+        if not cwd_path.exists():
+            continue
+        try:
+            cwd = cwd_path.resolve()
+        except OSError:
+            continue
+        rel = f".aesop/photos/{tid}"
+        try:
+            dest = contained_path(cwd, rel)
+        except ScopeError:
+            continue
+        expected = (cwd / ".aesop" / "photos" / tid).resolve()
+        if dest != expected:
+            continue
+        if dest.is_symlink():
+            dest.unlink(missing_ok=True)
+            removed += 1
+            continue
+        if dest.is_dir():
+            shutil.rmtree(dest)
+            removed += 1
+    return removed
+
+
 def delete_conversation(store: Store, svc, pid: str, cid: str) -> dict:
     svc.project(pid)
-    if not store.one("SELECT id FROM conversations WHERE id=? AND project_id=?", (cid, pid)):
+    if not store.one(
+        "SELECT id FROM conversations WHERE id=? AND project_id=?", (cid, pid)
+    ):
         raise KeyError("conversation not in this project")
     tids, used = set(), set()
     for m in store.q("SELECT meta FROM messages WHERE conversation_id=?", (cid,)):
@@ -44,25 +127,50 @@ def delete_conversation(store: Store, svc, pid: str, cid: str) -> dict:
         if meta.get("task_id"):
             tids.add(meta["task_id"])
         used.update(meta.get("attachments") or [])
-    scrubbed = _scrub_tasks(store, tids)
+    scrub_ids = _expand_team_tasks(store, tids)
+    scrubbed = _scrub_tasks(store, scrub_ids)
+    _delete_team_records(store, scrub_ids)
+    plan_removed = _delete_build_plan_items(store, scrub_ids)
+    staged_photos = _remove_staged_photo_dirs(store, scrub_ids)
     with store.tx() as c:
         n = c.execute("DELETE FROM messages WHERE conversation_id=?", (cid,)).rowcount
         c.execute("DELETE FROM conversations WHERE id=?", (cid,))
     photos = _drop_unused_photos(store, pid, used)
-    store.event("conversation_deleted", pid, conversation_id=cid, messages=n, photos=photos, at=time.time())
-    return {"deleted": cid, "messages": n, "photos_deleted": photos, "requests_scrubbed": scrubbed, "note": NOTE}
+    store.event(
+        "conversation_deleted",
+        pid,
+        conversation_id=cid,
+        messages=n,
+        photos=photos,
+        staged_photos=staged_photos,
+        plan_items=plan_removed,
+        at=time.time(),
+    )
+    return {
+        "deleted": cid,
+        "messages": n,
+        "photos_deleted": photos,
+        "requests_scrubbed": scrubbed,
+        "note": NOTE,
+    }
 
 
 def _drop_unused_photos(store: Store, pid: str, ids: set) -> int:
     """Photos sent in a deleted conversation go with it, unless another message still shows them."""
     gone = 0
     for aid in ids:
-        a = store.one("SELECT stored_path, sha256 FROM attachments WHERE id=? AND project_id=? AND extract_status='image'",
-                      (aid, pid))
-        if not a or store.one("SELECT id FROM messages WHERE meta LIKE ?", (f'%"{aid}"%',)):
+        a = store.one(
+            "SELECT stored_path, sha256 FROM attachments WHERE id=? AND project_id=? AND extract_status='image'",
+            (aid, pid),
+        )
+        if not a or store.one(
+            "SELECT id FROM messages WHERE meta LIKE ?", (f'%"{aid}"%',)
+        ):
             continue
         store.x("DELETE FROM attachments WHERE id=?", (aid,))
-        if a["stored_path"] and not store.one("SELECT id FROM attachments WHERE stored_path=?", (a["stored_path"],)):
+        if a["stored_path"] and not store.one(
+            "SELECT id FROM attachments WHERE stored_path=?", (a["stored_path"],)
+        ):
             try:
                 (store.data_dir / a["stored_path"]).unlink()
             except OSError:
@@ -75,13 +183,25 @@ def delete_roundtable(store: Store, rid: str) -> dict:
     r = store.one("SELECT project_id FROM roundtables WHERE id=?", (rid,))
     if not r:
         raise KeyError("roundtable not found")
-    tids = {e["task_id"] for e in store.q("SELECT task_id FROM roundtable_events WHERE rt_id=? AND task_id IS NOT NULL",
-                                          (rid,))}
+    tids = {
+        e["task_id"]
+        for e in store.q(
+            "SELECT task_id FROM roundtable_events WHERE rt_id=? AND task_id IS NOT NULL",
+            (rid,),
+        )
+    }
     from . import followup
+
     tids |= followup.forget(store, rid)
     scrubbed = _scrub_tasks(store, tids)
     with store.tx() as c:
         n = c.execute("DELETE FROM roundtable_events WHERE rt_id=?", (rid,)).rowcount
         c.execute("DELETE FROM roundtables WHERE id=?", (rid,))
-    store.event("roundtable_deleted", r["project_id"], roundtable_id=rid, events=n, at=time.time())
+    store.event(
+        "roundtable_deleted",
+        r["project_id"],
+        roundtable_id=rid,
+        events=n,
+        at=time.time(),
+    )
     return {"deleted": rid, "events": n, "requests_scrubbed": scrubbed, "note": NOTE}

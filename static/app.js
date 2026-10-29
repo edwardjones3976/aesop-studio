@@ -1331,7 +1331,28 @@ function renderPlanWorkspace() {
 }
 function renderEditorWorkspace() {
   const el = $("view"); const gen = S.viewGen; const pid = S.project.id;
-  return inspEditor(el, pid, gen, () => gen === S.viewGen && S.tab === "editor" && !S.global && el.isConnected);
+  return inspEditor(el, pid, gen, () => gen === S.viewGen && S.tab === "editor" && !S.global && el.isConnected, "main");
+}
+const editorSlots = { main: null, insp: null };
+function editorDirty() {
+  for (const slot of Object.values(editorSlots)) {
+    if (!slot) continue;
+    const s = slot();
+    if (s.loaded && s.path && s.value !== s.original) return true;
+  }
+  return false;
+}
+function confirmDiscardEditors() {
+  for (const slot of Object.values(editorSlots)) {
+    if (!slot) continue;
+    const s = slot();
+    if (s.loaded && s.path && s.value !== s.original && !confirm("Discard unsaved edits to " + s.path + "?")) return false;
+  }
+  return true;
+}
+function syncEditorBeforeUnload() {
+  if (editorDirty()) window.onbeforeunload = (e) => { e.preventDefault(); e.returnValue = ""; };
+  else window.onbeforeunload = null;
 }
 function errorView(msg, retry) {
   return h("div", { class: "note bad", role: "alert" }, icon("alert"), h("div", { class: "section" }, h("span", {}, msg), retry ? h("div", {}, btn("Retry", retry, "sm", "refresh")) : null));
@@ -1590,6 +1611,7 @@ async function projectSettings() {
 }
 
 async function openProject(id) {
+  if (S.project && S.project.id !== id && !confirmDiscardEditors()) return;
   navBump(); const nav = S.navGen;
   S.global = null; S.conv = null; S.taskSel = null; stopWatch(); markNav();
   await guard(async () => {
@@ -1652,6 +1674,7 @@ function markNav() {
 function setTab(tab) {
   if (tab === "agent") { S.wantWork = true; tab = "chat"; }
   if (!WS[tab]) tab = "chat";
+  if (tab !== S.tab && !confirmDiscardEditors()) return Promise.resolve();
   navBump();
   S.tab = tab; S.global = null; markNav(); S.activity = "";
   S.lay.tab = tab; saveLay();
@@ -1703,6 +1726,7 @@ function notifyTask(chunk) { for (const f of Object.values(W.hooks)) { try { f(c
 
 // ---------- inspector ----------
 function setItab(t) {
+  if (t !== S.itab && S.itab === "files" && !confirmDiscardEditors()) return;
   S.itab = t; localStorageSet("aesop.itab", t);
   if (S.project) localStorageSet("aesop.itab." + S.project.id, t);
   document.querySelectorAll("#itabs [data-itab]").forEach((b) => { const on = b.dataset.itab === t; b.setAttribute("aria-selected", on ? "true" : "false"); b.tabIndex = on ? 0 : -1; if (on && b.id) $("inspBody").setAttribute("aria-labelledby", b.id); if (on && b.scrollIntoView) b.scrollIntoView({ block: "nearest", inline: "nearest" }); });
@@ -1885,10 +1909,13 @@ function inspBrowser(body, pid, gen) {
 }
 function refresh2Chat() { if (S.tab === "chat" && !S.global) runRender("chat", () => renderChat()); }
 function composeIntoChat(text, work) {
+  if (!confirmDiscardEditors()) return;
   S.pendingCompose = { text: text || "", work: !!work };
   setTab("chat");
 }
-async function inspEditor(body, pid, gen, alive) {
+async function inspEditor(body, pid, gen, alive, slot) {
+  slot = slot || "insp";
+  editorSlots[slot] = null;
   const live = alive || (() => gen === inspGen);
   let tree;
   try { tree = await api("GET", `/api/projects/${pid}/tree`); } catch (e) {
@@ -1901,6 +1928,8 @@ async function inspEditor(body, pid, gen, alive) {
   let current = S.editorPath || "";
   let original = "";
   let loaded = false;
+  editorSlots[slot] = () => ({ loaded, path: current, original, value: ta.value });
+  ta.addEventListener("input", syncEditorBeforeUnload);
   let saveBtn;
   const syncSave = () => { if (saveBtn) saveBtn.disabled = !loaded || ta.disabled || !current; };
   const tools = h("div", { class: "ide-tools" });
@@ -1927,10 +1956,13 @@ async function inspEditor(body, pid, gen, alive) {
   };
   const save = () => guard(async () => {
     if (!current || !loaded || ta.disabled) return;
+    const path = current, sent = ta.value;
     setBusy(true);
     try {
-      await api("POST", `/api/projects/${pid}/file`, { path: current, content: ta.value });
-      original = ta.value; banner("Saved " + current + " in this project.", "ok");
+      await api("POST", `/api/projects/${pid}/file`, { path, content: sent });
+      if (current === path) original = sent;
+      syncEditorBeforeUnload();
+      banner("Saved " + path + " in this project.", "ok");
     } catch (e) { banner(e.message, "bad"); } finally { setBusy(false); syncSave(); }
   });
   const openFile = (entry) => guard(async () => {
@@ -2715,10 +2747,19 @@ async function renderChat() {
       h("div", { class: "row" }, sendBtn)));
   paintWork();
   if (S.pendingCompose) {
-    const pending = S.pendingCompose; S.pendingCompose = null;
-    ta.value = pending.text || ""; ssSet(draftKey, ta.value);
-    if (pending.work) { workOn = true; ssSet(workKey, "1"); fillProv(); }
-    grow(); paintWork(); ta.focus();
+    const pending = S.pendingCompose;
+    const cur = ta.value;
+    const replace = cur.trim() && cur !== (pending.text || "");
+    if (replace && !confirm("Replace your unsent chat draft with text from the editor?")) {
+      S.pendingCompose = null;
+    } else {
+      S.pendingCompose = null;
+      ta.value = pending.text || ""; ssSet(draftKey, ta.value);
+      if (pending.work) { workOn = true; ssSet(workKey, "1"); }
+      else { workOn = false; ssSet(workKey, ""); }
+      fillProv(); paintWork();
+      grow(); ta.focus();
+    }
   }
   root.append(msgsEl, h("div", { class: "composer-dock" }, composer));
   // drop photos, files or whole folders anywhere on the chat
