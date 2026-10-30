@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/edwardjones3976/aesop-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/edwardjones3976/aesop-studio/actions/workflows/ci.yml)
 
-A personal, local-first browser workspace for AI projects on Windows. Open a project, choose its provider, attach files, chat or run a supervised agent task, inspect and save the results, then close and resume later.
+A personal, local-first browser workspace for AI projects on Windows. Open a project, choose its provider, attach files, chat (and optionally work in the project folder from the same composer), inspect and save the results, then close and resume later.
 
 ## Quick start
 
@@ -20,8 +20,9 @@ Python **stdlib-only** server (`aesop_studio/`), vanilla JS UI (`static/`), loop
 
 **Browser:** `main` ships browser **v1** (Playwright over a separate Chrome profile). **Browser v2** (MV3 extension in your normal Chrome profile, DOM-first agent) lives on branch `codex/browser-v2-antigravity` until repair 4 lands.
 
-- **Chat & Model Lab:** project conversations through every **usable** in-app route (Codex, Claude Code, Cursor, Antigravity, Copilot CLI after **Verify**, optional Codex API, and the offline test adapter). Each message can pick a provider in the composer; switching away from the project default asks for confirmation. You can preview the exact context before it is sent.
-- **Developer workspace / Agent control:** supervised agent tasks scoped to the project folder. Each task shows live redacted output, the files it changed, and a cancel button that stops the owned process tree. Interrupted tasks are reconciled on restart and never replayed automatically.
+- **Chat (includes folder work):** project conversations through every **usable** in-app route (Codex, Claude Code, Cursor, Antigravity, Copilot CLI after **Verify**, optional Codex API, and the offline test adapter). Each message can pick a provider in the composer. **Work in this folder** (Ctrl+2) is the same composer: off is a chat answer; on runs a supervised agent in the project folder (live output and changes in the inspector). Cursor / Antigravity / Copilot CLI remain chat-only. You can preview the exact context before it is sent. Interrupted folder work is reconciled on restart and never replayed automatically.
+- **Plan (its own workspace tab):** each project has its own checklist and focus line. They are never mixed across projects. Open Plan on the left rail. The inspector can still show a short copy of the same checklist.
+- **Editor (its own workspace tab):** a small folder-and-text editor for the open project's files (read, save, then Ask / Learn / Practice / Review / Work into Chat). Not VS Code; no extra packages. Saves require the same folder-work acknowledgement as Chat. The inspector's Editor tab opens the same editor.
 - **Research & Knowledge:** a cited notebook mixing public pages (fetched SSRF-safely) and approved local documents. Exports can include or exclude private sources.
 - **Project memory:** authoritative records, source-linked derived summaries, and explicitly promoted shared knowledge. Corrections supersede old records and keep them for provenance.
 - **Evidence:** live views of the budget ledger, acceptance matrix, task outcomes and latency samples, plus backup and a restore test.
@@ -40,9 +41,9 @@ python tools\login_app.py                      # login window (also recreates th
 .\stop.ps1           # stops the server started by start.ps1
 ```
 
-The server claims its port exclusively. If 8765 is busy (another program listening there), it moves to the next free port, up to `--port-tries` (default 10). Once bound it writes `server.port` and its own `server.pid` to the data folder; the launchers read those and confirm by the `Server: AesopStudio` header instead of netstat.
+The server claims its port exclusively. If 8765 is busy, it tries `preferred.port` in the data folder first (the last port that served this library), then the next free port. Project records stay in `%LOCALAPPDATA%\AesopStudio\aesop.db`. A restart or a new port does not delete them. Archive is the way to hide a project; the folder on disk is left in place.
 
-Data lives in `%LOCALAPPDATA%\AesopStudio` (override with `-Data` or `AESOP_DATA`). The server binds to **127.0.0.1 only**. A browser session needs the one-time launch link written to `launch-link.txt` at startup. Restart to get a new link.
+Data lives in `%LOCALAPPDATA%\AesopStudio` (override with `-Data` or `AESOP_DATA`). The server binds to **127.0.0.1 only**. A browser session needs the one-time launch link written to `launch-link.txt` at startup. The sign-in key is stored per browser site, so the launch link is what opens the same library after a port change.
 
 ## Providers
 
@@ -64,14 +65,17 @@ This is the only route that costs money. It calls the OpenAI Responses API direc
 1. Create a key at platform.openai.com. **Do not paste it into chat.** Store it yourself:
    `setx OPENAI_API_KEY "sk-..."` in a new terminal, then `.\stop.ps1; .\start.ps1`.
 2. In **Evidence → Spend controls**, set a **monthly operating limit**. Or turn on the **mission development permit** to bill the one-time $165 development envelope; it switches off at every restart.
-3. In project **Settings**, choose `openai-api` as the provider and, optionally, a model: `gpt-6-luna` (default, $0.10/$0.50 per 1M tokens), `gpt-6.1-sol` ($2/$10) or `gpt-6-astra` ($10/$50). Prices were verified 2026-10-23 from developers.openai.com/api/docs/pricing.
+3. In project **Settings**, choose `openai-api` as the provider. Studio always uses `gpt-6.1-sol` at reasoning `medium` ($2/$10 per 1M tokens). `gpt-6-luna` ($0.10/$0.50) and `gpt-6-astra` ($10/$50) stay in the price table and are not offered as a switch. Prices were verified 2026-10-23 from developers.openai.com/api/docs/pricing.
 
 Each request is capped at 2,000 output tokens. Its worst-case cost (input estimate + full output allowance + 10%) is reserved **before** sending, and the request is refused if that would exceed the limit. The actual cost from the API's usage report then replaces the reservation. A request that is cancelled or cut off keeps its reservation as unresolved exposure, because generated tokens may still be billed. Requests use `store: false`. The key is removed from every CLI child process.
 
 ## Permissions model
 
-- Each project has one selected root folder. Agent tasks run there and nowhere else. Drive roots, your home folder, and credential folders are refused.
-- Sending attached files to a provider needs a per-project, per-provider transfer permission (Settings). The chat text itself goes to the project's provider.
+- Each project has one selected root folder. Agent tasks run there as the primary workspace. Drive roots, your home folder, and credential folders are refused.
+- **Working folders** (Settings): optional absolute paths where Work tasks may also read and write via each CLI's directory flags (`reference_dirs` in the database). Grok and ZCode get the paths in the prompt only.
+- New projects default to allowing attached files on every in-app provider route (research APIs still take no uploads). Older projects keep their transfer policy; use **Allow for X** in the composer or Settings to grant a route.
+- Sending attached files to a provider still respects the per-project transfer policy when you change it. The chat text itself goes to the project's provider.
+- **Administrator agent tasks** (Claude Code, Codex, Cursor) use each CLI's highest autonomy in agent mode (`bypassPermissions`, `danger-full-access`, `--force`). Worker CLIs keep their normal edit-capable agent flags. Chat mode stays read-only/plan in a temp sandbox.
 - Switching away from a project's default provider requires an explicit confirmation. There is no automatic fallback.
 - Only one agent writer runs per project at a time. Archiving a project hides it and never deletes files.
 

@@ -82,29 +82,39 @@ class TestBroker(unittest.TestCase):
 
     @_ci_flaky_retry
     def test_rt05_concurrent_fanout_fanin_with_causal_ids(self):
-        rec = self.draft()
-        st = self.run_session(rec)
-        self.assertEqual(st["live_status"], "COMPLETED")
-        evs = self.broker.events(rec["id"])
-        openings = [e for e in evs if e["kind"] == "opening"]
-        self.assertEqual({e["speaker"] for e in openings}, {"alpha", "bravo", "charlie", "delta"})
-        # openings were dispatched together: all saw only the setup event
-        self.assertEqual(len({e["seen_upto"] for e in openings}), 1)
-        msgs = [e for e in evs if e["kind"] == "message"]
-        self.assertTrue(msgs and all(e["seen_upto"] > openings[0]["seen_upto"] for e in msgs))
-        tasks = [self.sup.get(e["task_id"]) for e in openings]
-        starts = sorted(t["started"] for t in tasks)
-        ends = sorted(t["ended"] for t in tasks)
-        slack = 0.25 if os.environ.get("GITHUB_ACTIONS") == "true" else 0.0
-        self.assertLess(max(starts), min(ends) + slack)  # opening turns overlapped (CI scheduler slack)
-        self.assertTrue(st["coverage"]["valid"])
-        self.assertTrue(st["memo"] and "Coverage" in st["memo"])
-        for lid in ("alpha", "bravo", "charlie", "delta"):  # fairness cap on open-floor messages per speaker
-            self.assertLessEqual(len([e for e in msgs if e["speaker"] == lid]), 2)
-        self.assertEqual({e["speaker"] for e in evs if e["kind"] == "closing"}, {"alpha", "bravo", "charlie", "delta"})
-        # no lockstep barrier: the first floor message was dispatched before the slowest opening landed
-        first_floor = min(self.sup.get(e["task_id"])["started"] for e in msgs)
-        self.assertLess(first_floor, max(t["ended"] for t in tasks) + 1.0)
+        rendezvous_dir = self.tmp / "rt05_rendezvous"
+        rendezvous_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["AESOP_SIM_RENDEZVOUS_DIR"] = str(rendezvous_dir)
+        try:
+            rec = self.draft()
+            st = self.run_session(rec)
+            self.assertEqual(st["live_status"], "COMPLETED")
+            # opening turns overlapped (verified by deterministic cross-process rendezvous)
+            rendezvous_met = (rendezvous_dir / "rendezvous_met").exists()
+            failure_msg = (
+                (rendezvous_dir / "failure.txt").read_text(encoding="utf-8")
+                if (rendezvous_dir / "failure.txt").exists()
+                else "opening turns did not meet concurrent rendezvous"
+            )
+            self.assertTrue(rendezvous_met, failure_msg)
+            evs = self.broker.events(rec["id"])
+            openings = [e for e in evs if e["kind"] == "opening"]
+            self.assertEqual({e["speaker"] for e in openings}, {"alpha", "bravo", "charlie", "delta"})
+            # openings were dispatched together: all saw only the setup event
+            self.assertEqual(len({e["seen_upto"] for e in openings}), 1)
+            msgs = [e for e in evs if e["kind"] == "message"]
+            self.assertTrue(msgs and all(e["seen_upto"] > openings[0]["seen_upto"] for e in msgs))
+            tasks = [self.sup.get(e["task_id"]) for e in openings]
+            self.assertTrue(st["coverage"]["valid"])
+            self.assertTrue(st["memo"] and "Coverage" in st["memo"])
+            for lid in ("alpha", "bravo", "charlie", "delta"):  # fairness cap on open-floor messages per speaker
+                self.assertLessEqual(len([e for e in msgs if e["speaker"] == lid]), 2)
+            self.assertEqual({e["speaker"] for e in evs if e["kind"] == "closing"}, {"alpha", "bravo", "charlie", "delta"})
+            # no lockstep barrier: the first floor message was dispatched before the slowest opening landed
+            first_floor = min(self.sup.get(e["task_id"])["started"] for e in msgs)
+            self.assertLess(first_floor, max(t["ended"] for t in tasks) + 1.0)
+        finally:
+            os.environ.pop("AESOP_SIM_RENDEZVOUS_DIR", None)
 
     def test_stop_and_reconcile_never_replay(self):
         rec = self.draft()
@@ -154,10 +164,6 @@ if __name__ == "__main__":
 
 
 class TestResearcher(TestBroker):
-    @unittest.skip("exercised in TestBroker (avoid duplicate flaky timing run)")
-    def test_rt05_concurrent_fanout_fanin_with_causal_ids(self):
-        super().test_rt05_concurrent_fanout_fanin_with_causal_ids()
-
     def setUp(self):
         super().setUp()
         os.environ["AESOP_SIM_RESEARCH"] = "1"
@@ -213,10 +219,6 @@ class TestResearcher(TestBroker):
 
 
 class TestFollowUp(TestBroker):
-    @unittest.skip("exercised in TestBroker (avoid duplicate flaky timing run)")
-    def test_rt05_concurrent_fanout_fanin_with_causal_ids(self):
-        super().test_rt05_concurrent_fanout_fanin_with_causal_ids()
-
     def test_collect_parse_and_merge(self):
         from aesop_studio import followup
         evs = [{"kind": "opening", "speaker": "alpha", "label": "E2", "content":

@@ -58,7 +58,7 @@ class TestPlan(unittest.TestCase):
         tid = self.sup.create(self.p, "simulated", "WRITE a small helper file for scoring", mode="agent", timeout=30)
         it = plan.add_for_task(self.store, pid, tid, "WRITE a small helper file for scoring")
         self.assertEqual(it["status"], "doing")
-        self.assertTrue(it["content"].startswith("Build: WRITE a small helper"))
+        self.assertTrue(it["content"].startswith("Work: WRITE a small helper"))
         end = time.time() + 30
         while time.time() < end and self.sup.get(tid)["state"] not in TERMINAL:
             time.sleep(0.2)
@@ -79,6 +79,26 @@ class TestPlan(unittest.TestCase):
         items = plan.list_items(self.store, self.sup, pid)
         self.assertEqual(len(items), 2)
         self.assertEqual(items[1]["source"], "Simulated (test only)")
+
+    def test_plans_are_per_project_and_focus_is_not_shared(self):
+        other_root = self.tmp / "q"
+        other_root.mkdir()
+        q = self.svc.create_project("Q", str(other_root), "simulated")
+        plan.add(self.store, self.p["id"], "only in P")
+        plan.set_focus(self.store, self.p["id"], "Bid whist scoring")
+        plan.add(self.store, q["id"], "only in Q")
+        plan.set_focus(self.store, q["id"], "Unrelated other game")
+        p_items = [i["content"] for i in plan.list_items(self.store, self.sup, self.p["id"])]
+        q_items = [i["content"] for i in plan.list_items(self.store, self.sup, q["id"])]
+        self.assertEqual(p_items, ["only in P"])
+        self.assertEqual(q_items, ["only in Q"])
+        pay_p = plan.payload(self.store, self.sup, self.p["id"], self.p["name"])
+        pay_q = plan.payload(self.store, self.sup, q["id"], q["name"])
+        self.assertEqual(pay_p["project_id"], self.p["id"])
+        self.assertEqual(pay_q["project_id"], q["id"])
+        self.assertEqual(pay_p["focus"], "Bid whist scoring")
+        self.assertEqual(pay_q["focus"], "Unrelated other game")
+        self.assertNotEqual(pay_p["focus"], pay_q["focus"])
 
     def test_activity_feed_reads_events(self):
         pid = self.p["id"]

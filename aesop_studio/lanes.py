@@ -32,8 +32,8 @@ CATALOG = [
      "claude.ai plan quota"),
     ("cursor", "Cursor", "admin", ["cursor-agent"], [_LOCAL / "cursor-agent" / "cursor-agent.ps1"], ["cursor"],
      "Cursor plan; usage-based overage possible and not verifiable from here"),
-    ("grok", "Grok CLI", "speaker", ["grok"], [_HOME / ".grok" / "bin" / "grok.exe"], ["grok"],
-     "SuperGrok subscription quota (owner-confirmed paid plan)"),
+    ("grok", "Grok CLI", "speaker", ["grok"], [_HOME / ".grok" / "bin" / "grok.exe"], ["grok", "xai-api"],
+     "grok: SuperGrok subscription quota (owner-confirmed paid plan); xai-api: metered, mission/runtime envelopes"),
     ("antigravity", "Antigravity", "speaker", ["agy", "antigravity"], [_LOCAL / "agy" / "bin" / "agy.exe"],
      ["antigravity"],
      "Google billing not verified as included"),
@@ -44,6 +44,10 @@ CATALOG = [
     ("copilot", "Copilot CLI", "speaker", ["copilot"], [], ["copilot"],
      "GitHub Copilot premium-request quota"),
     ("zai", "Z.ai GLM Coding", "speaker", ["claude-zai"], [_HOME / ".local" / "bin" / "claude-zai.cmd"], ["zai"],
+     "Z.ai GLM Coding Plan credits (owner-confirmed paid plan)"),
+    ("gemini", "Gemini CLI", "speaker", ["gemini"], [], ["gemini"],
+     "Gemini API usage on the owner's key"),
+    ("zcode", "ZCode", "speaker", ["zcode"], [_HOME / ".local" / "bin" / "zcode"], ["zcode"],
      "Z.ai GLM Coding Plan credits (owner-confirmed paid plan)"),
 ]
 _EXTS = ("", ".exe", ".cmd", ".bat", ".ps1")

@@ -1,4 +1,5 @@
 """Loopback-only HTTP server with session cookie, Host/Origin checks and CSRF tokens."""
+
 from __future__ import annotations
 
 import argparse
@@ -17,7 +18,25 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backup, browse_agent, study, browser as browser_mod, deletion, plan, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare
+from . import (
+    backup,
+    browse_agent,
+    study,
+    browser as browser_mod,
+    deletion,
+    plan,
+    derive,
+    evidence,
+    followup,
+    lanes,
+    team,
+    ledger,
+    providers,
+    researcher,
+    roundtable,
+    roundtable_compare,
+    workspace,
+)
 from .security import MAX_UPLOAD_BYTES, ScopeError, redact
 from .services import Conflict, Services
 from .sessions import SESSION_DAYS, Sessions
@@ -27,8 +46,35 @@ from .tasks import Supervisor
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 HOST = "127.0.0.1"
-CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; "
-       "frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+
+
+def source_root() -> Path:
+    override = os.environ.get("AESOP_SOURCE_ROOT")
+    return Path(override) if override else STATIC.parent
+
+
+def source_mtime(root: Path | None = None) -> float:
+    """Newest Studio source file. A running process keeps this stamp; a later write means that process is stale."""
+    root = root or source_root()
+    latest = 0.0
+    for folder, pattern in (
+        (root / "aesop_studio", "*.py"),
+        (root / "static", "*.js"),
+        (root / "static", "*.html"),
+        (root / "static", "*.css"),
+    ):
+        if not folder.is_dir():
+            continue
+        for f in folder.rglob(pattern):
+            if f.is_file():
+                latest = max(latest, f.stat().st_mtime)
+    return latest
+
+
+CSP = (
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; "
+    "frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+)
 
 
 class InstanceLockError(RuntimeError):
@@ -44,35 +90,47 @@ def _lock_data_dir(data_dir: str):
     try:
         if os.name == "nt":
             import msvcrt
+
             fh.seek(0)
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
         else:
             import fcntl
+
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as e:
         fh.close()
-        raise InstanceLockError(f"another Aesop Studio instance owns the data directory {d}") from e
+        raise InstanceLockError(
+            f"another Aesop Studio instance owns the data directory {d}"
+        ) from e
     return fh
 
 
 class App:
     def __init__(self, data_dir: str, port: int):
         self.port = port
+        self.source_mtime = source_mtime()
+        self.retiring = False
         self._instance_lock = _lock_data_dir(data_dir)
         self.store = Store(data_dir)
         self.sup = Supervisor(self.store)
         self.svc = Services(self.store, self.sup)
-        self.sessions = Sessions(self.store.data_dir)  # persistent: survives restarts (30-day sliding)
+        self.sessions = Sessions(
+            self.store.data_dir
+        )  # persistent: survives restarts (30-day sliding)
         self.login_code = secrets.token_urlsafe(24)
         self.reconciled = self.sup.reconcile()
         self.browser = browser_mod.Browser()
         self.drive = browse_agent.Drive(self.store, self.sup, self.browser)
         from .roundtable_live import Broker
+
         self.broker = Broker(self.store, self.sup)
         self.broker.svc = self.svc  # lets the room's Researcher run reference studies (study.start needs services)
         self.reconciled += self.broker.reconcile()
         team.resume(self.store, self.sup, self.svc)
         providers.refresh(self.store)
+        self._retire_lock = threading.Lock()
+        self._in_flight = 0
+        self._admission_closed = False
         # The mission permit is the owner's switch (Evidence -> Spend controls). It survives restarts (owner request
         # 2026-10-23: "switch all API routes to on"); a fresh install starts off, and the $165 mission ceiling
         # still bounds every reservation.
@@ -88,7 +146,92 @@ def route(method: str, pattern: str):
     def deco(fn):
         ROUTES.append((method, re.compile("^" + pattern + "$"), fn.__name__))
         return fn
+
     return deco
+
+
+RETIRING_DENY = "Studio is restarting for maintenance; nothing was sent."
+
+# POST/PATCH handlers that can reach Supervisor.create, a provider, or a metered API.
+# Every other mutating route is still counted in _in_flight for drain (editor save is the
+# only mutating handler allowed while retiring).
+WORK_START_HANDLERS = frozenset(
+    {
+        "routes_refresh",
+        "route_verify",
+        "rt_compare",
+        "rt_start",
+        "rt_research",
+        "rt_followup_save",
+        "browser_navigate",
+        "browser_act",
+        "browser_drive_start",
+        "browser_attach",
+        "message_redo",
+        "preview",
+        "send",
+        "task_new",
+        "study_start",
+        "task_review_again",
+        "task_tests",
+        "task_fixes",
+        "draft_findings",
+        "summarize",
+    }
+)
+
+RETIRING_ADMIT_EXEMPT = frozenset({"project_file_put"})
+
+
+def mutating_route_handlers() -> frozenset[str]:
+    return frozenset(
+        name for method, _pat, name in ROUTES if method in ("POST", "PATCH")
+    )
+
+
+def run_source_retire_watcher(
+    app: App,
+    srv,
+    *,
+    source_mtime_fn=source_mtime,
+    sleep_fn=time.sleep,
+    has_live_work_fn=None,
+    stop_browser_fn=None,
+    shutdown_fn=None,
+):
+    """When Studio sources change on disk, retire only after in-flight work-start requests drain."""
+    if has_live_work_fn is None:
+        has_live_work_fn = app.sup.has_live_work
+    if stop_browser_fn is None:
+        stop_browser_fn = app.browser.stop
+    if shutdown_fn is None:
+        shutdown_fn = srv.shutdown
+
+    while not app.retiring:
+        sleep_fn(2)
+        try:
+            newer = source_mtime_fn() > app.source_mtime + 0.001
+        except OSError:
+            continue
+        if not newer:
+            continue
+        with app._retire_lock:
+            if app._in_flight > 0 or has_live_work_fn():
+                continue
+            app.retiring = True
+        sleep_fn(3)
+        while True:
+            with app._retire_lock:
+                if app._in_flight == 0 and not has_live_work_fn():
+                    app._admission_closed = True
+                    break
+            sleep_fn(0.05)
+        try:
+            stop_browser_fn()
+        except Exception:  # noqa: BLE001 - shutdown still has to proceed
+            pass
+        shutdown_fn()
+        return
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -97,7 +240,9 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ""
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("%s %s\n" % (time.strftime("%H:%M:%S"), redact(fmt % args).split("?")[0]))
+        sys.stderr.write(
+            "%s %s\n" % (time.strftime("%H:%M:%S"), redact(fmt % args).split("?")[0])
+        )
 
     # ---------- plumbing ----------
     def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None):
@@ -136,6 +281,24 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b"{}"
         return json.loads(raw or b"{}")
 
+    def _admit_mutating(self, handler_name: str) -> bool:
+        """Count every mutating request for drain; close admission atomically before shutdown."""
+        with self.app._retire_lock:
+            if self.app._admission_closed:
+                return False
+            if (
+                self.app.retiring
+                and handler_name in WORK_START_HANDLERS
+                and handler_name not in RETIRING_ADMIT_EXEMPT
+            ):
+                return False
+            self.app._in_flight += 1
+            return True
+
+    def _release_mutating(self) -> None:
+        with self.app._retire_lock:
+            self.app._in_flight = max(0, self.app._in_flight - 1)
+
     # ---------- dispatch ----------
     def do_GET(self):
         self._dispatch("GET")
@@ -154,24 +317,42 @@ class Handler(BaseHTTPRequestHandler):
         path = url.path
         if method == "GET" and path == "/login":
             return self._login()
+        if method == "GET" and path == "/api/health":
+            return self._health()
         if method == "GET" and not path.startswith("/api/"):
             return self._static(path)
         sess = self._session()
         if not sess:
-            return self.err(401, "not signed in to this Studio session; use the launch link printed at startup")
-        if not self.app.sessions.key_ok(self._sitem, self.headers.get("X-Aesop-Key", "")):
-            return self.err(401, "missing or invalid Studio key; reopen Studio from its launch link")
+            return self.err(
+                401,
+                "not signed in to this Studio session; use the launch link printed at startup",
+            )
+        if not self.app.sessions.key_ok(
+            self._sitem, self.headers.get("X-Aesop-Key", "")
+        ):
+            return self.err(
+                401, "missing or invalid Studio key; reopen Studio from its launch link"
+            )
         if method != "GET":
             origin = self.headers.get("Origin")
             if origin not in {f"http://{h}" for h in self.app.allowed_hosts()}:
                 return self.err(403, "cross-origin request rejected")
-            if not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), self._sitem["csrf"]):
+            if not hmac.compare_digest(
+                self.headers.get("X-CSRF-Token", ""), self._sitem["csrf"]
+            ):
                 return self.err(403, "missing or invalid CSRF token")
         for m, pat, name in ROUTES:
             if m == method:
                 mt = pat.match(path)
                 if mt:
                     try:
+                        if method in ("POST", "PATCH"):
+                            if not self._admit_mutating(name):
+                                return self.err(503, RETIRING_DENY)
+                            try:
+                                return getattr(self, name)(sess, *mt.groups())
+                            finally:
+                                self._release_mutating()
                         return getattr(self, name)(sess, *mt.groups())
                     except KeyError as e:
                         return self.err(404, str(e).strip("'"))
@@ -183,18 +364,45 @@ class Handler(BaseHTTPRequestHandler):
                         return self.err(400, str(e))
         return self.err(404, "no such endpoint")
 
+    def _health(self):
+        from . import team
+        from .tasks import TERMINAL
+
+        ph = ",".join("?" * len(TERMINAL))
+        row = self.app.store.one(
+            f"SELECT COUNT(*) AS c FROM tasks WHERE state NOT IN ({ph})",
+            tuple(TERMINAL),
+        )
+        tasks = int(row["c"]) if row else 0
+        busy = tasks > 0 or team.busy(self.app.store)
+        self.json({"busy": busy, "tasks": tasks})
+
     def _login(self):
         code = (self.query.get("code") or [""])[0]
-        if not self.app.login_code or not hmac.compare_digest(code, self.app.login_code):
-            return self._send(403, b"Launch link expired. Restart Aesop Studio to get a new one.", "text/plain")
+        if not self.app.login_code or not hmac.compare_digest(
+            code, self.app.login_code
+        ):
+            return self._send(
+                403,
+                b"Launch link expired. Restart Aesop Studio to get a new one.",
+                "text/plain",
+            )
         self.app.login_code = ""  # one-time
         sess, _csrf, key = self.app.sessions.create()
-        self._send(303, b"", "text/plain", {
-            "Location": f"/#k={key}",
-            "Set-Cookie": f"aesop_session={sess}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_DAYS * 86400}"})
+        self._send(
+            303,
+            b"",
+            "text/plain",
+            {
+                "Location": f"/#k={key}",
+                "Set-Cookie": f"aesop_session={sess}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_DAYS * 86400}",
+            },
+        )
 
     def _static(self, path: str):
-        if path == "/favicon.ico":  # the page declares its own icon; answer quietly instead of 404 noise
+        if (
+            path == "/favicon.ico"
+        ):  # the page declares its own icon; answer quietly instead of 404 noise
             return self._send(204, b"", "image/x-icon")
         if path == "/":
             path = "/index.html"
@@ -209,7 +417,16 @@ class Handler(BaseHTTPRequestHandler):
     # ---------- API ----------
     @route("GET", r"/api/session")
     def session(self, sess):
-        self.json({"csrf": self._sitem["csrf"], "reconciled": self.app.reconciled, "port": self.app.port})
+        self.json(
+            {
+                "csrf": self._sitem["csrf"],
+                "reconciled": self.app.reconciled,
+                "port": self.app.port,
+                "last_project": self.app.svc.last_project(),
+                "build": int(self.app.source_mtime * 1000),
+                "retiring": self.app.retiring,
+            }
+        )
 
     @route("GET", r"/api/routes")
     def routes(self, sess):
@@ -222,8 +439,15 @@ class Handler(BaseHTTPRequestHandler):
     @route("GET", r"/api/perplexity-orchestrator/models")
     def perplexity_models(self, sess):
         from . import perplexity_api
+
         try:
-            self.json({"models": perplexity_api.catalog(refresh=self.query.get("refresh") == ["1"])})
+            self.json(
+                {
+                    "models": perplexity_api.catalog(
+                        refresh=self.query.get("refresh") == ["1"]
+                    )
+                }
+            )
         except perplexity_api.ApiError as e:
             self.err(503, str(e))
 
@@ -266,9 +490,18 @@ class Handler(BaseHTTPRequestHandler):
     def rt_compare(self, sess, rid):
         rec = self._rt(rid)
         b = self.body()
-        out = roundtable_compare.start(self.app.store, self.app.sup, self.app.svc, rec,
-                                       confirm=bool(b.get("confirm")))
-        code = 202 if out.get("status") == "RUNNING" else (409 if out.get("status") == "BLOCKED" else 200)
+        out = roundtable_compare.start(
+            self.app.store,
+            self.app.sup,
+            self.app.svc,
+            rec,
+            confirm=bool(b.get("confirm")),
+        )
+        code = (
+            202
+            if out.get("status") == "RUNNING"
+            else (409 if out.get("status") == "BLOCKED" else 200)
+        )
         self.json(out, code)
 
     @route("GET", r"/api/roundtable/live-authorization")
@@ -285,7 +518,13 @@ class Handler(BaseHTTPRequestHandler):
         rec = self._rt(rid)
         res = self.app.broker.start(rec, self.app.svc.project(rec["project_id"]))
         if not res["started"]:
-            return self.json({"error": "Preflight did not pass.", "block_reasons": res["block_reasons"]}, 409)
+            return self.json(
+                {
+                    "error": "Preflight did not pass.",
+                    "block_reasons": res["block_reasons"],
+                },
+                409,
+            )
         self.json(res, 202)
 
     @route("POST", r"/api/roundtables/(\w+)/(pause|resume|stop)")
@@ -296,32 +535,53 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/roundtables/(\w+)/research")
     def rt_research(self, sess, rid):
         self._rt(rid)
-        self.json(self.app.broker.ask_research(rid, self.body().get("query") or ""), 202)
+        self.json(
+            self.app.broker.ask_research(rid, self.body().get("query") or ""), 202
+        )
 
     @route("GET", r"/api/roundtables/(\w+)/followup")
     def rt_followup(self, sess, rid):
         rec = self._rt(rid)
         refresh = (self.query.get("refresh") or ["0"])[0] == "1"
-        self.json(followup.prepare(self.app.store, self.app.sup, self.app.broker, rec,
-                                   self.app.svc.project(rec["project_id"]), refresh=refresh))
+        self.json(
+            followup.prepare(
+                self.app.store,
+                self.app.sup,
+                self.app.broker,
+                rec,
+                self.app.svc.project(rec["project_id"]),
+                refresh=refresh,
+            )
+        )
 
     @route("POST", r"/api/roundtables/(\w+)/followup")
     def rt_followup_save(self, sess, rid):
         rec = self._rt(rid)
-        self.json(followup.complete(self.app.store, self.app.broker, rec, self.app.svc.project(rec["project_id"]),
-                                    self.body()))
+        self.json(
+            followup.complete(
+                self.app.store,
+                self.app.broker,
+                rec,
+                self.app.svc.project(rec["project_id"]),
+                self.body(),
+            )
+        )
 
     @route("GET", r"/api/roundtable/researcher")
     def rt_researcher(self, sess):
-        self.json({**researcher.status(), "used_today": researcher.daily_used(self.app.store)})
+        self.json(
+            {**researcher.status(), "used_today": researcher.daily_used(self.app.store)}
+        )
 
     @route("GET", r"/api/roundtables")
     def rt_history(self, sess):
         """History of every roundtable across projects (newest first)."""
-        rows = self.app.store.q("SELECT r.id, r.project_id, p.name AS project, r.mode, r.objective, r.live_status, "
-                                "r.started, r.ended, r.coverage, r.updated, (SELECT COUNT(*) FROM roundtable_events e "
-                                "WHERE e.rt_id = r.id AND e.kind IN ('opening','message','closing')) AS messages "
-                                "FROM roundtables r JOIN projects p ON p.id = r.project_id ORDER BY r.updated DESC LIMIT 200")
+        rows = self.app.store.q(
+            "SELECT r.id, r.project_id, p.name AS project, r.mode, r.objective, r.live_status, "
+            "r.started, r.ended, r.coverage, r.updated, (SELECT COUNT(*) FROM roundtable_events e "
+            "WHERE e.rt_id = r.id AND e.kind IN ('opening','message','closing')) AS messages "
+            "FROM roundtables r JOIN projects p ON p.id = r.project_id ORDER BY r.updated DESC LIMIT 200"
+        )
         for r in rows:
             r["coverage"] = json.loads(r["coverage"]) if r["coverage"] else None
         self.json(rows)
@@ -334,7 +594,9 @@ class Handler(BaseHTTPRequestHandler):
     def rt_delete(self, sess, rid):
         rec = self._rt(rid)
         live = self.app.broker.sessions.get(rid)
-        if (rec.get("live_status") in ("RUNNING", "PAUSED")) or (live and live["thread"].is_alive()):
+        if (rec.get("live_status") in ("RUNNING", "PAUSED")) or (
+            live and live["thread"].is_alive()
+        ):
             raise Conflict("stop this session before deleting it")
         self.json(deletion.delete_roundtable(self.app.store, rid))
 
@@ -342,20 +604,40 @@ class Handler(BaseHTTPRequestHandler):
     def rt_live(self, sess, rid):
         self._rt(rid)
         after = int((self.query.get("after") or ["0"])[0])
-        self.json({"status": self.app.broker.status(rid), "events": self.app.broker.events(rid, after)})
+        self.json(
+            {
+                "status": self.app.broker.status(rid),
+                "events": self.app.broker.events(rid, after),
+            }
+        )
 
     @route("GET", r"/api/roundtables/(\w+)/record")
     def rt_record(self, sess, rid):
         self._rt(rid)
-        body = redact(json.dumps(self.app.broker.export(rid), indent=1, default=str)).encode()
-        self._send(200, body, "application/json", {"Content-Disposition": f'attachment; filename="roundtable-record-{rid}.json"'})
+        body = redact(
+            json.dumps(self.app.broker.export(rid), indent=1, default=str)
+        ).encode()
+        self._send(
+            200,
+            body,
+            "application/json",
+            {
+                "Content-Disposition": f'attachment; filename="roundtable-record-{rid}.json"'
+            },
+        )
 
     @route("GET", r"/api/roundtables/(\w+)/export")
     def rt_export(self, sess, rid):
         rec = self._rt(rid)
-        packet = roundtable.export_packet(self.app.store, rec, self.app.svc.project(rec["project_id"]))
-        self._send(200, redact(json.dumps(packet, indent=1, default=str)).encode(), "application/json",
-                   {"Content-Disposition": f'attachment; filename="roundtable-{rid}.json"'})
+        packet = roundtable.export_packet(
+            self.app.store, rec, self.app.svc.project(rec["project_id"])
+        )
+        self._send(
+            200,
+            redact(json.dumps(packet, indent=1, default=str)).encode(),
+            "application/json",
+            {"Content-Disposition": f'attachment; filename="roundtable-{rid}.json"'},
+        )
 
     @route("GET", r"/api/projects")
     def projects(self, sess):
@@ -364,8 +646,15 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/projects")
     def project_create(self, sess):
         b = self.body()
-        self.json(self.app.svc.create_project(b.get("name", ""), b.get("root", ""), b.get("provider_default"),
-                                              bool(b.get("create_missing"))), 201)
+        self.json(
+            self.app.svc.create_project(
+                b.get("name", ""),
+                b.get("root", ""),
+                b.get("provider_default"),
+                bool(b.get("create_missing")),
+            ),
+            201,
+        )
 
     @route("GET", r"/api/fs/dirs")
     def fs_dirs(self, sess):
@@ -382,8 +671,13 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/projects/(\w+)/archive")
     def project_archive(self, sess, pid):
         self.app.svc.archive_project(pid)
-        self.json({"archived": pid, "note": "Project hidden. Files in the project root and stored attachments "
-                                            "were not deleted."})
+        self.json(
+            {
+                "archived": pid,
+                "note": "Project hidden. Files in the project root and stored attachments "
+                "were not deleted.",
+            }
+        )
 
     @route("GET", r"/api/projects/(\w+)/attachments")
     def attachments(self, sess, pid):
@@ -399,7 +693,8 @@ class Handler(BaseHTTPRequestHandler):
 
     @route("POST", r"/api/browser/act")
     def browser_act(self, sess):
-        b = self.body(); op = b.get("op")
+        b = self.body()
+        op = b.get("op")
         if op not in ("click", "scroll", "type", "key", "back", "forward", "reload"):
             raise ValueError("unknown browser action")
         args = {k: b[k] for k in ("x", "y", "dy", "text", "key") if k in b}
@@ -409,8 +704,16 @@ class Handler(BaseHTTPRequestHandler):
     def browser_shot(self, sess):
         full = (self.query.get("full") or ["0"])[0] == "1"
         sh = self.app.browser.shot(full)
-        self._send(200, sh["png"], "image/png", {"Cache-Control": "no-store",
-                                                 "X-Browser-W": str(sh["vw"]), "X-Browser-H": str(sh["vh"])})
+        self._send(
+            200,
+            sh["png"],
+            "image/png",
+            {
+                "Cache-Control": "no-store",
+                "X-Browser-W": str(sh["vw"]),
+                "X-Browser-H": str(sh["vh"]),
+            },
+        )
 
     @route("GET", r"/api/browser/text")
     def browser_text(self, sess):
@@ -427,8 +730,15 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/projects/(\w+)/browser/drive")
     def browser_drive_start(self, sess, pid):
         b = self.body()
-        self.json(self.app.drive.start(self.app.svc.project(pid), b.get("provider") or "", b.get("goal") or "",
-                                       int(b.get("max_steps") or 6)), 202)
+        self.json(
+            self.app.drive.start(
+                self.app.svc.project(pid),
+                b.get("provider") or "",
+                b.get("goal") or "",
+                int(b.get("max_steps") or 6),
+            ),
+            202,
+        )
 
     @route("POST", r"/api/browser/drive/stop")
     def browser_drive_stop(self, sess):
@@ -448,12 +758,26 @@ class Handler(BaseHTTPRequestHandler):
         self.app.svc.project(pid)
         png = self.app.browser.shot_png(False)
         info = self.app.browser.cmd("text")
-        host = re.sub(r"^https?://(www\.)?", "", info.get("url") or "page").split("/")[0][:40] or "page"
+        host = (
+            re.sub(r"^https?://(www\.)?", "", info.get("url") or "page").split("/")[0][
+                :40
+            ]
+            or "page"
+        )
         stamp = time.strftime("%H%M%S")
         img = self.app.svc.attach(pid, f"browser-{host}-{stamp}.png", png)
         page = f"Page: {info.get('title') or ''}\nURL: {info.get('url') or ''}\n\n{info.get('text') or ''}"
-        txt = self.app.svc.attach(pid, f"browser-{host}-{stamp}.md", page.encode("utf-8"))
-        self.json({"image_id": img["id"], "text_id": txt["id"], "url": info.get("url"), "title": info.get("title")})
+        txt = self.app.svc.attach(
+            pid, f"browser-{host}-{stamp}.md", page.encode("utf-8")
+        )
+        self.json(
+            {
+                "image_id": img["id"],
+                "text_id": txt["id"],
+                "url": info.get("url"),
+                "title": info.get("title"),
+            }
+        )
 
     @route("POST", r"/api/attachments/(\w+)/discard")
     def attachment_discard(self, sess, aid):
@@ -465,7 +789,9 @@ class Handler(BaseHTTPRequestHandler):
             path, mime = self.app.svc.image_file(aid)
         except KeyError:  # not a photo (a text file, or already removed): nothing to show, not an error
             return self._send(204, b"", "text/plain")
-        self._send(200, path.read_bytes(), mime, {"Cache-Control": "private, max-age=86400"})
+        self._send(
+            200, path.read_bytes(), mime, {"Cache-Control": "private, max-age=86400"}
+        )
 
     @route("POST", r"/api/projects/(\w+)/attachments")
     def attach(self, sess, pid):
@@ -476,8 +802,14 @@ class Handler(BaseHTTPRequestHandler):
         if n > MAX_UPLOAD_BYTES:
             self.rfile.read(min(n, MAX_UPLOAD_BYTES + 1))  # drain bounded
             self.app.svc.project(pid)
-            return self.json({"name": name, "extract_status": "too_large",
-                              "extract_note": "File exceeds the 5 MB limit and was not stored."}, 413)
+            return self.json(
+                {
+                    "name": name,
+                    "extract_status": "too_large",
+                    "extract_note": "File exceeds the 5 MB limit and was not stored.",
+                },
+                413,
+            )
         self.json(self.app.svc.attach(pid, name, self.rfile.read(n)), 201)
 
     @route("GET", r"/api/projects/(\w+)/conversations")
@@ -495,21 +827,74 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/projects/(\w+)/conversations/(\w+)/messages/(\w+)/redo")
     def message_redo(self, sess, pid, cid, mid):
         b = self.body()
-        self.json(self.app.svc.redo(pid, cid, mid, b.get("provider") or None, b.get("text")), 202)
+        r = self.app.svc.redo(pid, cid, mid, b.get("provider") or None, b.get("text"))
+        if r.get("work") and r.get("task_id"):
+            try:
+                plan.add_for_task(
+                    self.app.store,
+                    pid,
+                    r["task_id"],
+                    r.get("prompt") or b.get("text") or "",
+                )
+            except ValueError:
+                pass
+            team.plan(self.app.store, r["task_id"], None)
+            team.watch(self.app.store, self.app.sup, self.app.svc, r["task_id"])
+        self.json(r, 202)
 
     @route("POST", r"/api/projects/(\w+)/conversations/(\w+)/preview")
     def preview(self, sess, pid, cid):
         b = self.body()
         p = self.app.svc.project(pid)
         prov = b.get("provider") or p["provider_default"]
-        ctx = self.app.svc.build_context(pid, cid, b.get("text", ""), b.get("attachment_ids", []), prov)
-        self.json({"provider": prov, "context": ctx, "chars": len(ctx)})
+        ctx = self.app.svc.build_context(
+            pid, cid, b.get("text", ""), b.get("attachment_ids", []), prov
+        )
+        if b.get("work"):
+            ctx = (
+                "[Studio: work in the project folder. You may edit files here.]\n\n"
+                + self.app.svc.reference_note(p)
+                + ctx
+            )
+        self.json(
+            {
+                "provider": prov,
+                "context": ctx,
+                "chars": len(ctx),
+                "work": bool(b.get("work")),
+            }
+        )
 
     @route("POST", r"/api/projects/(\w+)/conversations/(\w+)/messages")
     def send(self, sess, pid, cid):
         b = self.body()
-        self.json(self.app.svc.send(pid, cid, b.get("text", ""), b.get("attachment_ids", []), b.get("provider"),
-                                    bool(b.get("confirm_switch"))), 202)
+        work = bool(b.get("work"))
+        reviewer = b.get("reviewer") or None
+        if work and reviewer:
+            prov = b.get("provider") or self.app.svc.project(pid)["provider_default"]
+            if reviewer not in team.reviewers(self.app.store, prov):
+                raise ValueError(
+                    f"{reviewer} can't review right now; pick another reviewer or none"
+                )
+        r = self.app.svc.send(
+            pid,
+            cid,
+            b.get("text", ""),
+            b.get("attachment_ids", []),
+            b.get("provider"),
+            bool(b.get("confirm_switch")),
+            work=work,
+        )
+        if work and r.get("task_id"):
+            try:
+                plan.add_for_task(
+                    self.app.store, pid, r["task_id"], b.get("text") or ""
+                )
+            except ValueError:
+                pass
+            team.plan(self.app.store, r["task_id"], reviewer)
+            team.watch(self.app.store, self.app.sup, self.app.svc, r["task_id"])
+        self.json(r, 202)
 
     @route("GET", r"/api/projects/(\w+)/artifacts")
     def artifacts(self, sess, pid):
@@ -518,27 +903,52 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/projects/(\w+)/artifacts")
     def artifact_new(self, sess, pid):
         b = self.body()
-        self.json(self.app.svc.save_artifact(pid, b.get("kind", "note"), b.get("title", ""), b.get("content", ""),
-                                             b.get("source_ref")), 201)
+        self.json(
+            self.app.svc.save_artifact(
+                pid,
+                b.get("kind", "note"),
+                b.get("title", ""),
+                b.get("content", ""),
+                b.get("source_ref"),
+            ),
+            201,
+        )
 
     @route("GET", r"/api/projects/(\w+)/export")
     def export(self, sess, pid):
         svc = self.app.svc
         p = svc.project(pid)
-        data = {"project": p, "artifacts": svc.artifacts(pid), "attachments": svc.attachments(pid),
-                "conversations": [{"conversation": c, "messages": svc.messages(pid, c["id"])}
-                                  for c in svc.conversations(pid)],
-                "notebook": svc.notebook(pid), "memory": svc.memory(pid), "exported_at": time.time()}
+        data = {
+            "project": p,
+            "artifacts": svc.artifacts(pid),
+            "attachments": svc.attachments(pid),
+            "conversations": [
+                {"conversation": c, "messages": svc.messages(pid, c["id"])}
+                for c in svc.conversations(pid)
+            ],
+            "notebook": svc.notebook(pid),
+            "memory": svc.memory(pid),
+            "exported_at": time.time(),
+        }
         body = redact(json.dumps(data, default=str, indent=1)).encode()
-        self._send(200, body, "application/json", {
-            "Content-Disposition": f'attachment; filename="aesop-{pid}.json"'})
+        self._send(
+            200,
+            body,
+            "application/json",
+            {"Content-Disposition": f'attachment; filename="aesop-{pid}.json"'},
+        )
 
     @route("GET", r"/api/projects/(\w+)/tasks")
     def tasks(self, sess, pid):
         self.app.svc.project(pid)
-        self.json(self.app.store.q("SELECT id,provider,state,prompt,error,exit_code,created,started,ended,"
-                                   "changed_files,checkpoint FROM tasks WHERE project_id=? AND checkpoint LIKE '%\"mode\": \"agent\"%' "
-                                   "ORDER BY created DESC LIMIT 50", (pid,)))
+        self.json(
+            self.app.store.q(
+                "SELECT id,provider,state,prompt,error,exit_code,created,started,ended,"
+                'changed_files,checkpoint FROM tasks WHERE project_id=? AND checkpoint LIKE \'%"mode": "agent"%\' '
+                "ORDER BY created DESC LIMIT 50",
+                (pid,),
+            )
+        )
 
     @route("POST", r"/api/projects/(\w+)/tasks")
     def task_new(self, sess, pid):
@@ -550,9 +960,16 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("task prompt is empty")
         reviewer = b.get("reviewer") or None
         if reviewer and reviewer not in team.reviewers(self.app.store, prov):
-            raise ValueError(f"{reviewer} can't review right now; pick another reviewer or none")
-        tid = self.app.sup.create(p, prov, b["prompt"].strip(), mode="agent",
-                                  timeout=max(30, min(3600, int(b.get("timeout", 900)))))
+            raise ValueError(
+                f"{reviewer} can't review right now; pick another reviewer or none"
+            )
+        tid = self.app.sup.create(
+            p,
+            prov,
+            b["prompt"].strip(),
+            mode="agent",
+            timeout=max(30, min(3600, int(b.get("timeout", 900)))),
+        )
         try:
             plan.add_for_task(self.app.store, pid, tid, b["prompt"])
         except ValueError:
@@ -568,9 +985,39 @@ class Handler(BaseHTTPRequestHandler):
 
     @route("GET", r"/api/projects/(\w+)/plan")
     def plan_list(self, sess, pid):
+        p = self.app.svc.project(pid)
+        self.json(plan.payload(self.app.store, self.app.sup, pid, p["name"]))
+
+    @route("POST", r"/api/projects/(\w+)/plan/focus")
+    def plan_focus(self, sess, pid):
         self.app.svc.project(pid)
-        self.json({"items": plan.list_items(self.app.store, self.app.sup, pid),
-                   "activity": plan.activity(self.app.store, pid)})
+        self.json(plan.set_focus(self.app.store, pid, self.body().get("focus") or ""))
+
+    @route("GET", r"/api/projects/(\w+)/tree")
+    def project_tree(self, sess, pid):
+        p = self.app.svc.project(pid)
+        self.json(workspace.list_tree(p, (self.query.get("path") or [""])[0]))
+
+    @route("GET", r"/api/projects/(\w+)/file")
+    def project_file_get(self, sess, pid):
+        p = self.app.svc.project(pid)
+        rel = (self.query.get("path") or [""])[0]
+        if not rel:
+            raise ValueError("choose a file in this project")
+        self.json(workspace.read_file(p, rel))
+
+    @route("POST", r"/api/projects/(\w+)/file")
+    def project_file_put(self, sess, pid):
+        p = self.app.svc.project(pid)
+        b = self.body()
+        self.json(
+            workspace.write_file(
+                self.app.store,
+                p,
+                b.get("path") or "",
+                b.get("content") if "content" in b else "",
+            )
+        )
 
     @route("POST", r"/api/projects/(\w+)/plan")
     def plan_add(self, sess, pid):
@@ -581,7 +1028,9 @@ class Handler(BaseHTTPRequestHandler):
     def plan_update(self, sess, pid, iid):
         self.app.svc.project(pid)
         b = self.body()
-        self.json(plan.update(self.app.store, pid, iid, b.get("status"), b.get("content")))
+        self.json(
+            plan.update(self.app.store, pid, iid, b.get("status"), b.get("content"))
+        )
 
     @route("POST", r"/api/projects/(\w+)/plan/(\w+)/delete")
     def plan_delete(self, sess, pid, iid):
@@ -605,7 +1054,15 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/study/refs")
     def study_ref_add(self, sess):
         b = self.body()
-        self.json(study.add_ref(self.app.store, b.get("path") or "", b.get("name") or "", b.get("note") or ""), 201)
+        self.json(
+            study.add_ref(
+                self.app.store,
+                b.get("path") or "",
+                b.get("name") or "",
+                b.get("note") or "",
+            ),
+            201,
+        )
 
     @route("POST", r"/api/study/refs/(\w+)/delete")
     def study_ref_delete(self, sess, rid):
@@ -620,19 +1077,40 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/projects/(\w+)/study")
     def study_start(self, sess, pid):
         b = self.body()
-        self.json(study.start(self.app.store, self.app.sup, self.app.svc, pid, b.get("ref_id") or "",
-                              b.get("topic") or "", b.get("provider") or None), 202)
+        self.json(
+            study.start(
+                self.app.store,
+                self.app.sup,
+                self.app.svc,
+                pid,
+                b.get("ref_id") or "",
+                b.get("topic") or "",
+                b.get("provider") or None,
+            ),
+            202,
+        )
 
     @route("GET", r"/api/projects/(\w+)/studies")
     def study_list(self, sess, pid):
         self.app.svc.project(pid)
-        self.json({"studies": study.list_studies(self.app.store, pid, sup=self.app.sup, svc=self.app.svc)})
+        self.json(
+            {
+                "studies": study.list_studies(
+                    self.app.store, pid, sup=self.app.sup, svc=self.app.svc
+                )
+            }
+        )
 
     @route("GET", r"/api/projects/(\w+)/reviewers")
     def task_reviewers(self, sess, pid):
         p = self.app.svc.project(pid)
-        self.json({"builder": p["provider_default"], "reviewers": team.reviewers(self.app.store, p["provider_default"]),
-                   "max_rounds": team.MAX_ROUNDS})
+        self.json(
+            {
+                "builder": p["provider_default"],
+                "reviewers": team.reviewers(self.app.store, p["provider_default"]),
+                "max_rounds": team.MAX_ROUNDS,
+            }
+        )
 
     @route("GET", r"/api/tasks/(\w+)/review")
     def task_review(self, sess, tid):
@@ -642,14 +1120,27 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/tasks/(\w+)/review")
     def task_review_again(self, sess, tid):
         self._task(tid)
-        self.json(team.retry(self.app.store, self.app.sup, self.app.svc, tid, self.body().get("reviewer")), 202)
+        self.json(
+            team.retry(
+                self.app.store,
+                self.app.sup,
+                self.app.svc,
+                tid,
+                self.body().get("reviewer"),
+            ),
+            202,
+        )
 
     @route("POST", r"/api/tasks/(\w+)/tests")
     def task_tests(self, sess, tid):
         t = self._task(tid)
         if t["state"] != "COMPLETED":
             raise ValueError("tests run on completed builds only")
-        threading.Thread(target=team.run_tests, args=(self.app.store, self.app.sup, self.app.svc, tid), daemon=True).start()
+        threading.Thread(
+            target=team.run_tests,
+            args=(self.app.store, self.app.sup, self.app.svc, tid),
+            daemon=True,
+        ).start()
         self.json({"started": True}, 202)
 
     @route("POST", r"/api/tasks/(\w+)/fixes")
@@ -657,8 +1148,17 @@ class Handler(BaseHTTPRequestHandler):
         self._task(tid)
         b = self.body()
         picked = b.get("issues")
-        self.json(team.send_fixes(self.app.store, self.app.sup, self.app.svc, tid,
-                                  [int(x) for x in picked] if isinstance(picked, list) else None, b.get("note") or ""), 202)
+        self.json(
+            team.send_fixes(
+                self.app.store,
+                self.app.sup,
+                self.app.svc,
+                tid,
+                [int(x) for x in picked] if isinstance(picked, list) else None,
+                b.get("note") or "",
+            ),
+            202,
+        )
 
     @route("POST", r"/api/tasks/(\w+)/accept")
     def task_accept(self, sess, tid):
@@ -678,14 +1178,25 @@ class Handler(BaseHTTPRequestHandler):
         out, new_off = self.app.sup.output(tid, off)
         cp = json.loads(t["checkpoint"] or "{}")
         # Metered API tasks stream answer text; CLI task logs echo prompts and banners and are not the answer.
-        self.json({"task": t, "output": out, "offset": new_off,
-                   "stream_is_answer": bool(cp.get("model") and "reservation_usd" in cp)})
+        self.json(
+            {
+                "task": t,
+                "output": out,
+                "offset": new_off,
+                "stream_is_answer": bool(cp.get("model") and "reservation_usd" in cp),
+            }
+        )
 
     @route("POST", r"/api/tasks/(\w+)/cancel")
     def task_cancel(self, sess, tid):
         self._task(tid)
         ok = self.app.sup.cancel(tid)
-        self.json({"cancel_signalled": ok, "note": "Local process tree terminated; remote work stop is not provable."})
+        self.json(
+            {
+                "cancel_signalled": ok,
+                "note": "Local process tree terminated; remote work stop is not provable.",
+            }
+        )
 
     @route("POST", r"/api/tasks/(\w+)/save")
     def task_save(self, sess, tid):
@@ -693,8 +1204,16 @@ class Handler(BaseHTTPRequestHandler):
         cp = json.loads(t["checkpoint"] or "{}")
         content = cp.get("result") or self.app.sup.output(tid)[0]
         content += "\n\nChanged files: " + (t["changed_files"] or "n/a")
-        self.json(self.app.svc.save_artifact(t["project_id"], "task_result", f"Task {tid} ({t['state']})",
-                                             content, tid), 201)
+        self.json(
+            self.app.svc.save_artifact(
+                t["project_id"],
+                "task_result",
+                f"Task {tid} ({t['state']})",
+                content,
+                tid,
+            ),
+            201,
+        )
 
     @route("GET", r"/api/projects/(\w+)/notebook")
     def notebook(self, sess, pid):
@@ -704,27 +1223,57 @@ class Handler(BaseHTTPRequestHandler):
     def source_new(self, sess, pid):
         b = self.body()
         if b.get("attachment_id"):
-            return self.json(self.app.svc.add_local_source(pid, b["attachment_id"]), 201)
+            return self.json(
+                self.app.svc.add_local_source(pid, b["attachment_id"]), 201
+            )
         self.json(self.app.svc.add_public_source(pid, b.get("url", "")), 201)
 
     @route("POST", r"/api/projects/(\w+)/notebook/findings")
     def finding_new(self, sess, pid):
         b = self.body()
-        self.json(self.app.svc.add_finding(pid, b.get("claim", ""), b.get("source_id"), b.get("locator", ""),
-                                           b.get("limitation", "")), 201)
+        self.json(
+            self.app.svc.add_finding(
+                pid,
+                b.get("claim", ""),
+                b.get("source_id"),
+                b.get("locator", ""),
+                b.get("limitation", ""),
+            ),
+            201,
+        )
 
     # ---------- model-assisted proposals (one provider: the project's route; owner accepts or rejects) ----------
     @route("POST", r"/api/projects/(\w+)/notebook/draft-findings")
     def draft_findings(self, sess, pid):
         b = self.body()
-        self.json(derive.draft_findings(self.app.store, self.app.svc, self.app.sup, pid, b.get("source_ids") or [],
-                                        b.get("provider"), bool(b.get("confirm_switch"))), 202)
+        self.json(
+            derive.draft_findings(
+                self.app.store,
+                self.app.svc,
+                self.app.sup,
+                pid,
+                b.get("source_ids") or [],
+                b.get("provider"),
+                bool(b.get("confirm_switch")),
+            ),
+            202,
+        )
 
     @route("POST", r"/api/projects/(\w+)/conversations/(\w+)/summarize")
     def summarize(self, sess, pid, cid):
         b = self.body()
-        self.json(derive.summarize_conversation(self.app.store, self.app.svc, self.app.sup, pid, cid,
-                                                b.get("provider"), bool(b.get("confirm_switch"))), 202)
+        self.json(
+            derive.summarize_conversation(
+                self.app.store,
+                self.app.svc,
+                self.app.sup,
+                pid,
+                cid,
+                b.get("provider"),
+                bool(b.get("confirm_switch")),
+            ),
+            202,
+        )
 
     @route("GET", r"/api/derivations/(\w+)")
     def derivation(self, sess, did):
@@ -740,9 +1289,15 @@ class Handler(BaseHTTPRequestHandler):
 
     @route("GET", r"/api/projects/(\w+)/notebook/export")
     def notebook_export(self, sess, pid):
-        md = self.app.svc.export_notebook(pid, (self.query.get("private") or ["0"])[0] == "1")
-        self._send(200, md.encode(), "text/markdown; charset=utf-8",
-                   {"Content-Disposition": f'attachment; filename="notebook-{pid}.md"'})
+        md = self.app.svc.export_notebook(
+            pid, (self.query.get("private") or ["0"])[0] == "1"
+        )
+        self._send(
+            200,
+            md.encode(),
+            "text/markdown; charset=utf-8",
+            {"Content-Disposition": f'attachment; filename="notebook-{pid}.md"'},
+        )
 
     @route("GET", r"/api/projects/(\w+)/search")
     def search(self, sess, pid):
@@ -755,14 +1310,24 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/projects/(\w+)/memory")
     def memory_new(self, sess, pid):
         b = self.body()
-        self.json(self.app.svc.add_memory(pid, b.get("layer", "authoritative"), b.get("kind", "note"),
-                                          b.get("content", ""), b.get("source_ids", [])), 201)
+        self.json(
+            self.app.svc.add_memory(
+                pid,
+                b.get("layer", "authoritative"),
+                b.get("kind", "note"),
+                b.get("content", ""),
+                b.get("source_ids", []),
+            ),
+            201,
+        )
 
     @route("POST", r"/api/projects/(\w+)/memory/(\w+)/(correct|mark|promote)")
     def memory_op(self, sess, pid, mid, op):
         b = self.body()
         if op == "correct":
-            return self.json(self.app.svc.correct_memory(pid, mid, b.get("content", "")))
+            return self.json(
+                self.app.svc.correct_memory(pid, mid, b.get("content", ""))
+            )
         if op == "mark":
             self.app.svc.mark_memory(pid, mid, b.get("status", ""))
             return self.json({"ok": True})
@@ -782,8 +1347,10 @@ class Handler(BaseHTTPRequestHandler):
         """Owner acknowledgement required before agent tasks run in this project (see filesystem_scope)."""
         self.app.svc.project(pid)
         on = bool(self.body().get("ack"))
-        self.app.store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-                         (f"agent_ack:{pid}", "on" if on else "off"))
+        self.app.store.x(
+            "INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (f"agent_ack:{pid}", "on" if on else "off"),
+        )
         self.app.store.event("agent_ack", pid, ack=on)
         self.json({"project_id": pid, "agent_ack": on})
 
@@ -791,13 +1358,22 @@ class Handler(BaseHTTPRequestHandler):
     def agent_ack_get(self, sess, pid):
         self.app.svc.project(pid)
         row = self.app.store.one("SELECT v FROM kv WHERE k=?", (f"agent_ack:{pid}",))
-        self.json({"project_id": pid, "agent_ack": bool(row and row["v"] == "on"),
-                   "statement": tasks_mod.AGENT_ACK_STATEMENT})
+        self.json(
+            {
+                "project_id": pid,
+                "agent_ack": bool(row and row["v"] == "on"),
+                "statement": tasks_mod.AGENT_ACK_STATEMENT,
+            }
+        )
 
     @route("POST", r"/api/repairs/(\w+)/export")
     def repair_export(self, sess, rid):
-        self.json({"packet": str(self.app.sup.export_repair(rid)),
-                   "note": "Packet written locally for the Foreman; Studio does not dispatch repairs itself."})
+        self.json(
+            {
+                "packet": str(self.app.sup.export_repair(rid)),
+                "note": "Packet written locally for the Foreman; Studio does not dispatch repairs itself.",
+            }
+        )
 
     @route("GET", r"/api/evidence")
     def evidence_get(self, sess):
@@ -811,21 +1387,45 @@ class Handler(BaseHTTPRequestHandler):
             ledger.set_runtime_limit(self.app.store, float(b["runtime_limit_usd"] or 0))
         if "mission_permit" in b:
             ledger.set_permit(self.app.store, bool(b["mission_permit"]))
-        self.app.store.event("budget_change", None, **{k: b[k] for k in ("runtime_limit_usd", "mission_permit")
-                                                        if k in b})
-        self.json({"budget": ledger.totals(self.app.store), "routes": providers.cached(self.app.store)})
+        self.app.store.event(
+            "budget_change",
+            None,
+            **{k: b[k] for k in ("runtime_limit_usd", "mission_permit") if k in b},
+        )
+        self.json(
+            {
+                "budget": ledger.totals(self.app.store),
+                "routes": providers.cached(self.app.store),
+            }
+        )
 
     @route("POST", r"/api/ledger/(\w+)/resolve")
     def ledger_resolve(self, sess, lid):
         b = self.body()
-        ledger.resolve(self.app.store, lid, float(b.get("actual_usd", "nan")), str(b.get("note", "")))
+        ledger.resolve(
+            self.app.store,
+            lid,
+            float(b.get("actual_usd", "nan")),
+            str(b.get("note", "")),
+        )
         self.json({"budget": ledger.totals(self.app.store)})
 
     @route("POST", r"/api/workflow-measure")
     def workflow_measure(self, sess):
         b = self.body()
-        rec = {k: b.get(k) for k in ("label", "workflow", "elapsed_s", "manual_steps", "app_switches",
-                                     "provider", "persisted", "notes")}
+        rec = {
+            k: b.get(k)
+            for k in (
+                "label",
+                "workflow",
+                "elapsed_s",
+                "manual_steps",
+                "app_switches",
+                "provider",
+                "persisted",
+                "notes",
+            )
+        }
         self.app.store.event("workflow_measure", None, **rec)
         self.json(rec, 201)
 
@@ -836,12 +1436,18 @@ class Handler(BaseHTTPRequestHandler):
 
     @route("POST", r"/api/backup/verify")
     def backup_verify(self, sess):
-        backups = sorted((self.app.store.data_dir / "backups").glob("aesop-backup-*.zip"))
+        backups = sorted(
+            (self.app.store.data_dir / "backups").glob("aesop-backup-*.zip")
+        )
         if not backups:
             raise ValueError("no backup exists yet")
-        target = self.app.store.data_dir / "restore-tests" / time.strftime("%Y%m%d-%H%M%S")
+        target = (
+            self.app.store.data_dir / "restore-tests" / time.strftime("%Y%m%d-%H%M%S")
+        )
         res = backup.restore_backup(backups[-1], target, self.app.store.data_dir)
-        self.app.store.event("restore_test", None, ok=res["ok"], archive=backups[-1].name)
+        self.app.store.event(
+            "restore_test", None, ok=res["ok"], archive=backups[-1].name
+        )
         self.json(res)
 
 
@@ -861,21 +1467,51 @@ class StudioHTTPServer(ThreadingHTTPServer):
         super().server_bind()
 
 
+def port_candidates(data_dir: str, port: int, tries: int) -> list[int]:
+    """Preferred port first (the one the browser already signed into), then the requested range.
+
+    A new port is a new browser site, so the sign-in key stored for the old port cannot be read.
+    Staying on the last port keeps the project list visible. The database itself does not move.
+    """
+    pref = None
+    try:
+        raw = (Path(data_dir) / "preferred.port").read_text(encoding="utf-8").strip()
+        n = int(raw)
+        if 1 <= n <= 65535:
+            pref = n
+    except (OSError, ValueError):
+        pref = None
+    ordered = []
+    if pref is not None:
+        ordered.append(pref)
+    ordered.extend(range(port, port + max(1, tries)))
+    out = []
+    for p in ordered:
+        if p not in out:
+            out.append(p)
+    return out
+
+
 def make_server(data_dir: str, port: int, tries: int = 1) -> ThreadingHTTPServer:
-    """Bind the first free port in [port, port + tries). The data-directory lock is taken first, as before."""
+    """Bind the preferred port, else the first free port in [port, port + tries)."""
     app = App(data_dir, port)
     handler = type("BoundHandler", (Handler,), {"app": app})
     errors = []
-    for p in range(port, port + max(1, tries)):
+    srv = None
+    for p in port_candidates(data_dir, port, tries):
         try:
             srv = StudioHTTPServer((HOST, p), handler)
             break
         except OSError as e:
             errors.append(f"{p}: {e.strerror or e}")
-    else:
+    if srv is None:
         app._instance_lock.close()
         raise PortUnavailableError("no free loopback port (" + "; ".join(errors) + ")")
-    app.port = p
+    app.port = srv.server_address[1]
+    try:
+        (Path(data_dir) / "preferred.port").write_text(str(app.port), encoding="utf-8")
+    except OSError:
+        pass
     srv.daemon_threads = True
     srv.app = app
     return srv
@@ -884,10 +1520,18 @@ def make_server(data_dir: str, port: int, tries: int = 1) -> ThreadingHTTPServer
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Aesop Studio (loopback only)")
     ap.add_argument("--port", type=int, default=int(os.environ.get("AESOP_PORT", 8765)))
-    ap.add_argument("--data", default=os.environ.get("AESOP_DATA",
-                                                     str(Path(os.environ.get("LOCALAPPDATA", ".")) / "AesopStudio")))
-    ap.add_argument("--port-tries", type=int, default=int(os.environ.get("AESOP_PORT_TRIES", 10)),
-                    help="if --port is busy, try this many consecutive ports in total")
+    ap.add_argument(
+        "--data",
+        default=os.environ.get(
+            "AESOP_DATA", str(Path(os.environ.get("LOCALAPPDATA", ".")) / "AesopStudio")
+        ),
+    )
+    ap.add_argument(
+        "--port-tries",
+        type=int,
+        default=int(os.environ.get("AESOP_PORT_TRIES", 10)),
+        help="if --port is busy, try this many consecutive ports in total",
+    )
     a = ap.parse_args(argv)
     try:
         srv = make_server(a.data, a.port, a.port_tries)
@@ -915,8 +1559,13 @@ def main(argv=None):
                     req.unlink()
                 except OSError:
                     continue
-                srv.app.login_code = secrets.token_urlsafe(24)  # previous unused code is invalidated
-                link_file.write_text(f"http://127.0.0.1:{a.port}/login?code={srv.app.login_code}", encoding="utf-8")
+                srv.app.login_code = secrets.token_urlsafe(
+                    24
+                )  # previous unused code is invalidated
+                link_file.write_text(
+                    f"http://127.0.0.1:{a.port}/login?code={srv.app.login_code}",
+                    encoding="utf-8",
+                )
 
     def reverify_watch():
         while True:
@@ -925,14 +1574,23 @@ def main(argv=None):
                     providers.verify_live(srv.app.store, rid)
                     providers.refresh(srv.app.store)
                 except Exception as e:  # never let a provider hiccup stop the watcher
-                    print(f"background verification of {rid} failed: {type(e).__name__}")
+                    print(
+                        f"background verification of {rid} failed: {type(e).__name__}"
+                    )
             time.sleep(600)
 
+    def source_watch():
+        run_source_retire_watcher(srv.app, srv)
+
     import threading as _threading
+
     _threading.Thread(target=relogin_watch, daemon=True).start()
     _threading.Thread(target=reverify_watch, daemon=True).start()
+    _threading.Thread(target=source_watch, daemon=True).start()
     if srv.app.reconciled:
-        print(f"Reconciled {len(srv.app.reconciled)} unfinished task(s) from the previous run.")
+        print(
+            f"Reconciled {len(srv.app.reconciled)} unfinished task(s) from the previous run."
+        )
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

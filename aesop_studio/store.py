@@ -1,4 +1,5 @@
 """SQLite store: authoritative local records for every Aesop Studio project."""
+
 from __future__ import annotations
 
 import json
@@ -14,6 +15,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects(
   id TEXT PRIMARY KEY, name TEXT NOT NULL, root TEXT NOT NULL, provider_default TEXT,
   model TEXT, transfer_policy TEXT NOT NULL DEFAULT '{}', retention_days INTEGER NOT NULL DEFAULT 90,
+  reference_dirs TEXT NOT NULL DEFAULT '[]',
   created REAL NOT NULL, updated REAL NOT NULL, archived INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS conversations(
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), title TEXT NOT NULL, created REAL NOT NULL);
@@ -71,12 +73,27 @@ class Store:
         with self.conn() as c:
             c.executescript(SCHEMA)
             cols = {r[1] for r in c.execute("PRAGMA table_info(ledger)")}
-            if "purpose" not in cols:  # migrate stores created before the runtime envelope existed
-                c.execute("ALTER TABLE ledger ADD COLUMN purpose TEXT NOT NULL DEFAULT 'mission'")
-                c.execute("UPDATE ledger SET purpose='included' WHERE billing_basis='subscription_included'")
+            if (
+                "purpose" not in cols
+            ):  # migrate stores created before the runtime envelope existed
+                c.execute(
+                    "ALTER TABLE ledger ADD COLUMN purpose TEXT NOT NULL DEFAULT 'mission'"
+                )
+                c.execute(
+                    "UPDATE ledger SET purpose='included' WHERE billing_basis='subscription_included'"
+                )
+            pcols = {r[1] for r in c.execute("PRAGMA table_info(projects)")}
+            if (
+                "reference_dirs" not in pcols
+            ):  # working folders (reference_dirs) beside the project root
+                c.execute(
+                    "ALTER TABLE projects ADD COLUMN reference_dirs TEXT NOT NULL DEFAULT '[]'"
+                )
 
     def _connect(self) -> sqlite3.Connection:
-        c = sqlite3.connect(self.path, timeout=30, isolation_level=None, check_same_thread=False)
+        c = sqlite3.connect(
+            self.path, timeout=30, isolation_level=None, check_same_thread=False
+        )
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA foreign_keys=ON")
@@ -113,9 +130,13 @@ class Store:
         with self.tx() as c:
             c.execute(sql, args)
 
-    def event(self, kind: str, project_id: str | None, /, **data) -> None:  # positional-only: data may use "kind"
-        self.x("INSERT INTO events(kind,project_id,data,created) VALUES(?,?,?,?)",
-               (kind, project_id, json.dumps(data), time.time()))
+    def event(
+        self, kind: str, project_id: str | None, /, **data
+    ) -> None:  # positional-only: data may use "kind"
+        self.x(
+            "INSERT INTO events(kind,project_id,data,created) VALUES(?,?,?,?)",
+            (kind, project_id, json.dumps(data), time.time()),
+        )
 
     def close(self) -> None:
         c = getattr(self._local, "c", None)
