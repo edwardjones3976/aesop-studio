@@ -45,6 +45,10 @@ class TestFrontendEditor(unittest.TestCase):
         self.assertIn("function editorDirty()", chunk)
         self.assertIn("function confirmDiscardEditors()", chunk)
         self.assertIn("syncEditorBeforeUnload", chunk)
+        self.assertIn(
+            "function openGlobal(which) {\n  if (!confirmDiscardEditors()) return Promise.resolve();",
+            chunk,
+        )
 
     def test_a5_draft_replace_confirm(self):
         chunk = APP_JS.read_text(encoding="utf-8")
