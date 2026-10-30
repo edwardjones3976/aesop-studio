@@ -128,10 +128,12 @@ class TestDeletion(unittest.TestCase):
                 "tests": {"state": "WAITING"},
             },
         )
-        build_plan = plan.add(
-            self.store, self.p["id"], "auto build step", source="build", task_ref=build
-        )
+        build_plan = plan.add_for_task(self.store, self.p["id"], build, "build me")
         owner_plan = plan.add(self.store, self.p["id"], "owner todo", source="owner")
+        edited_plan = plan.add_for_task(self.store, self.p["id"], review, "review it")
+        plan.update(
+            self.store, self.p["id"], edited_plan["id"], content="owner edited step"
+        )
         photo_dir = Path(chat_cwd) / ".aesop" / "photos" / build
         photo_dir.mkdir(parents=True)
         (photo_dir / "photo1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
@@ -164,6 +166,9 @@ class TestDeletion(unittest.TestCase):
         )
         self.assertIsNotNone(
             self.store.one("SELECT id FROM plan_items WHERE id=?", (owner_plan["id"],))
+        )
+        self.assertIsNotNone(
+            self.store.one("SELECT id FROM plan_items WHERE id=?", (edited_plan["id"],))
         )
         self.assertFalse(photo_dir.exists())
         self.assertIsNotNone(

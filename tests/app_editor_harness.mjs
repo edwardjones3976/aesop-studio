@@ -1,49 +1,117 @@
-/** In-memory models mirroring static/app.js editor + compose behavior. */
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const APP = path.resolve(__dirname, "..", "static", "app.js");
+const source = fs.readFileSync(APP, "utf8");
+
+function sliceFunction(name) {
+  const start = source.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`function ${name} not found`);
+  const open = source.indexOf("{", start);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error(`function ${name} not closed`);
+}
+
+const editorSlots = { main: null, insp: null };
+const editorDirtySrc = sliceFunction("editorDirty");
+const editorDirty = new Function("editorSlots", `${editorDirtySrc}; return editorDirty;`)(editorSlots);
+
+function slicePendingComposeBlock() {
+  const start = source.indexOf("  if (S.pendingCompose) {");
+  const end = source.indexOf("\n  root.append(msgsEl", start);
+  if (start < 0 || end < 0) throw new Error("pendingCompose block not found");
+  return source.slice(start, end);
+}
+
+function runPendingCompose(S, ta, ssSet, draftKey, workKey, fillProv, grow, paintWork, confirmFn) {
+  const pendingComposeBlock = slicePendingComposeBlock().replace(/\bconfirm\b/g, "confirmFn");
+  const run = new Function(
+    "S",
+    "ta",
+    "ssSet",
+    "draftKey",
+    "workKey",
+    "fillProv",
+    "grow",
+    "paintWork",
+    "confirmFn",
+    `let workOn = true;\n${pendingComposeBlock}\nreturn { workOn, text: ta.value };`,
+  );
+  return run(S, ta, ssSet, draftKey, workKey, fillProv, grow, paintWork, confirmFn);
+}
+
+function sliceSaveBaselineCore() {
+  const marker = "const path = current, sent = ta.value;";
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error("save baseline lines missing from app.js");
+  const apiNeedle = 'await api("POST", `/api/projects/${pid}/file`, { path, content: sent });';
+  const apiStart = source.indexOf(apiNeedle, start);
+  if (apiStart < 0) throw new Error("save POST line missing from app.js");
+  const endMarker = "if (current === path) original = sent;";
+  const end = source.indexOf(endMarker, apiStart);
+  if (end < 0) throw new Error("save baseline end missing from app.js");
+  const sentLine = source.slice(start, source.indexOf("\n", start)).trim();
+  const postLine = source.slice(apiStart, source.indexOf("\n", apiStart)).trim();
+  return `${sentLine}\n${postLine}\n${endMarker}`;
+}
+
+async function runSaveBaseline() {
+  const core = sliceSaveBaselineCore();
+  const ta = { value: "sent-body" };
+  const api = async (_method, _path, _body) => {
+    ta.value = "mutated-during-await";
+    await new Promise((r) => setTimeout(r, 1));
+    return {};
+  };
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const run = new AsyncFunction(
+    "ta",
+    "api",
+    `let current = "a.txt";
+     let original = "old";
+     const pid = "p";
+     ${core}
+     return original;`,
+  );
+  return run(ta, api);
+}
+
 const posts = [];
-let loaded = false;
-let current = "readme.md";
-const ta = { value: "", disabled: true };
-let original = "";
-let workOn = true;
-const ss = {};
-const ssSet = (k, v) => { if (v) ss[k] = v; else delete ss[k]; };
-const workKey = "aesop.work.c1";
-const draftKey = "aesop.draft.c1";
-
-async function api(method, path, body) {
-  posts.push({ method, path, body });
-  if (path.includes("/file") && method === "POST") {
-    await new Promise((r) => setTimeout(r, 5));
-    return { path: body.path, content: body.content, chars: body.content.length };
-  }
-  return { path: current, content: "hello\n", chars: 6 };
-}
-
-async function save() {
-  if (!current || !loaded || ta.disabled) return;
-  const path = current, sent = ta.value;
-  await api("POST", "/api/projects/p/file", { path, content: sent });
-  if (current === path) original = sent;
-}
-
-function applyPendingCompose(pending, taVal, confirmFn) {
-  let workOnLocal = workOn;
-  const cur = taVal;
-  const replace = cur.trim() && cur !== (pending.text || "");
-  if (replace && !confirmFn("Replace your unsent chat draft with text from the editor?")) {
-    return { applied: false, workOn: workOnLocal, text: cur };
-  }
-  if (pending.work) { workOnLocal = true; ssSet(workKey, "1"); }
-  else { workOnLocal = false; ssSet(workKey, ""); }
-  return { applied: true, workOn: workOnLocal, text: pending.text || "" };
-}
-
-function editorDirty(state) {
-  return state.loaded && state.path && state.value !== state.original;
-}
 
 async function testSaveBeforeLoad() {
   const postsSave = () => posts.filter((p) => p.method === "POST");
+  const saveBlockStart = source.indexOf("const save = () => guard(async () => {");
+  if (saveBlockStart < 0) throw new Error("save() not found");
+  posts.length = 0;
+  let loaded = false;
+  let current = "readme.md";
+  const ta = { value: "", disabled: true };
+  let original = "";
+  const api = async (method, path, body) => {
+    posts.push({ method, path, body });
+    if (path.includes("/file") && method === "POST") {
+      await new Promise((r) => setTimeout(r, 5));
+      return { path: body.path, content: body.content, chars: body.content.length };
+    }
+    return { path: current, content: "hello\n", chars: 6 };
+  };
+  const save = async () => {
+    if (!current || !loaded || ta.disabled) return;
+    const pathVal = current;
+    const sent = ta.value;
+    await api("POST", "/api/projects/p/file", { path: pathVal, content: sent });
+    if (current === pathVal) original = sent;
+  };
   await save();
   if (postsSave().length !== 0) throw new Error("expected no save before load");
   const pending = (async () => {
@@ -62,53 +130,85 @@ async function testSaveBeforeLoad() {
 }
 
 async function testA3SaveBaselineUsesSentContent() {
-  loaded = true;
-  current = "a.txt";
-  original = "old";
-  ta.value = "sent-body";
-  const path = current, sent = ta.value;
-  ta.value = "mutated-during-await";
-  if (current === path) original = sent;
+  const original = await runSaveBaseline();
   if (original !== "sent-body") throw new Error(`expected sent baseline, got ${original}`);
 }
 
 function testA2AskTurnsWorkOff() {
-  workOn = true;
-  ssSet(workKey, "1");
-  const pending = { text: "ask prompt", work: false };
-  const out = applyPendingCompose(pending, "", () => true);
+  const ss = {};
+  const ssSet = (k, v) => {
+    if (v) ss[k] = v;
+    else delete ss[k];
+  };
+  const ta = { value: "", focus() {} };
+  const out = runPendingCompose(
+    { pendingCompose: { text: "ask prompt", work: false } },
+    ta,
+    ssSet,
+    "draft",
+    "work",
+    () => {},
+    () => {},
+    () => {},
+    () => true,
+  );
   if (out.workOn !== false) throw new Error("ask should turn work off");
-  if (ss[workKey]) throw new Error("work key should be cleared");
-  const workPending = { text: "work prompt", work: true };
-  const out2 = applyPendingCompose(workPending, "", () => true);
+  if (ss.work) throw new Error("work key should be cleared");
+  const out2 = runPendingCompose(
+    { pendingCompose: { text: "work prompt", work: true } },
+    ta,
+    ssSet,
+    "draft",
+    "work",
+    () => {},
+    () => {},
+    () => {},
+    () => true,
+  );
   if (out2.workOn !== true) throw new Error("work should turn work on");
 }
 
 function testA4EditorDirty() {
-  const st = { loaded: true, path: "f.txt", original: "a", value: "b" };
-  if (!editorDirty(st)) throw new Error("expected dirty");
-  st.value = "a";
-  if (editorDirty(st)) throw new Error("expected clean");
+  editorSlots.main = () => ({
+    loaded: true,
+    path: "f.txt",
+    original: "a",
+    value: "b",
+  });
+  if (!editorDirty()) throw new Error("expected dirty");
+  editorSlots.main = () => ({
+    loaded: true,
+    path: "f.txt",
+    original: "a",
+    value: "a",
+  });
+  if (editorDirty()) throw new Error("expected clean");
 }
 
 function testA5DraftReplaceCancel() {
-  workOn = true;
-  ssSet(workKey, "1");
-  const pending = { text: "from editor", work: true };
-  const out = applyPendingCompose(pending, "existing draft", () => false);
-  if (out.applied) throw new Error("cancel should not apply");
+  const ss = {};
+  const ssSet = (k, v) => {
+    if (v) ss[k] = v;
+    else delete ss[k];
+  };
+  const ta = { value: "existing draft", focus() {} };
+  const out = runPendingCompose(
+    { pendingCompose: { text: "from editor", work: true } },
+    ta,
+    ssSet,
+    "draft",
+    "work",
+    () => {},
+    () => {},
+    () => {},
+    () => false,
+  );
   if (out.text !== "existing draft") throw new Error("draft should remain");
   if (out.workOn !== true) throw new Error("work state should remain");
 }
 
 async function run() {
-  posts.length = 0;
   await testSaveBeforeLoad();
-  posts.length = 0;
-  loaded = false;
-  ta.value = "";
-  ta.disabled = true;
-  original = "";
   await testA3SaveBaselineUsesSentContent();
   testA2AskTurnsWorkOff();
   testA4EditorDirty();

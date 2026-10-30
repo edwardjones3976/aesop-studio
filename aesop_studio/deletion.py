@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from . import plan, team
-from .security import ScopeError, contained_path
+from .security import ScopeError, contained_path, redact
 from .store import Store
 
 NOTE = (
@@ -72,15 +72,31 @@ def _delete_team_records(store: Store, task_ids: set[str]) -> None:
         store.x("DELETE FROM kv WHERE k=?", (f"team:{tid}",))
 
 
+def _auto_build_plan_content(prompt: str) -> str:
+    head = " ".join((prompt or "").split())
+    return redact(("Work: " + head)[:160])
+
+
 def _delete_build_plan_items(store: Store, task_ids: set[str]) -> int:
     if not task_ids:
         return 0
     plan.ensure_schema(store)
     ph = ",".join("?" * len(task_ids))
-    return store.x(
-        f"DELETE FROM plan_items WHERE source='build' AND task_ref IN ({ph})",
+    rows = store.q(
+        f"SELECT id, content, task_ref FROM plan_items WHERE source='build' AND task_ref IN ({ph})",
         tuple(task_ids),
     )
+    removed = 0
+    for row in rows:
+        tid = row["task_ref"]
+        task = store.one("SELECT prompt FROM tasks WHERE id=?", (tid,))
+        if not task:
+            continue
+        if row["content"] != _auto_build_plan_content(task["prompt"]):
+            continue
+        store.x("DELETE FROM plan_items WHERE id=?", (row["id"],))
+        removed += 1
+    return removed
 
 
 def _remove_staged_photo_dirs(store: Store, task_ids: set[str]) -> int:
@@ -128,9 +144,9 @@ def delete_conversation(store: Store, svc, pid: str, cid: str) -> dict:
             tids.add(meta["task_id"])
         used.update(meta.get("attachments") or [])
     scrub_ids = _expand_team_tasks(store, tids)
+    plan_removed = _delete_build_plan_items(store, scrub_ids)
     scrubbed = _scrub_tasks(store, scrub_ids)
     _delete_team_records(store, scrub_ids)
-    plan_removed = _delete_build_plan_items(store, scrub_ids)
     staged_photos = _remove_staged_photo_dirs(store, scrub_ids)
     with store.tx() as c:
         n = c.execute("DELETE FROM messages WHERE conversation_id=?", (cid,)).rowcount

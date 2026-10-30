@@ -3437,6 +3437,7 @@ async function viewRoundtable(r) {
 
 // ---------- global views ----------
 function openGlobal(which) {
+  if (!confirmDiscardEditors()) return Promise.resolve();
   navBump();
   S.global = which; markNav(); renderHeader();
   document.querySelectorAll("#tabs [data-tab]").forEach((b) => b.setAttribute("aria-selected", "false"));

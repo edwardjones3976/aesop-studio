@@ -152,6 +152,8 @@ def route(method: str, pattern: str):
 RETIRING_DENY = "Studio is restarting for maintenance; nothing was sent."
 
 # POST/PATCH handlers that can reach Supervisor.create, a provider, or a metered API.
+# Every other mutating route is still counted in _in_flight for drain (editor save is the
+# only mutating handler allowed while retiring).
 WORK_START_HANDLERS = frozenset(
     {
         "routes_refresh",
@@ -176,6 +178,14 @@ WORK_START_HANDLERS = frozenset(
         "summarize",
     }
 )
+
+RETIRING_ADMIT_EXEMPT = frozenset({"project_file_put"})
+
+
+def mutating_route_handlers() -> frozenset[str]:
+    return frozenset(
+        name for method, _pat, name in ROUTES if method in ("POST", "PATCH")
+    )
 
 
 def run_source_retire_watcher(
@@ -270,14 +280,19 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(n) if n else b"{}"
         return json.loads(raw or b"{}")
 
-    def _admit_work_start(self) -> bool:
+    def _admit_mutating(self, handler_name: str) -> bool:
+        """Count every mutating request for drain; deny work-start while retiring."""
         with self.app._retire_lock:
-            if self.app.retiring:
+            if (
+                self.app.retiring
+                and handler_name in WORK_START_HANDLERS
+                and handler_name not in RETIRING_ADMIT_EXEMPT
+            ):
                 return False
             self.app._in_flight += 1
             return True
 
-    def _release_work_start(self) -> None:
+    def _release_mutating(self) -> None:
         with self.app._retire_lock:
             self.app._in_flight = max(0, self.app._in_flight - 1)
 
@@ -328,13 +343,13 @@ class Handler(BaseHTTPRequestHandler):
                 mt = pat.match(path)
                 if mt:
                     try:
-                        if method in ("POST", "PATCH") and name in WORK_START_HANDLERS:
-                            if not self._admit_work_start():
+                        if method in ("POST", "PATCH"):
+                            if not self._admit_mutating(name):
                                 return self.err(503, RETIRING_DENY)
                             try:
                                 return getattr(self, name)(sess, *mt.groups())
                             finally:
-                                self._release_work_start()
+                                self._release_mutating()
                         return getattr(self, name)(sess, *mt.groups())
                     except KeyError as e:
                         return self.err(404, str(e).strip("'"))
