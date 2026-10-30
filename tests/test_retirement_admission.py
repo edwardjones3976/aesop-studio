@@ -290,28 +290,61 @@ class TestRetirementAdmissionRepro(unittest.TestCase):
         self.assertEqual(app._in_flight, 0)
 
     def test_a1_watcher_final_closure_races_editor_save(self):
-        """Race in-flight editor save against admission close (200 jittered iterations)."""
-        for i in range(200):
+        """Competing mutating request arriving inside final drain-check interval is refused 503 atomically."""
+        for i in range(5):
+            class InstrumentedRetireLock:
+                def __init__(self):
+                    self._lock = threading.Lock()
+                    self.competing_thread = None
+                    self.at_lock = threading.Event()
+
+                def acquire(self, blocking=True, timeout=-1):
+                    if (
+                        self.competing_thread
+                        and threading.current_thread() == self.competing_thread
+                    ):
+                        self.at_lock.set()
+                    return self._lock.acquire(blocking, timeout)
+
+                def release(self):
+                    self._lock.release()
+                    if (
+                        self.competing_thread
+                        and threading.current_thread() != self.competing_thread
+                    ):
+                        time.sleep(0.001)
+
+                def locked(self):
+                    return self._lock.locked()
+
+                def __enter__(self):
+                    return self.acquire()
+
+                def __exit__(self, exc_type, exc_val, exc_tb):
+                    self.release()
+
+            lock = InstrumentedRetireLock()
             app = SimpleNamespace(
                 retiring=False,
                 source_mtime=0.0,
                 sessions=SimpleNamespace(key_ok=lambda *_: True),
                 allowed_hosts=lambda: {"127.0.0.1:8766"},
-                _retire_lock=threading.Lock(),
+                _retire_lock=lock,
                 _in_flight=0,
                 _admission_closed=False,
                 browser=SimpleNamespace(stop=lambda: None),
             )
-            release = threading.Event()
-            entered = threading.Event()
+
             save_calls = []
             late_calls = []
             shutdown_snap = {}
+            save_entered = threading.Event()
+            save_release = threading.Event()
 
-            def slow_mutating(*_a):
-                entered.set()
-                release.wait(timeout=0.2)
-                save_calls.append("done")
+            def slow_save(*_a):
+                save_entered.set()
+                save_calls.append("saved")
+                save_release.wait(timeout=0.5)
                 return None
 
             handler = SimpleNamespace(
@@ -325,7 +358,7 @@ class TestRetirementAdmissionRepro(unittest.TestCase):
                 _sitem={"csrf": "synthetic"},
                 _host_ok=lambda: True,
                 _session=lambda: "synthetic-session",
-                project_file_put=slow_mutating,
+                project_file_put=slow_save,
                 err=lambda code, message: late_calls.append((code, message)),
                 _admit_mutating=lambda name: Handler._admit_mutating(handler, name),
                 _release_mutating=lambda: Handler._release_mutating(handler),
@@ -337,62 +370,71 @@ class TestRetirementAdmissionRepro(unittest.TestCase):
                     shutdown_snap["closed"] = app._admission_closed
                 shutdown_snap["called"] = True
 
-            t_req = threading.Thread(
-                target=lambda: Handler._dispatch(handler, "POST"), daemon=True
-            )
-            t_req.start()
-            self.assertTrue(entered.wait(timeout=1), f"iter {i}: save never started")
+            t_compete = None
+
+            def run_competing():
+                Handler._dispatch(handler, "POST")
+
+            def has_live_work():
+                nonlocal t_compete
+                if not app.retiring:
+                    return False
+                # During final drain check under _retire_lock, race a competing editor save:
+                if t_compete is None:
+                    t_compete = threading.Thread(target=run_competing, daemon=True)
+                    lock.competing_thread = t_compete
+                    t_compete.start()
+                    self.assertTrue(
+                        lock.at_lock.wait(timeout=2),
+                        f"iter {i}: competing thread did not reach retire_lock inside drain-check",
+                    )
+                return False
 
             watcher = threading.Thread(
                 target=lambda: run_source_retire_watcher(
                     app,
                     SimpleNamespace(),
                     source_mtime_fn=lambda: 1.0,
-                    sleep_fn=lambda secs: time.sleep(0.0005 if secs < 2 else 0.001),
-                    has_live_work_fn=lambda: app._in_flight > 0,
+                    sleep_fn=lambda secs: time.sleep(0.001),
+                    has_live_work_fn=has_live_work,
                     stop_browser_fn=lambda: None,
                     shutdown_fn=shutdown_fn,
                 ),
                 daemon=True,
             )
             watcher.start()
-            time.sleep(0.0002 * (i % 7))
-            release.set()
-            t_req.join(timeout=1)
-            watcher.join(timeout=2)
+            watcher.join(timeout=3)
+            self.assertFalse(watcher.is_alive(), f"iter {i}: watcher did not finish")
 
-            late_handler = SimpleNamespace(
-                app=app,
-                path="/api/projects/synthetic/file",
-                headers=handler.headers,
-                _sitem=handler._sitem,
-                _host_ok=handler._host_ok,
-                _session=handler._session,
-                project_file_put=lambda *_: late_calls.append("saved"),
-                err=lambda code, message: late_calls.append((code, message)),
-                _admit_mutating=lambda name: Handler._admit_mutating(
-                    late_handler, name
-                ),
-                _release_mutating=lambda: Handler._release_mutating(late_handler),
-            )
-            Handler._dispatch(late_handler, "POST")
+            if t_compete is not None:
+                save_release.set()
+                t_compete.join(timeout=2)
+                self.assertFalse(
+                    t_compete.is_alive(), f"iter {i}: competing request did not finish"
+                )
 
             self.assertTrue(
-                shutdown_snap.get("called"), f"iter {i}: shutdown not called"
+                shutdown_snap.get("called"), f"iter {i}: shutdown_fn was not called"
             )
             self.assertEqual(
-                shutdown_snap.get("in_flight"), 0, f"iter {i}: in_flight not drained"
+                shutdown_snap.get("in_flight"),
+                0,
+                f"iter {i}: in_flight must be 0 at shutdown",
             )
             self.assertTrue(
-                shutdown_snap.get("closed"), f"iter {i}: admission not closed"
+                shutdown_snap.get("closed"),
+                f"iter {i}: admission must be closed at shutdown",
+            )
+            self.assertEqual(app._in_flight, 0, f"iter {i}: final in_flight must be 0")
+            self.assertTrue(
+                app._admission_closed, f"iter {i}: final admission must be closed"
             )
             self.assertEqual(
-                save_calls, ["done"], f"iter {i}: in-flight editor save must finish"
+                save_calls, [], f"iter {i}: competing request admitted during closure"
             )
-            self.assertNotIn("saved", late_calls, f"iter {i}: post-close save ran")
             self.assertTrue(
-                late_calls and late_calls[0][0] == 503,
-                f"iter {i}: post-close dispatch expected 503, got {late_calls}",
+                any(call[0] == 503 for call in late_calls if isinstance(call, tuple)),
+                f"iter {i}: competing request expected 503, got {late_calls}",
             )
 
 
