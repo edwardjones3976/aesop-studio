@@ -42,7 +42,7 @@ class TestWorkReviewPanelMount(unittest.TestCase):
         except ImportError:
             cls._playwright = None
             return
-        cls._playwright = sync_playwright
+        cls._playwright = staticmethod(sync_playwright)
         cls.tmp = Path(tempfile.mkdtemp(prefix="aesop-rv-"))
         cls.proj = cls.tmp / "proj"
         cls.proj.mkdir()
@@ -65,7 +65,10 @@ class TestWorkReviewPanelMount(unittest.TestCase):
 
     def test_work_message_issues_review_fetch_after_mount(self):
         if not self._playwright:
-            self.skipTest("playwright not installed")
+            self.fail(
+                "playwright is not installed; install with 'pip install playwright' "
+                "(or 'pip install -r requirements-dev.txt')"
+            )
         app = self.srv.app
         p = app.svc.create_project("R", str(self.proj), "simulated")
         app.store.x("INSERT INTO kv(k,v) VALUES(?, 'on')", (f"agent_ack:{p['id']}",))

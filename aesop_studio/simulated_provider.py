@@ -12,6 +12,43 @@ if (
     time.sleep(60)
     sys.exit(0)
 prompt = sys.stdin.read()
+rendezvous_dir = os.environ.get("AESOP_SIM_RENDEZVOUS_DIR")
+if rendezvous_dir and "independent OPENING position" in prompt:
+    r_dir = Path(rendezvous_dir)
+    r_dir.mkdir(parents=True, exist_ok=True)
+    if not (r_dir / "rendezvous_met").exists() and not (r_dir / "failure.txt").exists():
+        expected = int(os.environ.get("AESOP_SIM_RENDEZVOUS_COUNT", "4"))
+        timeout = float(os.environ.get("AESOP_SIM_RENDEZVOUS_TIMEOUT", "10.0"))
+        inflight_file = r_dir / f"inflight_{os.getpid()}_{time.time_ns()}"
+        inflight_file.write_text("1", encoding="utf-8")
+        try:
+            deadline = time.time() + timeout
+            while True:
+                if (r_dir / "rendezvous_met").exists():
+                    break
+                if (r_dir / "failure.txt").exists():
+                    break
+                if len(list(r_dir.glob("inflight_*"))) >= expected:
+                    (r_dir / "rendezvous_met").write_text("ok", encoding="utf-8")
+                    time.sleep(0.05)
+                    break
+                if time.time() >= deadline:
+                    if not (r_dir / "rendezvous_met").exists() and not (r_dir / "failure.txt").exists():
+                        saw = len(list(r_dir.glob("inflight_*")))
+                        (r_dir / "failure.txt").write_text(
+                            f"Rendezvous failed: opening turns were not concurrent; "
+                            f"timed out after {timeout}s waiting for {expected} opening turns "
+                            f"to be in flight simultaneously (saw {saw})",
+                            encoding="utf-8",
+                        )
+                    break
+                time.sleep(0.02)
+        finally:
+            try:
+                inflight_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+
 if "BIGOUT" in prompt:  # fixture: 3 MB of output with no newline (bounded-reader test)
     sys.stdout.write("x" * (3 * 1024 * 1024))
     sys.stdout.flush()
