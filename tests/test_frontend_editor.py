@@ -56,12 +56,24 @@ class TestFrontendEditor(unittest.TestCase):
             "Replace your unsent chat draft with text from the editor?", chunk
         )
 
-    def test_harness_a2_through_a5(self):
+    def test_harness_a2_through_a4(self):
         node = shutil.which("node")
         if not node:
             self.skipTest("node not installed")
         r = subprocess.run(
             [node, str(HARNESS)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr or r.stdout)
+
+    def test_a4_navigation_harness_fails_without_discard_guards(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        r = subprocess.run(
+            [node, str(HARNESS), "--prove-a4-strip"],
             capture_output=True,
             text=True,
             timeout=15,

@@ -6,20 +6,37 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP = path.resolve(__dirname, "..", "static", "app.js");
 const source = fs.readFileSync(APP, "utf8");
 
-function sliceFunction(name) {
-  const start = source.indexOf(`function ${name}(`);
+function sliceFunction(name, src = source) {
+  const asyncNeedle = `async function ${name}(`;
+  const plainNeedle = `function ${name}(`;
+  const asyncStart = src.indexOf(asyncNeedle);
+  const plainStart = src.indexOf(plainNeedle);
+  let start = -1;
+  if (asyncStart >= 0 && (plainStart < 0 || asyncStart <= plainStart)) start = asyncStart;
+  else if (plainStart >= 0) start = plainStart;
   if (start < 0) throw new Error(`function ${name} not found`);
-  const open = source.indexOf("{", start);
+  const open = src.indexOf("{", start);
   let depth = 0;
-  for (let i = open; i < source.length; i++) {
-    const ch = source[i];
+  for (let i = open; i < src.length; i++) {
+    const ch = src[i];
     if (ch === "{") depth++;
     else if (ch === "}") {
       depth--;
-      if (depth === 0) return source.slice(start, i + 1);
+      if (depth === 0) return src.slice(start, i + 1);
     }
   }
   throw new Error(`function ${name} not closed`);
+}
+
+function stripDiscardGuardLines(src) {
+  return src
+    .split("\n")
+    .filter(
+      (line) =>
+        !line.includes("confirmDiscardEditors()") &&
+        !line.trimStart().startsWith("function confirmDiscardEditors"),
+    )
+    .join("\n");
 }
 
 const editorSlots = { main: null, insp: null };
@@ -168,21 +185,87 @@ function testA2AskTurnsWorkOff() {
   if (out2.workOn !== true) throw new Error("work should turn work on");
 }
 
-function testA4EditorDirty() {
-  editorSlots.main = () => ({
-    loaded: true,
-    path: "f.txt",
-    original: "a",
-    value: "b",
-  });
-  if (!editorDirty()) throw new Error("expected dirty");
-  editorSlots.main = () => ({
-    loaded: true,
-    path: "f.txt",
-    original: "a",
-    value: "a",
-  });
-  if (editorDirty()) throw new Error("expected clean");
+function testA4NavigationPreservesOnCancel(stripGuards = false) {
+  const src = source;
+  const editorSlots = { main: null, insp: null };
+  let confirmAnswer = false;
+  const confirmFn = () => confirmAnswer;
+  const confirmDiscardSrc = stripGuards
+    ? "function confirmDiscardEditors() { return true; }"
+    : sliceFunction("confirmDiscardEditors", src).replace(/\bconfirm\s*\(/g, "confirmFn(");
+  const S = {
+    tab: "chat",
+    global: null,
+    itab: "files",
+    project: { id: "p1", name: "One" },
+    navGen: 0,
+    viewGen: 0,
+    lay: { tab: "chat" },
+    wantWork: false,
+    activity: "",
+    pendingCompose: null,
+    poll: null,
+    conv: null,
+    taskSel: null,
+  };
+  const WS = {
+    chat: "Chat",
+    plan: "Plan",
+    editor: "Editor",
+    memory: "Memory",
+    artifacts: "Saved",
+  };
+  const GL = { providers: "Providers", evidence: "Evidence" };
+  const navSrc = [
+    sliceFunction("navBump", src),
+    confirmDiscardSrc,
+    sliceFunction("setTab", src),
+    sliceFunction("setItab", src),
+    sliceFunction("openGlobal", src),
+    sliceFunction("composeIntoChat", src),
+    sliceFunction("openProject", src),
+  ].join("\n");
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const runtime = new AsyncFunction(
+    "S",
+    "WS",
+    "GL",
+    "editorSlots",
+    "confirmFn",
+    `${navSrc}
+     function markNav() {}
+     function renderHeader() {}
+     function saveLay() {}
+     function renderInspector() {}
+     function runRender() { return Promise.resolve(); }
+     function stopWatch() {}
+     function layout() {}
+     async function loadProjects() {}
+     function localStorageSet() {}
+     function localStorageGet() { return null; }
+     function loadJSON(_k, d) { return d; }
+     function layKey() { return "lay"; }
+     function banner() {}
+     async function guard(fn) { return fn(); }
+     async function api() { return { id: "p2", name: "Two" }; }
+     async function renderProviders() { return Promise.resolve(); }
+     async function renderEvidence() { return Promise.resolve(); }
+     editorSlots.main = () => ({ loaded: true, path: "f.txt", original: "a", value: "b" });
+     const snap = () => ({ tab: S.tab, global: S.global, itab: S.itab, project: S.project && S.project.id, pending: S.pendingCompose });
+     const before = snap();
+     setTab("memory");
+     if (JSON.stringify(snap()) !== JSON.stringify(before)) throw new Error("setTab changed state on cancel");
+     openGlobal("providers");
+     if (JSON.stringify(snap()) !== JSON.stringify(before)) throw new Error("openGlobal changed state on cancel");
+     setItab("plan");
+     if (JSON.stringify(snap()) !== JSON.stringify(before)) throw new Error("setItab changed state on cancel");
+     composeIntoChat("hello", true);
+     if (JSON.stringify(snap()) !== JSON.stringify(before)) throw new Error("composeIntoChat changed state on cancel");
+     await openProject("p2");
+     if (JSON.stringify(snap()) !== JSON.stringify(before)) throw new Error("openProject changed state on cancel");`,
+  );
+  confirmAnswer = false;
+  return runtime(S, WS, GL, editorSlots, confirmFn);
 }
 
 function testA5DraftReplaceCancel() {
@@ -211,12 +294,26 @@ async function run() {
   await testSaveBeforeLoad();
   await testA3SaveBaselineUsesSentContent();
   testA2AskTurnsWorkOff();
-  testA4EditorDirty();
+  await testA4NavigationPreservesOnCancel(false);
   testA5DraftReplaceCancel();
   console.log("ok");
 }
 
-run().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+export { testA4NavigationPreservesOnCancel };
+
+if (process.argv.includes("--prove-a4-strip")) {
+  testA4NavigationPreservesOnCancel(true)
+    .then(() => {
+      console.error("strip mode should have failed navigation preservation check");
+      process.exit(2);
+    })
+    .catch(() => process.exit(0));
+} else if (import.meta.url.startsWith("file:")) {
+  const invoked = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+  if (invoked) {
+    run().catch((e) => {
+      console.error(e);
+      process.exit(1);
+    });
+  }
+}

@@ -141,6 +141,30 @@ class TestDeletion(unittest.TestCase):
         self.store.x(
             "INSERT INTO messages(id,conversation_id,role,content,meta,status,created) VALUES(?,?,?,?,?,?,?)",
             (
+                "msg_build_user",
+                c["id"],
+                "user",
+                "build me",
+                json.dumps({"work": True}),
+                "saved",
+                now - 0.01,
+            ),
+        )
+        self.store.x(
+            "INSERT INTO messages(id,conversation_id,role,content,meta,status,created) VALUES(?,?,?,?,?,?,?)",
+            (
+                "msg_build_asst",
+                c["id"],
+                "assistant",
+                "",
+                json.dumps({"task_id": build, "work": True}),
+                "generated",
+                now - 0.005,
+            ),
+        )
+        self.store.x(
+            "INSERT INTO messages(id,conversation_id,role,content,meta,status,created) VALUES(?,?,?,?,?,?,?)",
+            (
                 "msg_1",
                 c["id"],
                 "user",
@@ -173,6 +197,124 @@ class TestDeletion(unittest.TestCase):
         self.assertFalse(photo_dir.exists())
         self.assertIsNotNone(
             self.store.one("SELECT id FROM conversations WHERE id=?", (other["id"],))
+        )
+
+    def test_a6_chat_work_plan_deleted_uses_composer_text_not_task_payload(self):
+        from aesop_studio import plan
+
+        prefix = "[Studio: work in the project folder. You may edit files here.]\n\n"
+        composer = "fix the widget layout"
+        tid = "tsk_chatwork"
+        c = self.svc.new_conversation(self.p["id"])
+        now = time.time()
+        self.store.x(
+            "INSERT INTO tasks(id,project_id,provider,prompt,state,cwd,output_path,created,checkpoint) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                tid,
+                self.p["id"],
+                "simulated",
+                prefix + composer,
+                "COMPLETED",
+                str(self.tmp / "p"),
+                str(self.tmp / "out.txt"),
+                now,
+                "{}",
+            ),
+        )
+        self.store.x(
+            "INSERT INTO messages(id,conversation_id,role,content,meta,status,created) VALUES(?,?,?,?,?,?,?)",
+            (
+                "msg_user",
+                c["id"],
+                "user",
+                composer,
+                json.dumps({"work": True}),
+                "saved",
+                now,
+            ),
+        )
+        self.store.x(
+            "INSERT INTO messages(id,conversation_id,role,content,meta,status,created) VALUES(?,?,?,?,?,?,?)",
+            (
+                "msg_asst",
+                c["id"],
+                "assistant",
+                "",
+                json.dumps({"task_id": tid, "work": True}),
+                "generated",
+                now + 0.001,
+            ),
+        )
+        chat_plan = plan.add_for_task(self.store, self.p["id"], tid, composer)
+        self.store.x(
+            "INSERT INTO messages(id,conversation_id,role,content,meta,status,created) VALUES(?,?,?,?,?,?,?)",
+            (
+                "msg_link",
+                c["id"],
+                "user",
+                "go",
+                json.dumps({"task_id": tid}),
+                "generated",
+                now + 0.002,
+            ),
+        )
+        deletion.delete_conversation(self.store, self.svc, self.p["id"], c["id"])
+        self.assertIsNone(
+            self.store.one("SELECT id FROM plan_items WHERE id=?", (chat_plan["id"],))
+        )
+
+    def test_a6_concurrent_plan_edit_survives_delete(self):
+        from aesop_studio import plan
+
+        tid = "tsk_concur"
+        now = time.time()
+        self.store.x(
+            "INSERT INTO tasks(id,project_id,provider,prompt,state,cwd,output_path,created,checkpoint) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                tid,
+                self.p["id"],
+                "simulated",
+                "build me",
+                "COMPLETED",
+                str(self.tmp / "p"),
+                str(self.tmp / "out.txt"),
+                now,
+                "{}",
+            ),
+        )
+        build_plan = plan.add_for_task(self.store, self.p["id"], tid, "build me")
+        c = self.svc.new_conversation(self.p["id"])
+        self.store.x(
+            "INSERT INTO messages(id,conversation_id,role,content,meta,status,created) VALUES(?,?,?,?,?,?,?)",
+            (
+                "msg_c",
+                c["id"],
+                "user",
+                "go",
+                json.dumps({"task_id": tid}),
+                "generated",
+                now,
+            ),
+        )
+        original_x = self.store.x
+
+        def x_hook(sql, args=()):
+            if sql.startswith("DELETE FROM plan_items WHERE id=? AND content"):
+                original_x(
+                    "UPDATE plan_items SET content=? WHERE id=?",
+                    ("owner edited between read and delete", args[0]),
+                )
+            return original_x(sql, args)
+
+        self.store.x = x_hook
+        try:
+            deletion.delete_conversation(self.store, self.svc, self.p["id"], c["id"])
+        finally:
+            self.store.x = original_x
+        self.assertIsNotNone(
+            self.store.one("SELECT id FROM plan_items WHERE id=?", (build_plan["id"],))
         )
 
 

@@ -72,9 +72,29 @@ def _delete_team_records(store: Store, task_ids: set[str]) -> None:
         store.x("DELETE FROM kv WHERE k=?", (f"team:{tid}",))
 
 
-def _auto_build_plan_content(prompt: str) -> str:
-    head = " ".join((prompt or "").split())
-    return redact(("Work: " + head)[:160])
+def _composer_prompt_for_build_plan(store: Store, tid: str) -> str | None:
+    """Text passed to plan.add_for_task at creation (message composer or build prompt)."""
+    asst = store.one(
+        "SELECT conversation_id, created FROM messages WHERE role='assistant' AND meta LIKE ?",
+        (f'%"task_id": "{tid}"%',),
+    )
+    if asst:
+        for row in store.q(
+            "SELECT content, meta FROM messages WHERE conversation_id=? AND role='user' "
+            "AND created <= ? ORDER BY created DESC",
+            (asst["conversation_id"], asst["created"]),
+        ):
+            meta = json.loads(row["meta"] or "{}")
+            if meta.get("work"):
+                return row["content"]
+    for row in store.q("SELECT role, content, meta FROM messages ORDER BY created"):
+        meta = json.loads(row["meta"] or "{}")
+        if meta.get("task_id") == tid and row["role"] == "user":
+            return row["content"]
+    task = store.one("SELECT prompt FROM tasks WHERE id=?", (tid,))
+    if task:
+        return task["prompt"]
+    return None
 
 
 def _delete_build_plan_items(store: Store, task_ids: set[str]) -> int:
@@ -89,13 +109,18 @@ def _delete_build_plan_items(store: Store, task_ids: set[str]) -> int:
     removed = 0
     for row in rows:
         tid = row["task_ref"]
-        task = store.one("SELECT prompt FROM tasks WHERE id=?", (tid,))
-        if not task:
+        composer = _composer_prompt_for_build_plan(store, tid)
+        if composer is None:
             continue
-        if row["content"] != _auto_build_plan_content(task["prompt"]):
+        expected = plan.auto_build_label(composer)
+        if row["content"] != expected:
             continue
-        store.x("DELETE FROM plan_items WHERE id=?", (row["id"],))
-        removed += 1
+        with store.tx() as c:
+            n = c.execute(
+                "DELETE FROM plan_items WHERE id=? AND content=? AND task_ref=?",
+                (row["id"], row["content"], tid),
+            ).rowcount
+        removed += n
     return removed
 
 

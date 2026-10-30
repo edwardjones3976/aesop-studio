@@ -130,6 +130,7 @@ class App:
         providers.refresh(self.store)
         self._retire_lock = threading.Lock()
         self._in_flight = 0
+        self._admission_closed = False
         # The mission permit is the owner's switch (Evidence -> Spend controls). It survives restarts (owner request
         # 2026-10-23: "switch all API routes to on"); a fresh install starts off, and the $165 mission ceiling
         # still bounds every reservation.
@@ -221,9 +222,9 @@ def run_source_retire_watcher(
         sleep_fn(3)
         while True:
             with app._retire_lock:
-                inflight = app._in_flight
-            if inflight == 0 and not has_live_work_fn():
-                break
+                if app._in_flight == 0 and not has_live_work_fn():
+                    app._admission_closed = True
+                    break
             sleep_fn(0.05)
         try:
             stop_browser_fn()
@@ -281,8 +282,10 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(raw or b"{}")
 
     def _admit_mutating(self, handler_name: str) -> bool:
-        """Count every mutating request for drain; deny work-start while retiring."""
+        """Count every mutating request for drain; close admission atomically before shutdown."""
         with self.app._retire_lock:
+            if self.app._admission_closed:
+                return False
             if (
                 self.app.retiring
                 and handler_name in WORK_START_HANDLERS
