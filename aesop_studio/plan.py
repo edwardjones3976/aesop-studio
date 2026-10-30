@@ -62,6 +62,11 @@ def list_items(store: Store, sup, pid: str) -> list[dict]:
     return rows
 
 
+def normalize_plan_content(content: str) -> str:
+    """Same whitespace normalization and length cap as plan.add before storage."""
+    return " ".join((content or "").split())[:400]
+
+
 def add(
     store: Store,
     pid: str,
@@ -71,7 +76,7 @@ def add(
     status: str = "todo",
 ) -> dict:
     ensure_schema(store)
-    content = " ".join((content or "").split())[:400]
+    content = normalize_plan_content(content)
     if len(content) < 2:
         raise ValueError("write what the step is first")
     # Count check and insert must share one critical section, or parallel inserts race past MAX_ITEMS.
@@ -137,7 +142,7 @@ def payload(store: Store, sup, pid: str, name: str) -> dict:
 def auto_build_label(prompt: str) -> str:
     """Stored plan label for a task's composer/build prompt (not the task payload)."""
     head = " ".join((prompt or "").split())
-    return redact(("Work: " + head)[:160])
+    return redact(normalize_plan_content(("Work: " + head)[:160]))
 
 
 def add_for_task(store: Store, pid: str, tid: str, prompt: str) -> dict:

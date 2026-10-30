@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 os.environ["AESOP_SIMULATED_ROUTE"] = "1"
@@ -264,6 +265,127 @@ class TestDeletion(unittest.TestCase):
             self.store.one("SELECT id FROM plan_items WHERE id=?", (chat_plan["id"],))
         )
 
+    def test_a6_untouched_plan_deleted_when_label_truncation_ends_on_whitespace(self):
+        from aesop_studio import plan
+
+        pad = "x" * 153
+        composer = f"{pad} tail"
+        tid = "tsk_ws_trunc"
+        now = time.time()
+        self.store.x(
+            "INSERT INTO tasks(id,project_id,provider,prompt,state,cwd,output_path,created,checkpoint) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                tid,
+                self.p["id"],
+                "simulated",
+                composer,
+                "COMPLETED",
+                str(self.tmp / "p"),
+                str(self.tmp / "out.txt"),
+                now,
+                "{}",
+            ),
+        )
+        build_plan = plan.add_for_task(self.store, self.p["id"], tid, composer)
+        c = self.svc.new_conversation(self.p["id"])
+        self.store.x(
+            "INSERT INTO messages(id,conversation_id,role,content,meta,status,created) VALUES(?,?,?,?,?,?,?)",
+            (
+                "msg_ws",
+                c["id"],
+                "user",
+                composer,
+                json.dumps({"task_id": tid}),
+                "generated",
+                now,
+            ),
+        )
+        deletion.delete_conversation(self.store, self.svc, self.p["id"], c["id"])
+        self.assertIsNone(
+            self.store.one("SELECT id FROM plan_items WHERE id=?", (build_plan["id"],))
+        )
+
+    def test_a6_untouched_plan_deleted_when_composer_has_internal_whitespace(self):
+        from aesop_studio import plan
+
+        composer = "fix   the\n\twidget"
+        tid = "tsk_ws_int"
+        now = time.time()
+        self.store.x(
+            "INSERT INTO tasks(id,project_id,provider,prompt,state,cwd,output_path,created,checkpoint) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                tid,
+                self.p["id"],
+                "simulated",
+                composer,
+                "COMPLETED",
+                str(self.tmp / "p"),
+                str(self.tmp / "out.txt"),
+                now,
+                "{}",
+            ),
+        )
+        build_plan = plan.add_for_task(self.store, self.p["id"], tid, composer)
+        c = self.svc.new_conversation(self.p["id"])
+        self.store.x(
+            "INSERT INTO messages(id,conversation_id,role,content,meta,status,created) VALUES(?,?,?,?,?,?,?)",
+            (
+                "msg_int",
+                c["id"],
+                "user",
+                composer,
+                json.dumps({"task_id": tid}),
+                "generated",
+                now,
+            ),
+        )
+        deletion.delete_conversation(self.store, self.svc, self.p["id"], c["id"])
+        self.assertIsNone(
+            self.store.one("SELECT id FROM plan_items WHERE id=?", (build_plan["id"],))
+        )
+
+    def test_a6_untouched_build_plan_deleted_without_concurrent_edit(self):
+        from aesop_studio import plan
+
+        composer = "build me"
+        tid = "tsk_del_ok"
+        now = time.time()
+        self.store.x(
+            "INSERT INTO tasks(id,project_id,provider,prompt,state,cwd,output_path,created,checkpoint) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                tid,
+                self.p["id"],
+                "simulated",
+                composer,
+                "COMPLETED",
+                str(self.tmp / "p"),
+                str(self.tmp / "out.txt"),
+                now,
+                "{}",
+            ),
+        )
+        build_plan = plan.add_for_task(self.store, self.p["id"], tid, composer)
+        c = self.svc.new_conversation(self.p["id"])
+        self.store.x(
+            "INSERT INTO messages(id,conversation_id,role,content,meta,status,created) VALUES(?,?,?,?,?,?,?)",
+            (
+                "msg_del",
+                c["id"],
+                "user",
+                composer,
+                json.dumps({"task_id": tid}),
+                "generated",
+                now,
+            ),
+        )
+        deletion.delete_conversation(self.store, self.svc, self.p["id"], c["id"])
+        self.assertIsNone(
+            self.store.one("SELECT id FROM plan_items WHERE id=?", (build_plan["id"],))
+        )
+
     def test_a6_concurrent_plan_edit_survives_delete(self):
         from aesop_studio import plan
 
@@ -284,7 +406,8 @@ class TestDeletion(unittest.TestCase):
                 "{}",
             ),
         )
-        build_plan = plan.add_for_task(self.store, self.p["id"], tid, "build me")
+        composer = "build me"
+        build_plan = plan.add_for_task(self.store, self.p["id"], tid, composer)
         c = self.svc.new_conversation(self.p["id"])
         self.store.x(
             "INSERT INTO messages(id,conversation_id,role,content,meta,status,created) VALUES(?,?,?,?,?,?,?)",
@@ -292,27 +415,43 @@ class TestDeletion(unittest.TestCase):
                 "msg_c",
                 c["id"],
                 "user",
-                "go",
+                composer,
                 json.dumps({"task_id": tid}),
                 "generated",
                 now,
             ),
         )
-        original_x = self.store.x
+        original_tx = self.store.tx
 
-        def x_hook(sql, args=()):
-            if sql.startswith("DELETE FROM plan_items WHERE id=? AND content"):
-                original_x(
-                    "UPDATE plan_items SET content=? WHERE id=?",
-                    ("owner edited between read and delete", args[0]),
-                )
-            return original_x(sql, args)
+        class _ConnProxy:
+            __slots__ = ("_c",)
 
-        self.store.x = x_hook
+            def __init__(self, c):
+                self._c = c
+
+            def execute(self, sql, args=()):
+                if isinstance(sql, str) and sql.startswith(
+                    "DELETE FROM plan_items WHERE id=? AND content"
+                ):
+                    self._c.execute(
+                        "UPDATE plan_items SET content=? WHERE id=?",
+                        ("owner edited between read and delete", args[0]),
+                    )
+                return self._c.execute(sql, args)
+
+            def __getattr__(self, name):
+                return getattr(self._c, name)
+
+        @contextmanager
+        def tx_hook():
+            with original_tx() as c:
+                yield _ConnProxy(c)
+
+        self.store.tx = tx_hook
         try:
             deletion.delete_conversation(self.store, self.svc, self.p["id"], c["id"])
         finally:
-            self.store.x = original_x
+            self.store.tx = original_tx
         self.assertIsNotNone(
             self.store.one("SELECT id FROM plan_items WHERE id=?", (build_plan["id"],))
         )

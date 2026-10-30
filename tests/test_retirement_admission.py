@@ -289,96 +289,111 @@ class TestRetirementAdmissionRepro(unittest.TestCase):
         )
         self.assertEqual(app._in_flight, 0)
 
-    def test_a1_watcher_closes_admission_before_shutdown(self):
-        app = SimpleNamespace(
-            retiring=False,
-            source_mtime=0.0,
-            sessions=SimpleNamespace(key_ok=lambda *_: True),
-            allowed_hosts=lambda: {"127.0.0.1:8766"},
-            _retire_lock=threading.Lock(),
-            _in_flight=0,
-            _admission_closed=False,
-            browser=SimpleNamespace(stop=lambda: None),
-        )
-        release = threading.Event()
-        entered = threading.Event()
-        shutdown_snap = {}
-        post_close_admits = []
-        stop_probe = threading.Event()
-
-        def slow_mutating(*_a):
-            entered.set()
-            release.wait(timeout=3)
-
-        handler = SimpleNamespace(
-            app=app,
-            path="/api/projects/synthetic/file",
-            headers={
-                "Origin": "http://127.0.0.1:8766",
-                "X-CSRF-Token": "synthetic",
-                "X-Aesop-Key": "synthetic",
-            },
-            _sitem={"csrf": "synthetic"},
-            _host_ok=lambda: True,
-            _session=lambda: "synthetic-session",
-            project_file_put=slow_mutating,
-            err=lambda *_: None,
-            _admit_mutating=lambda name: Handler._admit_mutating(handler, name),
-            _release_mutating=lambda: Handler._release_mutating(handler),
-        )
-
-        def probe():
-            probe_handler = SimpleNamespace(
-                app=app,
-                _admit_mutating=lambda name: Handler._admit_mutating(
-                    probe_handler, name
-                ),
-                _release_mutating=lambda: Handler._release_mutating(probe_handler),
+    def test_a1_watcher_final_closure_races_editor_save(self):
+        """Race in-flight editor save against admission close (200 jittered iterations)."""
+        for i in range(200):
+            app = SimpleNamespace(
+                retiring=False,
+                source_mtime=0.0,
+                sessions=SimpleNamespace(key_ok=lambda *_: True),
+                allowed_hosts=lambda: {"127.0.0.1:8766"},
+                _retire_lock=threading.Lock(),
+                _in_flight=0,
+                _admission_closed=False,
+                browser=SimpleNamespace(stop=lambda: None),
             )
-            while not stop_probe.is_set():
-                if Handler._admit_mutating(probe_handler, "send"):
-                    with app._retire_lock:
-                        if app._admission_closed:
-                            post_close_admits.append(1)
-                    Handler._release_mutating(probe_handler)
-                time.sleep(0.001)
+            release = threading.Event()
+            entered = threading.Event()
+            save_calls = []
+            late_calls = []
+            shutdown_snap = {}
 
-        def shutdown_fn():
-            with app._retire_lock:
-                shutdown_snap["in_flight"] = app._in_flight
-                shutdown_snap["closed"] = app._admission_closed
-            shutdown_snap["called"] = True
-            stop_probe.set()
+            def slow_mutating(*_a):
+                entered.set()
+                release.wait(timeout=0.2)
+                save_calls.append("done")
+                return None
 
-        t_req = threading.Thread(
-            target=lambda: Handler._dispatch(handler, "POST"), daemon=True
-        )
-        t_req.start()
-        self.assertTrue(entered.wait(timeout=2))
-        t_probe = threading.Thread(target=probe, daemon=True)
-        t_probe.start()
-        watcher = threading.Thread(
-            target=lambda: run_source_retire_watcher(
-                app,
-                SimpleNamespace(),
-                source_mtime_fn=lambda: 1.0,
-                sleep_fn=lambda secs: time.sleep(0.01 if secs < 2 else 0.03),
-                has_live_work_fn=lambda: False,
-                stop_browser_fn=lambda: None,
-                shutdown_fn=shutdown_fn,
-            ),
-            daemon=True,
-        )
-        watcher.start()
-        release.set()
-        t_req.join(timeout=3)
-        watcher.join(timeout=5)
-        stop_probe.set()
-        t_probe.join(timeout=2)
-        self.assertTrue(shutdown_snap.get("called"))
-        self.assertEqual(shutdown_snap.get("in_flight"), 0)
-        self.assertTrue(shutdown_snap.get("closed"))
-        self.assertEqual(post_close_admits, [])
+            handler = SimpleNamespace(
+                app=app,
+                path="/api/projects/synthetic/file",
+                headers={
+                    "Origin": "http://127.0.0.1:8766",
+                    "X-CSRF-Token": "synthetic",
+                    "X-Aesop-Key": "synthetic",
+                },
+                _sitem={"csrf": "synthetic"},
+                _host_ok=lambda: True,
+                _session=lambda: "synthetic-session",
+                project_file_put=slow_mutating,
+                err=lambda code, message: late_calls.append((code, message)),
+                _admit_mutating=lambda name: Handler._admit_mutating(handler, name),
+                _release_mutating=lambda: Handler._release_mutating(handler),
+            )
+
+            def shutdown_fn():
+                with app._retire_lock:
+                    shutdown_snap["in_flight"] = app._in_flight
+                    shutdown_snap["closed"] = app._admission_closed
+                shutdown_snap["called"] = True
+
+            t_req = threading.Thread(
+                target=lambda: Handler._dispatch(handler, "POST"), daemon=True
+            )
+            t_req.start()
+            self.assertTrue(entered.wait(timeout=1), f"iter {i}: save never started")
+
+            watcher = threading.Thread(
+                target=lambda: run_source_retire_watcher(
+                    app,
+                    SimpleNamespace(),
+                    source_mtime_fn=lambda: 1.0,
+                    sleep_fn=lambda secs: time.sleep(0.0005 if secs < 2 else 0.001),
+                    has_live_work_fn=lambda: app._in_flight > 0,
+                    stop_browser_fn=lambda: None,
+                    shutdown_fn=shutdown_fn,
+                ),
+                daemon=True,
+            )
+            watcher.start()
+            time.sleep(0.0002 * (i % 7))
+            release.set()
+            t_req.join(timeout=1)
+            watcher.join(timeout=2)
+
+            late_handler = SimpleNamespace(
+                app=app,
+                path="/api/projects/synthetic/file",
+                headers=handler.headers,
+                _sitem=handler._sitem,
+                _host_ok=handler._host_ok,
+                _session=handler._session,
+                project_file_put=lambda *_: late_calls.append("saved"),
+                err=lambda code, message: late_calls.append((code, message)),
+                _admit_mutating=lambda name: Handler._admit_mutating(
+                    late_handler, name
+                ),
+                _release_mutating=lambda: Handler._release_mutating(late_handler),
+            )
+            Handler._dispatch(late_handler, "POST")
+
+            self.assertTrue(
+                shutdown_snap.get("called"), f"iter {i}: shutdown not called"
+            )
+            self.assertEqual(
+                shutdown_snap.get("in_flight"), 0, f"iter {i}: in_flight not drained"
+            )
+            self.assertTrue(
+                shutdown_snap.get("closed"), f"iter {i}: admission not closed"
+            )
+            self.assertEqual(
+                save_calls, ["done"], f"iter {i}: in-flight editor save must finish"
+            )
+            self.assertNotIn("saved", late_calls, f"iter {i}: post-close save ran")
+            self.assertTrue(
+                late_calls and late_calls[0][0] == 503,
+                f"iter {i}: post-close dispatch expected 503, got {late_calls}",
+            )
 
 
 if __name__ == "__main__":

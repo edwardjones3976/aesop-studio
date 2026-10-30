@@ -185,7 +185,41 @@ function testA2AskTurnsWorkOff() {
   if (out2.workOn !== true) throw new Error("work should turn work on");
 }
 
+function stubDomForNavTest() {
+  const el = () => ({
+    setAttribute() {},
+    removeAttribute() {},
+    tabIndex: 0,
+    id: "stub",
+    dataset: {},
+    scrollIntoView() {},
+    replaceChildren() {},
+    textContent: "",
+    hidden: false,
+    append() {},
+    appendChild() {},
+    isConnected: true,
+    focus() {},
+  });
+  const list = () => ({ forEach(fn) {} });
+  globalThis.document = {
+    querySelectorAll: () => list(),
+    querySelector: () => null,
+    createElement: () => el(),
+    createElementNS: () => el(),
+    body: el(),
+    activeElement: el(),
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  globalThis.$ = () => el();
+}
+
+const NAV_CANCEL_ERR =
+  /changed state on cancel/;
+
 function testA4NavigationPreservesOnCancel(stripGuards = false) {
+  stubDomForNavTest();
   const src = source;
   const editorSlots = { main: null, insp: null };
   let confirmAnswer = false;
@@ -248,8 +282,9 @@ function testA4NavigationPreservesOnCancel(stripGuards = false) {
      function banner() {}
      async function guard(fn) { return fn(); }
      async function api() { return { id: "p2", name: "Two" }; }
-     async function renderProviders() { return Promise.resolve(); }
+     function renderProviders() { return Promise.resolve(); }
      async function renderEvidence() { return Promise.resolve(); }
+     const RENDER = { chat: () => Promise.resolve(), memory: () => Promise.resolve() };
      editorSlots.main = () => ({ loaded: true, path: "f.txt", original: "a", value: "b" });
      const snap = () => ({ tab: S.tab, global: S.global, itab: S.itab, project: S.project && S.project.id, pending: S.pendingCompose });
      const before = snap();
@@ -307,7 +342,12 @@ if (process.argv.includes("--prove-a4-strip")) {
       console.error("strip mode should have failed navigation preservation check");
       process.exit(2);
     })
-    .catch(() => process.exit(0));
+    .catch((e) => {
+      const msg = e && e.message ? String(e.message) : String(e);
+      if (NAV_CANCEL_ERR.test(msg)) process.exit(0);
+      console.error(e);
+      process.exit(1);
+    });
 } else if (import.meta.url.startsWith("file:")) {
   const invoked = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
   if (invoked) {
