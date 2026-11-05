@@ -1,3 +1,4 @@
+# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | BEGIN]]
 """Loopback-only client for Aesop's exact local Director profile.
 
 The task supervisor owns timeout, cancellation, output redaction and result persistence. This client performs one
@@ -33,6 +34,10 @@ def _port(name: str, default: int) -> int:
 
 
 def _request(backend: str, model: str, prompt: str, profile: dict, role: str) -> str:
+    budget = profile["context_tokens"] - profile["max_output_tokens"] - profile["input_overhead_tokens"]
+    used = len(role.encode()) + len(prompt.encode())
+    if used > budget:
+        raise ValueError(f"input exceeds the local Director context contract ({used} > {budget} conservative tokens)")
     if backend == "lmstudio":
         url = f"http://127.0.0.1:{_port('AESOP_LMSTUDIO_PORT', 1234)}/v1/chat/completions"
         body = {"model": model, "messages": [{"role": "system", "content": role},
@@ -76,3 +81,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | END]]

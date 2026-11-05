@@ -1,3 +1,4 @@
+# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | BEGIN]]
 """Exact local Director routes: pinned profile, loopback transports and Aesop route plumbing."""
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 from aesop_studio import lanes, providers
 
@@ -37,9 +39,12 @@ class LocalDirectorServer(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.seen.append((self.path, body))
-        text = "<think>private scratch</think>\nDirector answer."
-        data = ({"choices": [{"message": {"content": text}}]} if self.path == "/v1/chat/completions"
-                else {"message": {"content": text}})
+        if self.path == "/api/show":
+            data = {"modelfile": "FROM C:\\\\models\\\\blobs\\\\sha256-baab9ccb424b607ad70aebdcbaeb2337a6eecd6a7e0fc9c6dc7569c72f9588bc"}
+        else:
+            text = "<think>private scratch</think>\nDirector answer."
+            data = ({"choices": [{"message": {"content": text}}]} if self.path == "/v1/chat/completions"
+                    else {"message": {"content": text}})
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -59,11 +64,12 @@ class TestLocalDirector(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.server.shutdown()
+        cls.server.server_close()
 
-    def run_client(self, backend: str, model: str):
+    def run_client(self, backend: str, model: str, prompt: str = "Question?"):
         out = Path(tempfile.mkdtemp()) / "answer.txt"
         env = dict(os.environ, **{f"AESOP_{backend.upper()}_PORT": str(self.port)})
-        proc = subprocess.run([sys.executable, "-I", str(CLIENT), backend, model, str(out)], input="Question?",
+        proc = subprocess.run([sys.executable, "-I", str(CLIENT), backend, model, str(out)], input=prompt,
                               capture_output=True, text=True, env=env, timeout=30)
         return proc, out
 
@@ -88,12 +94,20 @@ class TestLocalDirector(unittest.TestCase):
         self.assertIn("does not match the pinned profile", proc.stderr)
         self.assertFalse(out.exists())
 
+    def test_oversized_input_is_refused_before_request(self):
+        before = len(LocalDirectorServer.seen)
+        proc, out = self.run_client("ollama", "director:20261102", "x" * 7000)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("exceeds the local Director context contract", proc.stderr)
+        self.assertFalse(out.exists())
+        self.assertEqual(len(LocalDirectorServer.seen), before)
+
     def test_registry_routes_and_loopback_inventory(self):
         self.assertEqual(providers._local_models(f"http://127.0.0.1:{self.port}/v1/models", "data"),
                          ["director-20261102"])
         self.assertEqual(providers._local_models(f"http://127.0.0.1:{self.port}/api/tags", "models"),
                          ["director:20261102"])
-        for rid, model in providers.DIRECTOR_MODELS.items():
+        for rid, model in providers.director_models().items():
             with self.subTest(route=rid):
                 route = {"state": "READY_LOCAL", "supported_modes": ["chat"]}
                 self.assertTrue(providers.usable(route, "chat"))
@@ -105,6 +119,28 @@ class TestLocalDirector(unittest.TestCase):
         self.assertIn("Director (local)", lanes.DOCUMENTED_EXAMPLE)
         self.assertTrue(any(row[0] == "director-local" for row in lanes.CATALOG))
 
+    def test_runtime_bindings_fail_closed_on_artifact_substitution(self):
+        profile = json.loads(PROFILE.read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as td:
+            artifact = Path(td) / "director.gguf"
+            artifact.write_bytes(b"exact")
+            stat = artifact.stat()
+            binding = {"artifact_path": str(artifact), "catalog_path": "Director/director.gguf",
+                       "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+                       "sha256": profile["gguf_sha256"]}
+            catalog = json.dumps([{"modelKey": "director-20261102", "path": "Director/director.gguf",
+                                   "sizeBytes": stat.st_size}])
+            with mock.patch.object(providers.shutil, "which", return_value="lms.exe"), \
+                    mock.patch.object(providers, "_run", return_value=(0, catalog)):
+                self.assertTrue(providers._lmstudio_binding("director-20261102", binding)[0])
+                artifact.write_bytes(b"changed")
+                self.assertFalse(providers._lmstudio_binding("director-20261102", binding)[0])
+        with mock.patch.dict(os.environ, {"AESOP_OLLAMA_PORT": str(self.port)}):
+            self.assertTrue(providers._ollama_binding("director:20261102", profile["bindings"]["ollama"])[0])
+            bad = {"blob_sha256": "0" * 64}
+            self.assertFalse(providers._ollama_binding("director:20261102", bad)[0])
+
 
 if __name__ == "__main__":
     unittest.main()
+# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | END]]

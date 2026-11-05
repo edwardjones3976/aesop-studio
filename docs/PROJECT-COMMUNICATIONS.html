@@ -1,15 +1,16 @@
 <!doctype html>
+<!-- [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | BEGIN]] -->
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>Project communications — Aesop Studio</title>
 <style>body{font:16px/1.55 system-ui;max-width:1050px;margin:2rem auto;padding:0 1rem;color:#17221d}table{border-collapse:collapse;width:100%;margin:1rem 0}th,td{border:1px solid #b9c4bd;padding:.6rem;vertical-align:top;text-align:left}code{overflow-wrap:anywhere}.ok{color:#126034}.hold{color:#8a5300}</style></head><body><main>
 <h1>Project communications — Aesop Studio</h1>
-<p><strong>Updated:</strong> 2026-11-04 America/Los_Angeles. This is the canonical project communication record. It records routes and evidence; it does not grant access, spending, deployment, merge, or self-review authority.</p>
+<p><strong>Updated:</strong> 2026-11-04 America/Los_Angeles. This is configuration documentation, not a delivery receipt. It records routes and evidence; it does not prove Slack or Linear delivery, recipient readback, runtime installation or adoption, and grants no access, spending, deployment, merge, or self-review authority.</p>
 
 <h2>Identity, ownership, and authority</h2>
 <table><tbody>
 <tr><th>Project</th><td>Aesop Studio / <code>edwardjones3976/aesop-studio</code></td></tr>
-<tr><th>Current task owner and writer</th><td>OpenAI Director current goal chat; isolated branch <code>codex/director-capabilities-20261104</code> at base <code>5742c399ccb8e3a51dd73f2eaa0c35ce7e56255c</code>.</td></tr>
+<tr><th>Current task owner and writer</th><td>OpenAI Director current chat; isolated branch <code>codex/director-capabilities-20261104</code>. The broader plan goal remains paused; this bounded correction does not imply that goal resumed.</td></tr>
 <tr><th>Appointments</th><td>OpenAI remains Director and Orchestrator. Claude retains Investigator, Quality Lead, and Verification. Cursor remains Warden. Antigravity remains Secretary. No role is transferred by this integration.</td></tr>
 <tr><th>Scope</th><td>Add the exact local Director profile to Aesop's existing communication paths without changing its tools, permissions, provider budgets, or release verdict.</td></tr>
 <tr><th>Owner-reserved actions</th><td>Merge, deployment, publication, credentials, new access, destructive cleanup, and any new native Director inference outside an authorized check remain gated.</td></tr>
@@ -30,8 +31,8 @@
 <tr><td>Aesop chat and provider switching</td><td><code>providers</code> registry → <code>services.build_context</code> → supervised task → loopback client</td><td class="ok">Configured for both local backends; inherits preview, transfer policy, history, saved result, cancellation, and redaction.</td></tr>
 <tr><td>Cross-provider handoff/history</td><td>Existing labelled conversation history is built before the selected Director route runs</td><td class="ok">No route-specific bypass added.</td></tr>
 <tr><td>Roundtable / War Room</td><td>One <code>Director (local)</code> speaker lane backed by <code>director-lmstudio</code> and <code>director-ollama</code></td><td class="ok">Uses existing live-session gate, roster consent, caps, persistence, and stop/reconcile rules.</td></tr>
-<tr><td>LM Studio</td><td><code>127.0.0.1:1234</code>, model <code>director-20261102</code></td><td>Exact model identity is listed. No Aesop inference was run in this integration.</td></tr>
-<tr><td>Ollama</td><td><code>127.0.0.1:11434</code>, model <code>director:20261102</code></td><td>Exact model identity is listed. No Aesop inference was run in this integration.</td></tr>
+<tr><td>LM Studio</td><td><code>127.0.0.1:1234</code>, model <code>director-20261102</code></td><td>The live catalog path, byte size and file timestamp must match the recorded exact-hash receipt. A metadata change fails closed and requires a fresh one-time hash receipt; probes do not hash the 5 GB file repeatedly. No Aesop inference was run in this integration.</td></tr>
+<tr><td>Ollama</td><td><code>127.0.0.1:11434</code>, model <code>director:20261102</code></td><td>The live <code>/api/show</code> manifest must bind the alias to blob <code>sha256-baab9ccb…</code>. No Aesop inference was run in this integration.</td></tr>
 <tr><td>Role and capability boundary</td><td>Profile <code>director-role-v5</code>; system SHA-256 <code>e0038acdd087169ba1dee98d0ea3f40baccc476937db72025807d3efeee70e25</code>; GGUF SHA-256 <code>baab9ccb424b607ad70aebdcbaeb2337a6eecd6a7e0fc9c6dc7569c72f9588bc</code></td><td>Chat-only. No tools or filesystem access. Provider-package instructions are not loaded where their executors are unavailable. Configuration is not model efficacy or release acceptance.</td></tr>
 </tbody></table>
 
@@ -39,3 +40,4 @@
 <p>The integration is ready for independent review when the exact candidate digest is recorded. Acceptance requires the full offline suite, exact profile hashes, current loopback inventory readback, and eligible review of the immutable candidate. Live model behavior remains governed by the Director operation's exhausted native-check history and must not be inferred from route availability.</p>
 <p>At the three-day follow-up: reconcile the time-dependent canary requirement, refresh the two loopback inventories, verify the exact merged/deployed candidate if it has advanced, and keep any absent recipient acknowledgement or runtime adoption <strong>UNKNOWN</strong>.</p>
 </main></body></html>
+<!-- [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | END]] -->

@@ -1,3 +1,4 @@
+# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | BEGIN]]
 """Provider registry: capability records verified by probing official, unmodified CLIs.
 
 Routes never touch credential files; readiness comes from each CLI's own status command.
@@ -146,10 +147,32 @@ def _sim_cmd() -> list[str]:
     return [sys.executable, "-I", str(Path(__file__).with_name("simulated_provider.py"))]
 
 
-DIRECTOR_MODELS = {
-    "director-lmstudio": "director-20261102",
-    "director-ollama": "director:20261102",
-}
+DIRECTOR_PROFILE_PATH = Path(__file__).with_name("director_profile.json")
+
+
+def director_profile() -> dict:
+    profile = json.loads(DIRECTOR_PROFILE_PATH.read_text(encoding="utf-8"))
+    import hashlib
+    if hashlib.sha256(profile["system"].encode()).hexdigest() != profile["role_sha256"]:
+        raise RuntimeError("Director role profile digest mismatch")
+    return profile
+
+
+def director_models(profile: dict | None = None) -> dict[str, str]:
+    models = (profile or director_profile())["models"]
+    return {f"director-{backend}": model for backend, model in models.items()}
+
+
+def validate_director_prompt(route_id: str, prompt: str) -> None:
+    profile = director_profile()
+    if route_id not in director_models(profile):
+        return
+    budget = profile["context_tokens"] - profile["max_output_tokens"] - profile["input_overhead_tokens"]
+    used = len(profile["system"].encode()) + len(prompt.encode())
+    if used > budget:
+        raise RuntimeError(f"local Director context has a {used:,}-token conservative upper bound; limit is "
+                           f"{budget:,} after "
+                           f"reserving {profile['max_output_tokens']:,} output tokens")
 
 
 def _local_models(url: str, key: str) -> list[str] | None:
@@ -202,6 +225,46 @@ def _contained(argv: list[str], timeout: int, cwd: str | None = None, input_text
 
 def _run(argv: list[str], timeout: int = 30) -> tuple[int, str]:
     return _contained(argv, timeout)
+
+
+def _lmstudio_binding(model: str, binding: dict) -> tuple[bool, str]:
+    exe = shutil.which("lms.exe") or shutil.which("lms")
+    if not exe:
+        return False, "LM Studio CLI is unavailable for artifact binding verification"
+    code, out = _run([exe, "ls", "--json"], timeout=10)
+    try:
+        rows = json.loads(out) if code == 0 else []
+    except json.JSONDecodeError:
+        rows = []
+    row = next((x for x in rows if x.get("modelKey") == model), None)
+    path = Path(binding["artifact_path"])
+    try:
+        stat = path.stat()
+    except OSError:
+        stat = None
+    exact = bool(row and stat and row.get("path") == binding["catalog_path"]
+                 and int(row.get("sizeBytes") or -1) == binding["size_bytes"]
+                 and stat.st_size == binding["size_bytes"] and stat.st_mtime_ns == binding["mtime_ns"])
+    return (exact, (f"LM Studio catalog binds {model} to recorded GGUF {binding['sha256'][:12]}..."
+                    if exact else "LM Studio model binding differs from the recorded GGUF receipt"))
+
+
+def _ollama_binding(model: str, binding: dict) -> tuple[bool, str]:
+    import urllib.request
+    port = int(os.environ.get("AESOP_OLLAMA_PORT", 11434))
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/show",
+                                 data=json.dumps({"model": model}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=3) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001 - absence is route status, never an app failure
+        return False, "Ollama model binding could not be read"
+    digest = binding["blob_sha256"]
+    exact = f"sha256-{digest}" in (data.get("modelfile") or "")
+    return (exact, (f"Ollama manifest binds {model} to GGUF blob {digest[:12]}..."
+                    if exact else "Ollama manifest does not bind the configured model to the recorded GGUF blob"))
 
 
 def _base(provider, route_type, endpoint, modes, auth_method, billing_basis, limitations):
@@ -305,6 +368,8 @@ def probe(store=None) -> dict[str, dict]:
 
     # Exact local Director artifact through both supported desktop runtimes. Presence is not a capability or release
     # verdict; every actual response still runs through the ordinary Aesop task supervision and evidence path.
+    profile = director_profile()
+    configured_models = director_models(profile)
     for rid, endpoint, models_url, key in (
             ("director-lmstudio", "LM Studio 127.0.0.1:1234", "http://127.0.0.1:1234/v1/models", "data"),
             ("director-ollama", "Ollama 127.0.0.1:11434", "http://127.0.0.1:11434/api/tags", "models")):
@@ -314,17 +379,19 @@ def probe(store=None) -> dict[str, dict]:
         r.update(filesystem_scope="none (only the previewed context is sent to a loopback server)",
                  cancellation_behavior="Aesop terminates its client; backend generation cancellation is not proven",
                  incremental_cost_status="$0 provider spend; uses this PC's CPU/GPU", last_verified_at=now,
-                 auth_status="local_loopback", models=[DIRECTOR_MODELS[rid]])
+                 auth_status="local_loopback", models=[configured_models[rid]])
         if os.environ.get("AESOP_PROBE_OFFLINE") == "1":
             r.update(state="UNVERIFIED", evidence="loopback probe skipped (offline test mode)")
         else:
             present = _local_models(models_url, key)
-            expected = DIRECTOR_MODELS[rid]
+            expected = configured_models[rid]
             if present is None:
                 r.update(state="UNAVAILABLE", evidence=f"{endpoint} is not reachable")
             elif expected in present:
-                r.update(state="READY_LOCAL", version=expected,
-                         evidence=f"{endpoint} lists exact configured model {expected}; inference not run")
+                backend = rid.removeprefix("director-")
+                bound, evidence = (_lmstudio_binding(expected, profile["bindings"][backend]) if backend == "lmstudio"
+                                   else _ollama_binding(expected, profile["bindings"][backend]))
+                r.update(state="READY_LOCAL" if bound else "UNAVAILABLE", version=expected, evidence=evidence)
             else:
                 r.update(state="UNAVAILABLE", evidence=f"{endpoint} does not list exact configured model {expected}")
         routes[rid] = r
@@ -559,8 +626,9 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
                        else ["--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep"])
         return cmd + (["-Model", model] if model else []) + [
             "-p", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config"] + permissions
-    if route_id in DIRECTOR_MODELS and mode == "chat":
-        expected = DIRECTOR_MODELS[route_id]
+    configured_models = director_models()
+    if route_id in configured_models and mode == "chat":
+        expected = configured_models[route_id]
         if model and model != expected:
             raise RuntimeError(f"{route_id} is pinned to {expected}")
         return [sys.executable, "-I", str(Path(__file__).with_name("local_director_client.py")),
@@ -568,3 +636,4 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
     if route_id == "simulated":
         return _sim_cmd() + [mode, out_file]
     raise RuntimeError(f"route {route_id} has no in-app execution path for {mode}")
+# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | END]]
