@@ -15,8 +15,9 @@ from pathlib import Path
 
 from .store import Store
 
-STATES = ("UNVERIFIED", "AUTH_REQUIRED", "READY_INCLUDED", "READY_METERED", "READY_METERED_DISABLED",
+STATES = ("UNVERIFIED", "AUTH_REQUIRED", "READY_INCLUDED", "READY_LOCAL", "READY_METERED", "READY_METERED_DISABLED",
           "HANDOFF_ONLY", "UNAVAILABLE", "BLOCKED_POLICY", "SIMULATED")
+READY_STATES = ("READY_INCLUDED", "READY_LOCAL", "READY_METERED", "SIMULATED")
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # Variables that would redirect a CLI from subscription sign-in to a separately billed route.
 BILLING_ENV = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
@@ -143,6 +144,25 @@ def _zai_cmd() -> list[str] | None:
 
 def _sim_cmd() -> list[str]:
     return [sys.executable, "-I", str(Path(__file__).with_name("simulated_provider.py"))]
+
+
+DIRECTOR_MODELS = {
+    "director-lmstudio": "director-20261102",
+    "director-ollama": "director:20261102",
+}
+
+
+def _local_models(url: str, key: str) -> list[str] | None:
+    """Return loopback model ids, or None when the local server is unavailable."""
+    import urllib.request
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(url, timeout=3) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001 - absence is route status, never an app failure
+        return None
+    rows = data.get(key, [])
+    return [str(row.get("id") or row.get("name")) for row in rows if row.get("id") or row.get("name")]
 
 
 MAX_PROBE_OUTPUT = 64 * 1024
@@ -283,6 +303,32 @@ def probe(store=None) -> dict[str, dict]:
              cancellation_behavior="local stream stopped; cancelled or cut-off requests retain exposure")
     routes["perplexity-orchestrator"] = r
 
+    # Exact local Director artifact through both supported desktop runtimes. Presence is not a capability or release
+    # verdict; every actual response still runs through the ordinary Aesop task supervision and evidence path.
+    for rid, endpoint, models_url, key in (
+            ("director-lmstudio", "LM Studio 127.0.0.1:1234", "http://127.0.0.1:1234/v1/models", "data"),
+            ("director-ollama", "Ollama 127.0.0.1:11434", "http://127.0.0.1:11434/api/tags", "models")):
+        r = _base("local", "local_model", endpoint, ["chat"], "none (loopback)", "local",
+                  "Exact Director GGUF plus role-v5 profile; chat only, no tools or filesystem access. "
+                  "Model presence is not release acceptance or capability efficacy.")
+        r.update(filesystem_scope="none (only the previewed context is sent to a loopback server)",
+                 cancellation_behavior="Aesop terminates its client; backend generation cancellation is not proven",
+                 incremental_cost_status="$0 provider spend; uses this PC's CPU/GPU", last_verified_at=now,
+                 auth_status="local_loopback", models=[DIRECTOR_MODELS[rid]])
+        if os.environ.get("AESOP_PROBE_OFFLINE") == "1":
+            r.update(state="UNVERIFIED", evidence="loopback probe skipped (offline test mode)")
+        else:
+            present = _local_models(models_url, key)
+            expected = DIRECTOR_MODELS[rid]
+            if present is None:
+                r.update(state="UNAVAILABLE", evidence=f"{endpoint} is not reachable")
+            elif expected in present:
+                r.update(state="READY_LOCAL", version=expected,
+                         evidence=f"{endpoint} lists exact configured model {expected}; inference not run")
+            else:
+                r.update(state="UNAVAILABLE", evidence=f"{endpoint} does not list exact configured model {expected}")
+        routes[rid] = r
+
     # ---- CLI lanes verified by an explicit owner-triggered live call (stored), plus local status where offered
     for rid, prov, cmdf, auth, billing_note in (
             ("cursor", "cursor", _cursor_cmd, "Cursor sign-in (cursor-agent login)",
@@ -378,6 +424,8 @@ DISPLAY = {
     "cursor": ("Cursor", "Cursor"), "antigravity": ("Antigravity", "Antigravity"),
     "copilot": ("Copilot CLI", "Copilot CLI"), "grok": ("Grok CLI", "Grok CLI"),
     "zai": ("Z.ai GLM", "Z.ai GLM"),
+    "director-lmstudio": ("Director · LM Studio", "Director"),
+    "director-ollama": ("Director · Ollama", "Director"),
     "perplexity": ("Perplexity", "Perplexity"), "firecrawl": ("Firecrawl", "Firecrawl"),
     "perplexity-orchestrator": ("Perplexity Orchestrator", "Perplexity"),
     "simulated": ("Simulated (test only)", "Simulated"),
@@ -419,9 +467,9 @@ STUDY_ROUTES = ("claude", "codex", "simulated")   # CLIs that can load a per-run
 
 def usable(route: dict, mode: str) -> bool:
     if mode == "study":  # a reference study is a read-only agent run with the R.E.A. MCP server attached
-        return route["state"] in ("READY_INCLUDED", "READY_METERED", "SIMULATED") and "agent" in route["supported_modes"] \
+        return route["state"] in READY_STATES and "agent" in route["supported_modes"] \
             and route.get("id") in STUDY_ROUTES
-    return (route["state"] in ("READY_INCLUDED", "READY_METERED", "SIMULATED")
+    return (route["state"] in READY_STATES
             and mode in route["supported_modes"])
 
 
@@ -511,6 +559,12 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
                        else ["--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep"])
         return cmd + (["-Model", model] if model else []) + [
             "-p", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config"] + permissions
+    if route_id in DIRECTOR_MODELS and mode == "chat":
+        expected = DIRECTOR_MODELS[route_id]
+        if model and model != expected:
+            raise RuntimeError(f"{route_id} is pinned to {expected}")
+        return [sys.executable, "-I", str(Path(__file__).with_name("local_director_client.py")),
+                route_id.removeprefix("director-"), expected, out_file]
     if route_id == "simulated":
         return _sim_cmd() + [mode, out_file]
     raise RuntimeError(f"route {route_id} has no in-app execution path for {mode}")
