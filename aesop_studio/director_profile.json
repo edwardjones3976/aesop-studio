@@ -14,7 +14,6 @@
   },
   "bindings": {
     "lmstudio": {
-      "artifact_path": "C:\\Users\\edwar\\.lmstudio\\models\\Director\\Director-20261102\\director-qwen3-8b-Q4_K_M-calibrated.gguf",
       "catalog_path": "Director/Director-20261102/director-qwen3-8b-Q4_K_M-calibrated.gguf",
       "size_bytes": 5027783744,
       "mtime_ns": 1793674628722665700,

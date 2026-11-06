@@ -122,15 +122,17 @@ class TestLocalDirector(unittest.TestCase):
     def test_runtime_bindings_fail_closed_on_artifact_substitution(self):
         profile = json.loads(PROFILE.read_text(encoding="utf-8"))
         with tempfile.TemporaryDirectory() as td:
-            artifact = Path(td) / "director.gguf"
+            artifact = Path(td) / "Director" / "director.gguf"
+            artifact.parent.mkdir()
             artifact.write_bytes(b"exact")
             stat = artifact.stat()
-            binding = {"artifact_path": str(artifact), "catalog_path": "Director/director.gguf",
+            binding = {"catalog_path": "Director/director.gguf",
                        "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns,
                        "sha256": profile["gguf_sha256"]}
             catalog = json.dumps([{"modelKey": "director-20261102", "path": "Director/director.gguf",
                                    "sizeBytes": stat.st_size}])
-            with mock.patch.object(providers.shutil, "which", return_value="lms.exe"), \
+            with mock.patch.dict(os.environ, {"AESOP_LMSTUDIO_MODELS_DIR": td}), \
+                    mock.patch.object(providers.shutil, "which", return_value="lms.exe"), \
                     mock.patch.object(providers, "_run", return_value=(0, catalog)):
                 self.assertTrue(providers._lmstudio_binding("director-20261102", binding)[0])
                 artifact.write_bytes(b"changed")

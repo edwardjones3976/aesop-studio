@@ -237,7 +237,8 @@ def _lmstudio_binding(model: str, binding: dict) -> tuple[bool, str]:
     except json.JSONDecodeError:
         rows = []
     row = next((x for x in rows if x.get("modelKey") == model), None)
-    path = Path(binding["artifact_path"])
+    models_dir = Path(os.environ.get("AESOP_LMSTUDIO_MODELS_DIR", Path.home() / ".lmstudio" / "models"))
+    path = models_dir.joinpath(*binding["catalog_path"].split("/"))
     try:
         stat = path.stat()
     except OSError:
