@@ -24,6 +24,7 @@ PROFILE = ROOT / "aesop_studio" / "director_profile.json"
 
 class LocalDirectorServer(BaseHTTPRequestHandler):
     seen: list[tuple[str, dict]] = []
+    served_model: str | None = None
 
     def log_message(self, *args):
         pass
@@ -43,8 +44,10 @@ class LocalDirectorServer(BaseHTTPRequestHandler):
             data = {"modelfile": "FROM C:\\\\models\\\\blobs\\\\sha256-baab9ccb424b607ad70aebdcbaeb2337a6eecd6a7e0fc9c6dc7569c72f9588bc"}
         else:
             text = "<think>private scratch</think>\nDirector answer."
-            data = ({"choices": [{"message": {"content": text}}]} if self.path == "/v1/chat/completions"
-                    else {"message": {"content": text}})
+            model = self.served_model or body["model"]
+            data = ({"model": model, "choices": [{"message": {"content": text}}]}
+                    if self.path == "/v1/chat/completions"
+                    else {"model": model, "message": {"content": text}})
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -89,10 +92,24 @@ class TestLocalDirector(unittest.TestCase):
                 self.assertEqual(body["messages"][0], {"role": "system", "content": profile["system"]})
 
     def test_model_substitution_is_refused_before_request(self):
+        before = len(LocalDirectorServer.seen)
         proc, out = self.run_client("ollama", "director:latest")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("does not match the pinned profile", proc.stderr)
         self.assertFalse(out.exists())
+        self.assertEqual(len(LocalDirectorServer.seen), before)
+
+    def test_backend_model_substitution_is_refused(self):
+        for backend, model in (("lmstudio", "director-20261102"), ("ollama", "director:20261102")):
+            with self.subTest(backend=backend):
+                LocalDirectorServer.served_model = "different-model"
+                try:
+                    proc, out = self.run_client(backend, model)
+                finally:
+                    LocalDirectorServer.served_model = None
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("backend substituted the pinned model", proc.stderr)
+                self.assertFalse(out.exists())
 
     def test_oversized_input_is_refused_before_request(self):
         before = len(LocalDirectorServer.seen)

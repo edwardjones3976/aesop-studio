@@ -55,6 +55,8 @@ def _request(backend: str, model: str, prompt: str, profile: dict, role: str) ->
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with opener.open(req, timeout=600) as response:
         data = json.loads(response.read().decode("utf-8", "replace"))
+    if data.get("model") != model:
+        raise ValueError("local Director backend substituted the pinned model")
     if backend == "lmstudio":
         text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
     else:
