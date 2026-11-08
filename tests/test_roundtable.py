@@ -1,4 +1,3 @@
-# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | BEGIN]]
 """Roundtable planning (design-ready, non-executing), lane discovery and the provider naming rule."""
 import json
 import os
@@ -216,4 +215,3 @@ class TestPlanning(Base):
 
 if __name__ == "__main__":
     unittest.main()
-# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | END]]

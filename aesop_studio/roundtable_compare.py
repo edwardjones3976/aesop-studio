@@ -1,4 +1,3 @@
-# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | BEGIN]]
 """Bounded side-by-side compare: one read-only chat turn per selected speaker (planning aid, not a live broker).
 
 Guardrails: owner live switch, sharing acknowledgement, draft-only (no replay), 2–4 speakers, chat-only routes,
@@ -171,4 +170,3 @@ def _save(store: Store, rid: str, prompt: str, started_at: float, results: list[
     data = {"status": status, "prompt_chars": len(prompt), "started_at": started_at, "required": required,
             "received": len(results), "pending": max(0, required - len(results)), "results": results, **extra}
     store.x("UPDATE roundtables SET compare=?, updated=? WHERE id=?", (json.dumps(data), time.time(), rid))
-# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | END]]

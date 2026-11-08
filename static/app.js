@@ -1,4 +1,3 @@
-// [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | BEGIN]]
 "use strict";
 // The DOM prints a skipped child (null/undefined/false) as text ("null"); drop them everywhere, as h() already does.
 for (const P of [Element.prototype, DocumentFragment.prototype]) for (const m of ["replaceChildren", "append", "prepend"]) {
@@ -3443,4 +3442,3 @@ async function renderEvidence(budgetOverride) {
 }
 
 boot();
-// [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | END]]

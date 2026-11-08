@@ -1,4 +1,3 @@
-# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | BEGIN]]
 """Loopback-only client for Aesop's exact local Director profile.
 
 The task supervisor owns timeout, cancellation, output redaction and result persistence. This client performs one
@@ -83,4 +82,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | END]]

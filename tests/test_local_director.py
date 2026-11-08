@@ -1,4 +1,3 @@
-# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | BEGIN]]
 """Exact local Director routes: pinned profile, loopback transports and Aesop route plumbing."""
 from __future__ import annotations
 
@@ -162,4 +161,3 @@ class TestLocalDirector(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | END]]

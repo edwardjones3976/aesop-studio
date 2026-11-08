@@ -1,4 +1,3 @@
-# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | BEGIN]]
 """Provider registry: capability records verified by probing official, unmodified CLIs.
 
 Routes never touch credential files; readiness comes from each CLI's own status command.
@@ -637,4 +636,3 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
     if route_id == "simulated":
         return _sim_cmd() + [mode, out_file]
     raise RuntimeError(f"route {route_id} has no in-app execution path for {mode}")
-# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | END]]

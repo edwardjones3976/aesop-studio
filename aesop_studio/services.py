@@ -1,4 +1,3 @@
-# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | BEGIN]]
 """Project workspace services: projects, chat, attachments, artifacts, research notebook, memory."""
 from __future__ import annotations
 
@@ -804,4 +803,3 @@ class Services:
         return {"project": {"id": p["id"], "name": p["name"], "root": p["root"], "provider": p["provider_default"]},
                 "current_memory": mem, "flagged": flagged, "recent_tasks": tasks,
                 "note": "Derived summaries are revisable; authoritative records win on conflict."}
-# [[OpenAI Codex | GPT-5.6-sol | 2026-11-05 | 04:23 UTC | END]]
