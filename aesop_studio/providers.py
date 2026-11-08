@@ -240,30 +240,55 @@ def _run(argv: list[str], timeout: int = 30) -> tuple[int, str]:
     return _contained(argv, timeout)
 
 
+_LMSTUDIO_DIGESTS: dict[str, tuple[tuple[int, int, int, int, int], str]] = {}
+
+
+def _lmstudio_digest(path: Path, stat: os.stat_result) -> str | None:
+    fingerprint = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    cached = _LMSTUDIO_DIGESTS.get(str(path))
+    if cached and cached[0] == fingerprint:
+        return cached[1]
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    after = path.stat()
+    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != fingerprint:
+        return None
+    value = digest.hexdigest()
+    _LMSTUDIO_DIGESTS[str(path)] = (fingerprint, value)
+    return value
+
+
 def _lmstudio_binding(model: str, binding: dict) -> tuple[bool, str]:
     exe = shutil.which("lms.exe") or shutil.which("lms")
     if not exe:
         return False, "LM Studio CLI is unavailable for artifact binding verification"
-    code, out = _run([exe, "ls", "--json"], timeout=10)
     try:
-        rows = json.loads(out) if code == 0 else []
-    except json.JSONDecodeError:
-        rows = []
-    row = next((x for x in rows if x.get("modelKey") == model), None)
+        code, out = _run([exe, "ps", "--json"], timeout=10)
+        loaded = json.loads(out) if code == 0 else []
+        instance = next((x for x in loaded if isinstance(x, dict) and x.get("identifier") == model), None)
+        code, out = _run([exe, "ls", "--json"], timeout=10)
+        catalog = json.loads(out) if code == 0 else []
+        row = next((x for x in catalog
+                    if isinstance(x, dict) and instance and x.get("path") == instance.get("path")), None)
+    except (json.JSONDecodeError, TypeError):
+        instance, row = None, None
     models_dir = Path(os.environ.get("AESOP_LMSTUDIO_MODELS_DIR", Path.home() / ".lmstudio" / "models"))
     path = models_dir.joinpath(*binding["catalog_path"].split("/"))
     try:
         stat = path.stat()
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
+        digest = _lmstudio_digest(path, stat)
     except OSError:
         stat, digest = None, None
-    exact = bool(row and stat and row.get("path") == binding["catalog_path"]
-                 and int(row.get("sizeBytes") or -1) == binding["size_bytes"]
-                 and stat.st_size == binding["size_bytes"] and digest.hexdigest() == binding["sha256"])
-    return (exact, (f"LM Studio catalog binds {model} to recorded GGUF {binding['sha256'][:12]}..."
+    try:
+        exact = bool(instance and row and stat and instance.get("path") == binding["catalog_path"]
+                     and row.get("path") == binding["catalog_path"]
+                     and int(row.get("sizeBytes") or -1) == binding["size_bytes"]
+                     and stat.st_size == binding["size_bytes"] and digest == binding["sha256"])
+    except (TypeError, ValueError):
+        exact = False
+    return (exact, (f"LM Studio loaded identifier {model} binds to recorded GGUF {binding['sha256'][:12]}..."
                     if exact else "LM Studio model binding differs from the recorded GGUF receipt"))
 
 

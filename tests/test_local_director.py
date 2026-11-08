@@ -157,12 +157,21 @@ class TestLocalDirector(unittest.TestCase):
             binding = {"catalog_path": "Director/director.gguf",
                        "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns,
                        "sha256": hashlib.sha256(b"exact").hexdigest()}
-            catalog = json.dumps([{"modelKey": "director-20261102", "path": "Director/director.gguf",
+            loaded = json.dumps([{"identifier": "director-20261102", "path": "Director/director.gguf"}])
+            catalog = json.dumps([{"modelKey": "unrelated-catalog-key", "path": "Director/director.gguf",
                                    "sizeBytes": stat.st_size}])
+
+            def inventory(argv, timeout=30):
+                return (0, loaded if argv[1] == "ps" else catalog)
+
             with mock.patch.dict(os.environ, {"AESOP_LMSTUDIO_MODELS_DIR": td}), \
                     mock.patch.object(providers.shutil, "which", return_value="lms.exe"), \
-                    mock.patch.object(providers, "_run", return_value=(0, catalog)):
+                    mock.patch.object(providers, "_run", side_effect=inventory):
+                providers._LMSTUDIO_DIGESTS.clear()
                 self.assertTrue(providers._lmstudio_binding("director-20261102", binding)[0])
+                loaded = json.dumps([{"identifier": "different-api-id", "path": "Director/director.gguf"}])
+                self.assertFalse(providers._lmstudio_binding("director-20261102", binding)[0])
+                loaded = json.dumps([{"identifier": "director-20261102", "path": "Director/director.gguf"}])
                 os.utime(artifact, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
                 self.assertTrue(providers._lmstudio_binding("director-20261102", binding)[0])
                 artifact.write_bytes(b"other")
@@ -171,6 +180,38 @@ class TestLocalDirector(unittest.TestCase):
             self.assertTrue(providers._ollama_binding("director:20261102", profile["bindings"]["ollama"])[0])
             bad = {"blob_sha256": "0" * 64}
             self.assertFalse(providers._ollama_binding("director:20261102", bad)[0])
+
+    def test_lmstudio_reuses_digest_only_while_file_identity_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as td:
+            artifact = Path(td) / "Director" / "director.gguf"
+            artifact.parent.mkdir()
+            artifact.write_bytes(b"exact")
+            stat = artifact.stat()
+            binding = {"catalog_path": "Director/director.gguf", "size_bytes": stat.st_size,
+                       "sha256": hashlib.sha256(b"exact").hexdigest()}
+            inventories = {"ps": [{"identifier": "director-20261102", "path": binding["catalog_path"]}],
+                           "ls": [{"modelKey": "catalog-key", "path": binding["catalog_path"],
+                                   "sizeBytes": stat.st_size}]}
+
+            def inventory(argv, timeout=30):
+                return 0, json.dumps(inventories[argv[1]])
+
+            real_open = Path.open
+            reads = 0
+
+            def counted_open(path, *args, **kwargs):
+                nonlocal reads
+                if path == artifact:
+                    reads += 1
+                return real_open(path, *args, **kwargs)
+            with mock.patch.dict(os.environ, {"AESOP_LMSTUDIO_MODELS_DIR": td}), \
+                    mock.patch.object(providers.shutil, "which", return_value="lms.exe"), \
+                    mock.patch.object(providers, "_run", side_effect=inventory), \
+                    mock.patch.object(Path, "open", counted_open):
+                providers._LMSTUDIO_DIGESTS.clear()
+                self.assertTrue(providers._lmstudio_binding("director-20261102", binding)[0])
+                self.assertTrue(providers._lmstudio_binding("director-20261102", binding)[0])
+                self.assertEqual(reads, 1)
 
 
 if __name__ == "__main__":
