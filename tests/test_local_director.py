@@ -24,6 +24,7 @@ PROFILE = ROOT / "aesop_studio" / "director_profile.json"
 class LocalDirectorServer(BaseHTTPRequestHandler):
     seen: list[tuple[str, dict]] = []
     served_model: str | None = None
+    served_text: str | None = None
 
     def log_message(self, *args):
         pass
@@ -42,7 +43,7 @@ class LocalDirectorServer(BaseHTTPRequestHandler):
         if self.path == "/api/show":
             data = {"modelfile": "FROM C:\\\\models\\\\blobs\\\\sha256-baab9ccb424b607ad70aebdcbaeb2337a6eecd6a7e0fc9c6dc7569c72f9588bc"}
         else:
-            text = "<think>private scratch</think>\nDirector answer."
+            text = self.served_text or "<think>private scratch</think>\nDirector answer."
             model = self.served_model or body["model"]
             data = ({"model": model, "choices": [{"message": {"content": text}}]}
                     if self.path == "/v1/chat/completions"
@@ -118,6 +119,16 @@ class TestLocalDirector(unittest.TestCase):
         self.assertFalse(out.exists())
         self.assertEqual(len(LocalDirectorServer.seen), before)
 
+    def test_unterminated_think_block_is_not_returned(self):
+        LocalDirectorServer.served_text = "<think>private scratch without a closing tag"
+        try:
+            proc, out = self.run_client("ollama", "director:20261102")
+        finally:
+            LocalDirectorServer.served_text = None
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("returned no text", proc.stderr)
+        self.assertFalse(out.exists())
+
     def test_registry_routes_and_loopback_inventory(self):
         self.assertEqual(providers._local_models(f"http://127.0.0.1:{self.port}/v1/models", "data"),
                          ["director-20261102"])
@@ -128,7 +139,8 @@ class TestLocalDirector(unittest.TestCase):
                 route = {"state": "READY_LOCAL", "supported_modes": ["chat"]}
                 self.assertTrue(providers.usable(route, "chat"))
                 self.assertFalse(providers.usable(route, "agent"))
-                argv = providers.build_argv(rid, "chat", "C:/project", "out", model=model)
+                with mock.patch.object(providers, "_director_binding", return_value=(True, "bound")):
+                    argv = providers.build_argv(rid, "chat", "C:/project", "out", model=model)
                 self.assertEqual(argv[-3:], [rid.removeprefix("director-"), model, "out"])
                 with self.assertRaises(RuntimeError):
                     providers.build_argv(rid, "chat", "C:/project", "out", model="wrong")
@@ -144,14 +156,16 @@ class TestLocalDirector(unittest.TestCase):
             stat = artifact.stat()
             binding = {"catalog_path": "Director/director.gguf",
                        "size_bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns,
-                       "sha256": profile["gguf_sha256"]}
+                       "sha256": hashlib.sha256(b"exact").hexdigest()}
             catalog = json.dumps([{"modelKey": "director-20261102", "path": "Director/director.gguf",
                                    "sizeBytes": stat.st_size}])
             with mock.patch.dict(os.environ, {"AESOP_LMSTUDIO_MODELS_DIR": td}), \
                     mock.patch.object(providers.shutil, "which", return_value="lms.exe"), \
                     mock.patch.object(providers, "_run", return_value=(0, catalog)):
                 self.assertTrue(providers._lmstudio_binding("director-20261102", binding)[0])
-                artifact.write_bytes(b"changed")
+                os.utime(artifact, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+                self.assertTrue(providers._lmstudio_binding("director-20261102", binding)[0])
+                artifact.write_bytes(b"other")
                 self.assertFalse(providers._lmstudio_binding("director-20261102", binding)[0])
         with mock.patch.dict(os.environ, {"AESOP_OLLAMA_PORT": str(self.port)}):
             self.assertTrue(providers._ollama_binding("director:20261102", profile["bindings"]["ollama"])[0])

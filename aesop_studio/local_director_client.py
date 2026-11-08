@@ -17,6 +17,11 @@ HERE = Path(__file__).resolve().parent
 PROFILE_PATH = HERE / "director_profile.json"
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _profile() -> tuple[dict, str]:
     profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
     role = profile["system"]
@@ -51,7 +56,7 @@ def _request(backend: str, model: str, prompt: str, profile: dict, role: str) ->
     else:
         raise ValueError("unknown local Director backend")
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     with opener.open(req, timeout=600) as response:
         data = json.loads(response.read().decode("utf-8", "replace"))
     if data.get("model") != model:
@@ -60,11 +65,17 @@ def _request(backend: str, model: str, prompt: str, profile: dict, role: str) ->
         text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
     else:
         text = (data.get("message") or {}).get("content") or ""
-    return re.sub(r"<think>.*?</think>\s*", "", text, flags=re.S).strip()
+    return re.sub(r"<think>.*?(?:</think>\s*|\Z)", "", text, flags=re.S).strip()
+
+
+def _configure_utf8_stdio() -> None:
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
 
 
 def main() -> int:
     try:
+        _configure_utf8_stdio()
         backend, model, out_file = sys.argv[1:4]
         profile, role = _profile()
         if model != profile["models"].get(backend):

@@ -9,6 +9,7 @@ ok, because verify_live() wrote the record but never refreshed the blob (fixed i
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -16,9 +17,27 @@ from aesop_studio import providers
 from aesop_studio.store import Store
 
 
+def default_data_dir() -> str:
+    return os.environ.get("AESOP_DATA") or str(Path(os.environ.get("LOCALAPPDATA", ".")) / "AesopStudio")
+
+
+def expected_verify_fields(rec: dict, now: float | None = None) -> dict:
+    now = time.time() if now is None else now
+    fresh = now - rec.get("at", 0) < providers.VERIFY_MAX_AGE_S
+    if fresh and rec.get("ok"):
+        evidence = (f"live verification {time.strftime('%Y-%m-%d %H:%M', time.localtime(rec['at']))}: "
+                    f"{rec.get('detail', 'ok')}")
+        state = "READY_INCLUDED"
+    elif fresh:
+        state, evidence = "UNAVAILABLE", f"last live verification failed: {rec.get('detail', '')}"[:300]
+    else:
+        state, evidence = "UNVERIFIED", None
+    return {"state": state, "evidence": evidence, "last_verified_at": rec.get("at")}
+
+
 def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    data_dir = args[0] if args else os.environ.get("AESOP_DATA_DIR") or str(Path.home() / ".aesop-studio")
+    data_dir = args[0] if args else default_data_dir()
     if not Path(data_dir).is_dir():
         print(f"no data dir at {data_dir}")
         return 2
@@ -32,9 +51,10 @@ def main() -> int:
             continue
         rec = json.loads(rec_row["v"])
         cached = blob[rid]
+        expected = expected_verify_fields(rec)
         for key in ("state", "evidence", "last_verified_at"):
-            if key in rec and rec.get(key) != cached.get(key):
-                drift.append((rid, key, cached.get(key), rec.get(key)))
+            if expected.get(key) is not None and expected.get(key) != cached.get(key):
+                drift.append((rid, key, cached.get(key), expected.get(key)))
     for rid, key, c, r in drift:
         print(f"DRIFT {rid:<24} {key:<17} blob={str(c)[:50]!r}  record={str(r)[:50]!r}")
     if not drift:

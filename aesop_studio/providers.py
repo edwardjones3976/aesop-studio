@@ -4,6 +4,7 @@ Routes never touch credential files; readiness comes from each CLI's own status 
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import os
@@ -169,18 +170,31 @@ def validate_director_prompt(route_id: str, prompt: str) -> None:
     budget = profile["context_tokens"] - profile["max_output_tokens"] - profile["input_overhead_tokens"]
     used = len(profile["system"].encode()) + len(prompt.encode())
     if used > budget:
-        raise RuntimeError(f"local Director context has a {used:,}-token conservative upper bound; limit is "
-                           f"{budget:,} after "
-                           f"reserving {profile['max_output_tokens']:,} output tokens")
+        raise ValueError(f"local Director context has a {used:,}-token conservative upper bound; limit is "
+                         f"{budget:,} after "
+                         f"reserving {profile['max_output_tokens']:,} output tokens")
+
+
+def _loopback_opener():
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
 
 
 def _local_models(url: str, key: str) -> list[str] | None:
     """Return loopback model ids, or None when the local server is unavailable."""
+    import urllib.error
     import urllib.request
     try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(url, timeout=3) as response:
+        with _loopback_opener().open(url, timeout=3) as response:
             data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        return None
     except Exception:  # noqa: BLE001 - absence is route status, never an app failure
         return None
     rows = data.get(key, [])
@@ -240,31 +254,67 @@ def _lmstudio_binding(model: str, binding: dict) -> tuple[bool, str]:
     path = models_dir.joinpath(*binding["catalog_path"].split("/"))
     try:
         stat = path.stat()
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
     except OSError:
-        stat = None
+        stat, digest = None, None
     exact = bool(row and stat and row.get("path") == binding["catalog_path"]
                  and int(row.get("sizeBytes") or -1) == binding["size_bytes"]
-                 and stat.st_size == binding["size_bytes"] and stat.st_mtime_ns == binding["mtime_ns"])
+                 and stat.st_size == binding["size_bytes"] and digest.hexdigest() == binding["sha256"])
     return (exact, (f"LM Studio catalog binds {model} to recorded GGUF {binding['sha256'][:12]}..."
                     if exact else "LM Studio model binding differs from the recorded GGUF receipt"))
 
 
 def _ollama_binding(model: str, binding: dict) -> tuple[bool, str]:
+    import urllib.error
     import urllib.request
     port = int(os.environ.get("AESOP_OLLAMA_PORT", 11434))
     req = urllib.request.Request(f"http://127.0.0.1:{port}/api/show",
                                  data=json.dumps({"model": model}).encode(),
                                  headers={"Content-Type": "application/json"})
     try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(req, timeout=3) as response:
+        with _loopback_opener().open(req, timeout=3) as response:
             data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        return False, "Ollama model binding could not be read"
     except Exception:  # noqa: BLE001 - absence is route status, never an app failure
         return False, "Ollama model binding could not be read"
     digest = binding["blob_sha256"]
-    exact = f"sha256-{digest}" in (data.get("modelfile") or "")
+    exact = _ollama_from_digest(data.get("modelfile") or "", digest)
     return (exact, (f"Ollama manifest binds {model} to GGUF blob {digest[:12]}..."
                     if exact else "Ollama manifest does not bind the configured model to the recorded GGUF blob"))
+
+
+def _ollama_from_digest(modelfile: str, digest: str) -> bool:
+    for line in modelfile.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].upper() == "FROM":
+            source = parts[1].strip().strip('"').replace("\\", "/").rsplit("/", 1)[-1]
+            return source == f"sha256-{digest}"
+    return False
+
+
+def _director_binding(route_id: str, model: str) -> tuple[bool, str]:
+    profile = director_profile()
+    backend = route_id.removeprefix("director-")
+    if route_id not in director_models(profile):
+        return False, f"unknown local Director route {route_id}"
+    binding = profile["bindings"][backend]
+    return (_lmstudio_binding(model, binding) if backend == "lmstudio" else _ollama_binding(model, binding))
+
+
+def _director_endpoints() -> tuple[tuple[str, str, str, str], ...]:
+    lmstudio = int(os.environ.get("AESOP_LMSTUDIO_PORT", 1234))
+    ollama = int(os.environ.get("AESOP_OLLAMA_PORT", 11434))
+    if not all(1 <= port <= 65535 for port in (lmstudio, ollama)):
+        raise ValueError("local Director port must be between 1 and 65535")
+    return (("director-lmstudio", f"LM Studio 127.0.0.1:{lmstudio}",
+             f"http://127.0.0.1:{lmstudio}/v1/models", "data"),
+            ("director-ollama", f"Ollama 127.0.0.1:{ollama}",
+             f"http://127.0.0.1:{ollama}/api/tags", "models"))
 
 
 def _base(provider, route_type, endpoint, modes, auth_method, billing_basis, limitations):
@@ -370,9 +420,7 @@ def probe(store=None) -> dict[str, dict]:
     # verdict; every actual response still runs through the ordinary Aesop task supervision and evidence path.
     profile = director_profile()
     configured_models = director_models(profile)
-    for rid, endpoint, models_url, key in (
-            ("director-lmstudio", "LM Studio 127.0.0.1:1234", "http://127.0.0.1:1234/v1/models", "data"),
-            ("director-ollama", "Ollama 127.0.0.1:11434", "http://127.0.0.1:11434/api/tags", "models")):
+    for rid, endpoint, models_url, key in _director_endpoints():
         r = _base("local", "local_model", endpoint, ["chat"], "none (loopback)", "local",
                   "Exact Director GGUF plus role-v5 profile; chat only, no tools or filesystem access. "
                   "Model presence is not release acceptance or capability efficacy.")
@@ -388,9 +436,7 @@ def probe(store=None) -> dict[str, dict]:
             if present is None:
                 r.update(state="UNAVAILABLE", evidence=f"{endpoint} is not reachable")
             elif expected in present:
-                backend = rid.removeprefix("director-")
-                bound, evidence = (_lmstudio_binding(expected, profile["bindings"][backend]) if backend == "lmstudio"
-                                   else _ollama_binding(expected, profile["bindings"][backend]))
+                bound, evidence = _director_binding(rid, expected)
                 r.update(state="READY_LOCAL" if bound else "UNAVAILABLE", version=expected, evidence=evidence)
             else:
                 r.update(state="UNAVAILABLE", evidence=f"{endpoint} does not list exact configured model {expected}")
@@ -631,6 +677,9 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
         expected = configured_models[route_id]
         if model and model != expected:
             raise RuntimeError(f"{route_id} is pinned to {expected}")
+        bound, evidence = _director_binding(route_id, expected)
+        if not bound:
+            raise RuntimeError(evidence)
         return [sys.executable, "-I", str(Path(__file__).with_name("local_director_client.py")),
                 route_id.removeprefix("director-"), expected, out_file]
     if route_id == "simulated":
