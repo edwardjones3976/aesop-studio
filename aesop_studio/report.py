@@ -30,7 +30,7 @@ def esc(x) -> str:
 
 
 def pill(s: str) -> str:
-    cls = "ok" if s.startswith("PASS") or s in ("READY_INCLUDED", "COMPLETED") else \
+    cls = "ok" if s.startswith("PASS") or s in ("READY_INCLUDED", "READY_LOCAL", "COMPLETED") else \
           "bad" if s.startswith(("FAIL", "BLOCK")) else "warn"
     return f'<span class="pill {cls}">{esc(s)}</span>'
 

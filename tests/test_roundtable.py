@@ -166,6 +166,52 @@ class TestPlanning(Base):
         self.assertEqual(len(cmp["results"]), 2)
         self.assertTrue(all(r["state"] == "COMPLETED" and "[simulated chat]" in r["text"] for r in cmp["results"]))
 
+    def test_compare_saves_full_replies_as_they_arrive_and_marks_failures_partial(self):
+        import threading as _threading
+        import time as _time
+
+        rec = self.draft(roster=["a", "b", "c"])
+        speakers = [fake_lane(x, route_id=x) for x in "abc"]
+        roundtable_compare._save(self.store, rec["id"], "prompt", _time.time(), [], 3, "RUNNING")
+        release = _threading.Event()
+        full = "reply-" + "x" * 9000
+
+        class FakeSupervisor:
+            def create(self, _project, route, _prompt, **_kwargs):
+                return f"task-{route}"
+
+        def wait(_sup, tid, _timeout):
+            if tid != "task-a":
+                release.wait(2)
+            if tid == "task-c":
+                raise RuntimeError("broken checkpoint")
+            state = {"task-a": "COMPLETED", "task-b": "TIMEOUT", "task-c": "FAILED"}[tid]
+            return {"id": tid, "state": state, "checkpoint": json.dumps({"result": full if tid == "task-a" else ""}),
+                    "error": None if state == "COMPLETED" else ("comparison deadline expired" if state == "TIMEOUT" else "provider failed")}
+
+        with mock.patch.object(roundtable_compare, "_wait_terminal", wait):
+            worker = _threading.Thread(target=roundtable_compare._run,
+                                       args=(self.store, FakeSupervisor(), self.svc, rec["id"], "prompt", speakers))
+            worker.start()
+            end = _time.time() + 2
+            while _time.time() < end:
+                current = roundtable.get(self.store, rec["id"])["compare"]
+                if current.get("received") == 1:
+                    break
+                _time.sleep(0.01)
+            self.assertEqual(current["status"], "RUNNING")
+            self.assertEqual((current["received"], current["pending"]), (1, 2))
+            self.assertEqual(current["results"][0]["text"], full)
+            self.assertTrue(worker.is_alive(), "comparison finalized before required replies settled")
+            release.set()
+            worker.join(2)
+
+        final = roundtable.get(self.store, rec["id"])["compare"]
+        self.assertEqual(final["status"], "PARTIAL")
+        self.assertEqual((final["received"], final["pending"]), (3, 0))
+        self.assertEqual({r["state"] for r in final["results"]}, {"COMPLETED", "TIMEOUT", "FAILED"})
+        self.assertTrue(any("reply collection failed" in (r["error"] or "") for r in final["results"]))
+
 
 if __name__ == "__main__":
     unittest.main()

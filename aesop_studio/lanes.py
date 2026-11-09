@@ -19,8 +19,8 @@ from .store import Store
 
 ADMINS = ("openai", "claude", "cursor")  # documented administrator identities (Codex, Claude Code, Cursor)
 # Owner naming rule: each family is titled by its code-based product (OpenAI/ChatGPT/Codex -> "Codex").
-DOCUMENTED_EXAMPLE = ["Codex", "Claude Code", "Cursor", "Grok CLI", "Antigravity", "Perplexity", "Firecrawl",
-                      "Copilot CLI", "Z.ai GLM Coding"]
+DOCUMENTED_EXAMPLE = ["Codex", "Claude Code", "Cursor", "Director (local)", "Grok CLI", "Antigravity",
+                      "Perplexity", "Firecrawl", "Copilot CLI", "Z.ai GLM Coding"]
 
 _HOME = Path.home()
 _LOCAL = Path(os.environ.get("LOCALAPPDATA", _HOME / "AppData" / "Local"))
@@ -45,6 +45,8 @@ CATALOG = [
      "GitHub Copilot premium-request quota"),
     ("zai", "Z.ai GLM Coding", "speaker", ["claude-zai"], [_HOME / ".local" / "bin" / "claude-zai.cmd"], ["zai"],
      "Z.ai GLM Coding Plan credits (owner-confirmed paid plan)"),
+    ("director-local", "Director (local)", "speaker", ["lms", "ollama"], [],
+     ["director-lmstudio", "director-ollama"], "$0 provider spend; local CPU/GPU"),
 ]
 _EXTS = ("", ".exe", ".cmd", ".bat", ".ps1")
 
@@ -97,7 +99,7 @@ def discover(store: Store) -> dict:
         path = _find(launchers, extra)
         own = [r for r in route_ids if r in routes]
         claimed_routes.update(own)
-        verified = [r for r in own if routes[r]["state"] in ("READY_INCLUDED", "READY_METERED")]
+        verified = [r for r in own if routes[r]["state"] in providers.READY_STATES]
         reasons = []
         if verified:
             readiness, conv = "VERIFIED_READY", "in_app_verified"
@@ -114,7 +116,9 @@ def discover(store: Store) -> dict:
         metered_only = verified and all(routes[r]["billing_basis"] == "metered" for r in verified)
         if metered_only and not funded:
             reasons.append("Only a metered route is ready and no spend envelope is active.")
-        cost = ("plan quota (no $ visibility)" if any(routes[r]["billing_basis"] == "subscription_included"
+        cost = ("$0 provider spend; local CPU/GPU" if verified and all(routes[r]["billing_basis"] == "local"
+                                                                       for r in verified)
+                else "plan quota (no $ visibility)" if any(routes[r]["billing_basis"] == "subscription_included"
                                                       for r in verified)
                 else "metered per token, tracked in the ledger" if verified else "unknown / not tracked")
         lanes.append({
@@ -132,7 +136,7 @@ def discover(store: Store) -> dict:
     for rid, r in routes.items():
         if rid in claimed_routes:
             continue
-        ready = r["state"] in ("READY_INCLUDED", "READY_METERED", "SIMULATED")
+        ready = r["state"] in providers.READY_STATES
         lanes.append({"id": f"route:{rid}", "name": r.get("display_name") or rid, "lane_class": "speaker",
                       "detected": True, "detection": "Studio route registry",
                       "readiness": "VERIFIED_READY" if ready else r["state"], "route_type": r["route_type"],
@@ -156,7 +160,8 @@ def discover(store: Store) -> dict:
 def _route_type(cls, verified, routes) -> str:
     if not verified:
         return {"research": "research tool", "review": "review tool"}.get(cls, "official CLI (not integrated)")
-    kinds = sorted({"separately billed API" if routes[r]["billing_basis"] == "metered"
+    kinds = sorted({"local model" if routes[r]["billing_basis"] == "local"
+                    else "separately billed API" if routes[r]["billing_basis"] == "metered"
                     else "official CLI · plan quota"
                     for r in verified})
     return " + ".join(kinds)

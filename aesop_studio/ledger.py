@@ -120,6 +120,16 @@ def reserve(store: Store, provider: str, route: str, billing_basis: str, amount_
                 "price_source,created,purpose) VALUES(?,?,?,?,?,0,0,'reserved',?,?,'included')",
                 (lid, provider, route, billing_basis, task_ref, price_source or "subscription quota", time.time()))
         return lid
+    if billing_basis == "local":
+        if provider != "local":
+            raise BudgetError("local billing basis is reserved for the local provider")
+        if amount_usd not in (None, 0):
+            raise BudgetError("local dispatch must reserve zero provider spend")
+        lid = new_id("led")
+        store.x("INSERT INTO ledger(id,provider,route,billing_basis,task_ref,reservation_usd,settled_usd,status,"
+                "price_source,created,purpose) VALUES(?,?,?,?,?,0,0,'reserved',?,?,'local')",
+                (lid, provider, route, billing_basis, task_ref, price_source or "local compute", time.time()))
+        return lid
     if billing_basis != "metered":
         raise BudgetError(f"unknown billing basis {billing_basis!r}")
     if provider not in ALLOWED_BILLERS:

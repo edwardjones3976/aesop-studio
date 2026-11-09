@@ -35,17 +35,18 @@ const tone = (s) => {
   s = String(s);
   if (/^proposed$/i.test(s)) return "info";
   if (/DISABLED|unread/i.test(s)) return "warn";
-  return /COMPLETED|READY_INCLUDED|READY_METERED|generated|cited|read|saved|current|ok/i.test(s) ? "ok"
+  return /COMPLETED|READY_INCLUDED|READY_LOCAL|READY_METERED|generated|cited|read|saved|current|ok/i.test(s) ? "ok"
     : /FAILED|BLOCKED|UNAVAILABLE|failed|unavailable|unsupported|malformed|too_large|encrypted|conflict|bad/i.test(s) ? "bad"
     : /RUNNING|STARTING|RESERVED|submitted|AUTH|HANDOFF|DISABLED|UNKNOWN|INTERRUPTED|stale|unread|SIMULATED/i.test(s) ? "warn" : "";
 };
 const statePill = (s) => h("span", { class: "pill " + tone(s) }, s);
 const DONE = ["COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED", "BLOCKED_OWNER", "EFFECT_UNKNOWN"];
-const USABLE = ["READY_INCLUDED", "SIMULATED", "READY_METERED"];
+const USABLE = ["READY_INCLUDED", "READY_LOCAL", "SIMULATED", "READY_METERED"];
 const usableRoutes = () => Object.entries(S.routes).filter(([, r]) => USABLE.includes(r.state));
 const isMetered = (r) => !!r && /METERED/.test(r.state || "");
 // The access route is always shown next to the provider so billing is never ambiguous.
 const access = (state) => state === "READY_INCLUDED" ? "official CLI · plan quota"
+  : state === "READY_LOCAL" ? "local model · $0 provider spend"
   : /^READY_METERED/.test(state || "") ? "separately billed API"
   : state === "HANDOFF_ONLY" ? "native-site handoff"
   : state === "SIMULATED" ? "simulated test route" : "unavailable";
@@ -490,7 +491,8 @@ function rtCompareRender() {
   if (cmp && cmp.status === "BLOCKED" && (cmp.block_reasons || []).length) {
     kids.push(h("div", { class: "note bad" }, icon("alert"), h("ul", {}, ...cmp.block_reasons.map((r) => h("li", {}, r)))));
   } else if (cmp) {
-    kids.push(h("p", { class: "faint" }, `Status: ${cmp.status}${cmp.ended_at ? " · " + fmtTime(cmp.ended_at) : ""}`));
+    const counts = cmp.required != null ? ` · ${cmp.received || 0} of ${cmp.required} replies · ${cmp.pending || 0} pending` : "";
+    kids.push(h("p", { class: "faint" }, `Status: ${cmp.status}${counts}${cmp.ended_at ? " · " + fmtTime(cmp.ended_at) : ""}`));
     if (cmp.error) kids.push(h("p", { class: "muted" }, cmp.error));
     for (const r of cmp.results || []) {
       kids.push(h("div", { class: "rt-answer" },
@@ -532,6 +534,8 @@ async function rtComparePoll() {
     const st = rtCompareData()?.status;
     if (st === "RUNNING") s.compareTimer = setTimeout(() => rtComparePoll(), 1500);
     else if (st === "COMPLETED") rtSay("Side-by-side compare finished.", "ok");
+    else if (st === "PARTIAL") rtSay("Compare finished with partial results; timed-out or failed replies are labeled below.");
+    else if (st) rtSay(`Compare ${String(st).toLowerCase()}.`, "bad");
   } catch {
     if (RT === s) s.compareTimer = setTimeout(() => rtComparePoll(), 3000);
   }
@@ -597,7 +601,7 @@ async function rtSetLive(on, auto) {
 function rtStale() {
   if (!RT) return;
   if (RT.pre && !RT.preStale) { RT.preStale = true; rtSideRender(); rtStartRender(); }
-  if (rtCompareData() && rtCompareData().status === "COMPLETED") { RT.compare = null; rtCompareRender(); }
+  if (rtCompareData() && ["COMPLETED", "PARTIAL", "FAILED"].includes(rtCompareData().status)) { RT.compare = null; rtCompareRender(); }
 }
 // Buttons that start a request are disabled until it settles, so double clicks never send twice.
 function abtn(label, fn, cls = "", ico) {

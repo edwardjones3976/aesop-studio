@@ -4,6 +4,7 @@ Routes never touch credential files; readiness comes from each CLI's own status 
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import os
@@ -15,8 +16,9 @@ from pathlib import Path
 
 from .store import Store
 
-STATES = ("UNVERIFIED", "AUTH_REQUIRED", "READY_INCLUDED", "READY_METERED", "READY_METERED_DISABLED",
+STATES = ("UNVERIFIED", "AUTH_REQUIRED", "READY_INCLUDED", "READY_LOCAL", "READY_METERED", "READY_METERED_DISABLED",
           "HANDOFF_ONLY", "UNAVAILABLE", "BLOCKED_POLICY", "SIMULATED")
+READY_STATES = ("READY_INCLUDED", "READY_LOCAL", "READY_METERED", "SIMULATED")
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # Variables that would redirect a CLI from subscription sign-in to a separately billed route.
 BILLING_ENV = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
@@ -145,6 +147,60 @@ def _sim_cmd() -> list[str]:
     return [sys.executable, "-I", str(Path(__file__).with_name("simulated_provider.py"))]
 
 
+DIRECTOR_PROFILE_PATH = Path(__file__).with_name("director_profile.json")
+
+
+def director_profile() -> dict:
+    profile = json.loads(DIRECTOR_PROFILE_PATH.read_text(encoding="utf-8"))
+    import hashlib
+    if hashlib.sha256(profile["system"].encode()).hexdigest() != profile["role_sha256"]:
+        raise RuntimeError("Director role profile digest mismatch")
+    return profile
+
+
+def director_models(profile: dict | None = None) -> dict[str, str]:
+    models = (profile or director_profile())["models"]
+    return {f"director-{backend}": model for backend, model in models.items()}
+
+
+def validate_director_prompt(route_id: str, prompt: str) -> None:
+    profile = director_profile()
+    if route_id not in director_models(profile):
+        return
+    budget = profile["context_tokens"] - profile["max_output_tokens"] - profile["input_overhead_tokens"]
+    used = len(profile["system"].encode()) + len(prompt.encode())
+    if used > budget:
+        raise ValueError(f"local Director context has a {used:,}-token conservative upper bound; limit is "
+                         f"{budget:,} after "
+                         f"reserving {profile['max_output_tokens']:,} output tokens")
+
+
+def _loopback_opener():
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+
+
+def _local_models(url: str, key: str) -> list[str] | None:
+    """Return loopback model ids, or None when the local server is unavailable."""
+    import urllib.error
+    import urllib.request
+    try:
+        with _loopback_opener().open(url, timeout=3) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        return None
+    except Exception:  # noqa: BLE001 - absence is route status, never an app failure
+        return None
+    rows = data.get(key, [])
+    return [str(row.get("id") or row.get("name")) for row in rows if row.get("id") or row.get("name")]
+
+
 MAX_PROBE_OUTPUT = 64 * 1024
 
 
@@ -182,6 +238,108 @@ def _contained(argv: list[str], timeout: int, cwd: str | None = None, input_text
 
 def _run(argv: list[str], timeout: int = 30) -> tuple[int, str]:
     return _contained(argv, timeout)
+
+
+_LMSTUDIO_DIGESTS: dict[str, tuple[tuple[int, int, int, int, int], str]] = {}
+
+
+def _lmstudio_digest(path: Path, stat: os.stat_result) -> str | None:
+    fingerprint = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    cached = _LMSTUDIO_DIGESTS.get(str(path))
+    if cached and cached[0] == fingerprint:
+        return cached[1]
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    after = path.stat()
+    if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) != fingerprint:
+        return None
+    value = digest.hexdigest()
+    _LMSTUDIO_DIGESTS[str(path)] = (fingerprint, value)
+    return value
+
+
+def _lmstudio_binding(model: str, binding: dict) -> tuple[bool, str]:
+    exe = shutil.which("lms.exe") or shutil.which("lms")
+    if not exe:
+        return False, "LM Studio CLI is unavailable for artifact binding verification"
+    try:
+        code, out = _run([exe, "ps", "--json"], timeout=10)
+        loaded = json.loads(out) if code == 0 else []
+        instance = next((x for x in loaded if isinstance(x, dict) and x.get("identifier") == model), None)
+        code, out = _run([exe, "ls", "--json"], timeout=10)
+        catalog = json.loads(out) if code == 0 else []
+        row = next((x for x in catalog
+                    if isinstance(x, dict) and instance and x.get("path") == instance.get("path")), None)
+    except (json.JSONDecodeError, TypeError):
+        instance, row = None, None
+    models_dir = Path(os.environ.get("AESOP_LMSTUDIO_MODELS_DIR", Path.home() / ".lmstudio" / "models"))
+    path = models_dir.joinpath(*binding["catalog_path"].split("/"))
+    try:
+        stat = path.stat()
+        digest = _lmstudio_digest(path, stat)
+    except OSError:
+        stat, digest = None, None
+    try:
+        exact = bool(instance and row and stat and instance.get("path") == binding["catalog_path"]
+                     and row.get("path") == binding["catalog_path"]
+                     and int(row.get("sizeBytes") or -1) == binding["size_bytes"]
+                     and stat.st_size == binding["size_bytes"] and digest == binding["sha256"])
+    except (TypeError, ValueError):
+        exact = False
+    return (exact, (f"LM Studio loaded identifier {model} binds to recorded GGUF {binding['sha256'][:12]}..."
+                    if exact else "LM Studio model binding differs from the recorded GGUF receipt"))
+
+
+def _ollama_binding(model: str, binding: dict) -> tuple[bool, str]:
+    import urllib.error
+    import urllib.request
+    port = int(os.environ.get("AESOP_OLLAMA_PORT", 11434))
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/show",
+                                 data=json.dumps({"model": model}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with _loopback_opener().open(req, timeout=3) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        return False, "Ollama model binding could not be read"
+    except Exception:  # noqa: BLE001 - absence is route status, never an app failure
+        return False, "Ollama model binding could not be read"
+    digest = binding["blob_sha256"]
+    exact = _ollama_from_digest(data.get("modelfile") or "", digest)
+    return (exact, (f"Ollama manifest binds {model} to GGUF blob {digest[:12]}..."
+                    if exact else "Ollama manifest does not bind the configured model to the recorded GGUF blob"))
+
+
+def _ollama_from_digest(modelfile: str, digest: str) -> bool:
+    for line in modelfile.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].upper() == "FROM":
+            source = parts[1].strip().strip('"').replace("\\", "/").rsplit("/", 1)[-1]
+            return source == f"sha256-{digest}"
+    return False
+
+
+def _director_binding(route_id: str, model: str) -> tuple[bool, str]:
+    profile = director_profile()
+    backend = route_id.removeprefix("director-")
+    if route_id not in director_models(profile):
+        return False, f"unknown local Director route {route_id}"
+    binding = profile["bindings"][backend]
+    return (_lmstudio_binding(model, binding) if backend == "lmstudio" else _ollama_binding(model, binding))
+
+
+def _director_endpoints() -> tuple[tuple[str, str, str, str], ...]:
+    lmstudio = int(os.environ.get("AESOP_LMSTUDIO_PORT", 1234))
+    ollama = int(os.environ.get("AESOP_OLLAMA_PORT", 11434))
+    if not all(1 <= port <= 65535 for port in (lmstudio, ollama)):
+        raise ValueError("local Director port must be between 1 and 65535")
+    return (("director-lmstudio", f"LM Studio 127.0.0.1:{lmstudio}",
+             f"http://127.0.0.1:{lmstudio}/v1/models", "data"),
+            ("director-ollama", f"Ollama 127.0.0.1:{ollama}",
+             f"http://127.0.0.1:{ollama}/api/tags", "models"))
 
 
 def _base(provider, route_type, endpoint, modes, auth_method, billing_basis, limitations):
@@ -283,6 +441,32 @@ def probe(store=None) -> dict[str, dict]:
              cancellation_behavior="local stream stopped; cancelled or cut-off requests retain exposure")
     routes["perplexity-orchestrator"] = r
 
+    # Exact local Director artifact through both supported desktop runtimes. Presence is not a capability or release
+    # verdict; every actual response still runs through the ordinary Aesop task supervision and evidence path.
+    profile = director_profile()
+    configured_models = director_models(profile)
+    for rid, endpoint, models_url, key in _director_endpoints():
+        r = _base("local", "local_model", endpoint, ["chat"], "none (loopback)", "local",
+                  "Exact Director GGUF plus role-v5 profile; chat only, no tools or filesystem access. "
+                  "Model presence is not release acceptance or capability efficacy.")
+        r.update(filesystem_scope="none (only the previewed context is sent to a loopback server)",
+                 cancellation_behavior="Aesop terminates its client; backend generation cancellation is not proven",
+                 incremental_cost_status="$0 provider spend; uses this PC's CPU/GPU", last_verified_at=now,
+                 auth_status="local_loopback", models=[configured_models[rid]])
+        if os.environ.get("AESOP_PROBE_OFFLINE") == "1":
+            r.update(state="UNVERIFIED", evidence="loopback probe skipped (offline test mode)")
+        else:
+            present = _local_models(models_url, key)
+            expected = configured_models[rid]
+            if present is None:
+                r.update(state="UNAVAILABLE", evidence=f"{endpoint} is not reachable")
+            elif expected in present:
+                bound, evidence = _director_binding(rid, expected)
+                r.update(state="READY_LOCAL" if bound else "UNAVAILABLE", version=expected, evidence=evidence)
+            else:
+                r.update(state="UNAVAILABLE", evidence=f"{endpoint} does not list exact configured model {expected}")
+        routes[rid] = r
+
     # ---- CLI lanes verified by an explicit owner-triggered live call (stored), plus local status where offered
     for rid, prov, cmdf, auth, billing_note in (
             ("cursor", "cursor", _cursor_cmd, "Cursor sign-in (cursor-agent login)",
@@ -378,6 +562,8 @@ DISPLAY = {
     "cursor": ("Cursor", "Cursor"), "antigravity": ("Antigravity", "Antigravity"),
     "copilot": ("Copilot CLI", "Copilot CLI"), "grok": ("Grok CLI", "Grok CLI"),
     "zai": ("Z.ai GLM", "Z.ai GLM"),
+    "director-lmstudio": ("Director · LM Studio", "Director"),
+    "director-ollama": ("Director · Ollama", "Director"),
     "perplexity": ("Perplexity", "Perplexity"), "firecrawl": ("Firecrawl", "Firecrawl"),
     "perplexity-orchestrator": ("Perplexity Orchestrator", "Perplexity"),
     "simulated": ("Simulated (test only)", "Simulated"),
@@ -419,9 +605,9 @@ STUDY_ROUTES = ("claude", "codex", "simulated")   # CLIs that can load a per-run
 
 def usable(route: dict, mode: str) -> bool:
     if mode == "study":  # a reference study is a read-only agent run with the R.E.A. MCP server attached
-        return route["state"] in ("READY_INCLUDED", "READY_METERED", "SIMULATED") and "agent" in route["supported_modes"] \
+        return route["state"] in READY_STATES and "agent" in route["supported_modes"] \
             and route.get("id") in STUDY_ROUTES
-    return (route["state"] in ("READY_INCLUDED", "READY_METERED", "SIMULATED")
+    return (route["state"] in READY_STATES
             and mode in route["supported_modes"])
 
 
@@ -511,6 +697,16 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
                        else ["--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep"])
         return cmd + (["-Model", model] if model else []) + [
             "-p", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config"] + permissions
+    configured_models = director_models()
+    if route_id in configured_models and mode == "chat":
+        expected = configured_models[route_id]
+        if model and model != expected:
+            raise RuntimeError(f"{route_id} is pinned to {expected}")
+        bound, evidence = _director_binding(route_id, expected)
+        if not bound:
+            raise RuntimeError(evidence)
+        return [sys.executable, "-I", str(Path(__file__).with_name("local_director_client.py")),
+                route_id.removeprefix("director-"), expected, out_file]
     if route_id == "simulated":
         return _sim_cmd() + [mode, out_file]
     raise RuntimeError(f"route {route_id} has no in-app execution path for {mode}")
