@@ -102,7 +102,7 @@ Chat → **Roundtable** / **War Room** configures a multi-provider session from 
 - **Side-by-side compare:** one read-only chat turn per selected speaker (2–4), owner-confirmed, separate from the live broker.
 - **Live broker:** concurrent openings and a moderated open floor; read-only chat turns only — nothing said is executed.
 
-Use **Providers → Verify** for Cursor, Antigravity, and Copilot CLI before they count as roundtable speakers.
+Use **Providers → Verify** for Cursor, Antigravity, Copilot CLI, Grok CLI and Z.ai before they count as roundtable speakers. A verification lasts 7 days. The War Room shows why an administrator lane is not ready (expired, never verified, signed out, last verify failed, CLI not found) and offers **Verify** / **Re-check** in place, then re-runs preflight. Once you have verified Cursor, Z.ai or Grok yourself, Studio re-verifies it in the background about every 6 days (one tiny plan-quota call); a failed Cursor check is not retried automatically.
 
 ## Paid review tool
 

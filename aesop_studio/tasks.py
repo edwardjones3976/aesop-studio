@@ -622,9 +622,18 @@ class Supervisor:
             cp["result"] = result[:MAX_OUTPUT_BYTES]
             if state == "COMPLETED" and route_id in providers.LIVE_VERIFY_ROUTES:
                 # every successful real call keeps the route's live verification fresh
+                at = time.time()
                 self.store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-                             (f"verify:{route_id}", json.dumps({"at": time.time(), "ok": True,
-                                                                 "detail": "successful request", "latency_s": None})))
+                             (f"verify:{route_id}", json.dumps({"at": at, "ok": True, "detail": "successful request",
+                                                                 "latency_s": None, "source": "task"})))
+                # keep the cached routes blob in step for this one route (no full re-probe on the task thread)
+                path = '$."' + route_id + '"'
+                self.store.x("UPDATE kv SET v=json_set(v, ?, ?, ?, ?, ?, ?, ?, ?) WHERE k='routes' "
+                             "AND json_extract(v, ?)='READY_INCLUDED'",
+                             (path + ".last_verified_at", at, path + ".verified_at", at,
+                              path + ".verify_expires_at", at + providers.VERIFY_MAX_AGE_S,
+                              path + ".evidence", f"live verification {providers._day_time(at)}: successful request",
+                              path + ".state"))
             try:
                 tail = Path(out_path).read_text(encoding="utf-8", errors="replace")[-4000:] + " " + _err_tail(out_path, 2000)
             except OSError:

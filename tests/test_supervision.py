@@ -242,9 +242,6 @@ class TestInstanceLock(unittest.TestCase):  # stability-03
             shutil.rmtree(d, ignore_errors=True)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestAutoReverify(Base):
     def _set(self, rid, ok, age):
@@ -262,3 +259,36 @@ class TestAutoReverify(Base):
         self.assertEqual(providers.due_reverify(self.store), [])  # just failed: wait before re-checking
         self._set("zai", False, providers.RECHECK_FAILED_S + 60)
         self.assertEqual(providers.due_reverify(self.store), ["zai"])
+
+    def test_cursor_admin_lane_is_kept_fresh_but_failures_park(self):
+        self.assertLessEqual(providers.AUTO_REVERIFY_ROUTES, providers.LIVE_VERIFY_ROUTES)
+        self.assertLessEqual(providers.AUTO_RECHECK_FAILED_ROUTES, providers.AUTO_REVERIFY_ROUTES)
+        self.assertNotIn("cursor", providers.due_reverify(self.store))  # never verified: owner action
+        self._set("cursor", True, 3600)
+        self.assertNotIn("cursor", providers.due_reverify(self.store))
+        self._set("cursor", True, providers.REVERIFY_BEFORE_S + 60)
+        self.assertIn("cursor", providers.due_reverify(self.store))
+        self._set("cursor", True, 18 * 24 * 3600)  # long expired (the 2026-11-10 incident): still re-verified
+        self.assertIn("cursor", providers.due_reverify(self.store))
+        self._set("cursor", False, providers.RECHECK_FAILED_S + 60)  # may be one exhausted model: owner decides
+        self.assertNotIn("cursor", providers.due_reverify(self.store))
+
+    def test_reverify_once_verifies_due_routes_then_refreshes_once(self):
+        from unittest import mock
+        self._set("cursor", True, providers.REVERIFY_BEFORE_S + 60)
+        self._set("grok", True, providers.REVERIFY_BEFORE_S + 60)
+        with mock.patch.object(providers, "verify_live") as v, mock.patch.object(providers, "refresh") as r:
+            self.assertEqual(providers.reverify_once(self.store), ["cursor", "grok"])
+        self.assertEqual([c.args[1] for c in v.call_args_list], ["cursor", "grok"])
+        self.assertTrue(all(c.kwargs == {"source": "background"} for c in v.call_args_list))
+        r.assert_called_once_with(self.store)
+        with mock.patch.object(providers, "verify_live") as v, mock.patch.object(providers, "refresh") as r:
+            self._set("cursor", True, 60)
+            self._set("grok", True, 60)
+            self.assertEqual(providers.reverify_once(self.store), [])
+        v.assert_not_called()
+        r.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

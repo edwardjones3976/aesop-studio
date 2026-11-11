@@ -100,12 +100,19 @@ def discover(store: Store) -> dict:
         own = [r for r in route_ids if r in routes]
         claimed_routes.update(own)
         verified = [r for r in own if routes[r]["state"] in providers.READY_STATES]
-        reasons = []
+        status = [] if verified else [_route_status(r, routes[r]) for r in own]
+        installed = bool(path or lid in secrets or any(st["installed"] for st in status))
+        reasons, next_action = [], None
         if verified:
             readiness, conv = "VERIFIED_READY", "in_app_verified"
-        elif path or own or lid in secrets:
-            readiness, conv = "INSTALLED_UNVERIFIED", "adapter_missing" if cls in ("admin", "speaker") else "none"
-            reasons.append("Installed, but Studio has no verified in-app conversation adapter for this lane.")
+        elif installed:
+            readiness = "INSTALLED_UNVERIFIED"
+            chat = any(st["installed"] and "chat" in routes[st["route_id"]].get("supported_modes", []) for st in status)
+            conv = "route_not_ready" if chat else "adapter_missing" if cls in ("admin", "speaker") else "none"
+            next_action = _next_action(status)
+            reasons += [_route_reason(st) for st in _ordered(status, next_action) if st["installed"]]
+            if not status:
+                reasons.append("Installed, but Studio has no in-app conversation adapter for this lane.")
         else:
             readiness, conv = "NOT_DETECTED", "none"
             reasons.append("No official launcher found on this PC.")
@@ -125,12 +132,13 @@ def discover(store: Store) -> dict:
             "id": lid, "name": name, "lane_class": cls, "detected": bool(path or own or lid in secrets),
             "detection": (f"launcher {Path(path).name}" if path else "Studio route registry" if own
                           else "credential registered in provider store" if lid in secrets else "not found"),
-            "readiness": readiness, "route_type": _route_type(cls, verified, routes),
+            "readiness": readiness, "route_type": _route_type(cls, verified, routes, _ordered(status, next_action)),
             "route_id": verified[0] if verified else None, "verified_routes": verified,
             "conversation_support": conv, "cost_visibility": cost, "billing_note": billing,
             "counts_as_speaker": cls in ("admin", "speaker") and conv == "in_app_verified"
                                  and not (metered_only and not funded),
-            "reasons": reasons})
+            # route_status may carry raw CLI output (redacted); it is shown in the app, never exported
+            "route_status": status, "next_action": next_action, "reasons": reasons})
     # anything registered in Studio or the secret store that the catalog doesn't know about
     known = {lid for lid, *_ in CATALOG}
     for rid, r in routes.items():
@@ -157,8 +165,90 @@ def discover(store: Store) -> dict:
             "mission_gates": [] if live_authorized(store) else [LIVE_GATE]}
 
 
-def _route_type(cls, verified, routes) -> str:
+def _day(ts) -> str:
+    return time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else "an unknown date"
+
+
+def _route_status(rid: str, r: dict) -> dict:
+    """Why one of a lane's own routes is not ready, as plain fields (no credentials; evidence is redacted CLI text)."""
+    state, evidence = r.get("state", "UNVERIFIED"), r.get("evidence") or ""
+    installed = r.get("installed")
+    if installed is None:  # routes without the field (codex, claude, APIs, local): infer from "not found" evidence
+        installed = not (state == "UNAVAILABLE" and "not found" in evidence.lower())
+    return {"route_id": rid, "name": r.get("display_name") or providers.display_name(rid), "state": state,
+            "route_type": r.get("route_type", ""), "next_step": r.get("next_step"),
+            "verifiable": bool(r.get("verifiable")), "installed": bool(installed),
+            "verified_at": r.get("verified_at"), "verify_ok": r.get("verify_ok"),
+            "expires_at": r.get("verify_expires_at"), "auth_method": r.get("auth_method", ""),
+            "evidence": evidence[:300]}
+
+
+def _next_action(status: list[dict]) -> dict | None:
+    for st in status:
+        if (st["verifiable"] and st["installed"] and st["state"] in ("UNVERIFIED", "UNAVAILABLE")
+                and st["next_step"] == "verify"):
+            return {"kind": "verify", "route_id": st["route_id"]}
+    for st in status:
+        if st["state"] == "AUTH_REQUIRED":
+            return {"kind": "login", "route_id": st["route_id"]}
+    for st in status:
+        if st["next_step"] == "recheck":
+            return {"kind": "recheck", "route_id": st["route_id"]}
+    return None
+
+
+def _ordered(status: list[dict], action: dict | None) -> list[dict]:
+    """The route the next action is about comes first; the rest keep catalog order."""
+    rid = action and action["route_id"]
+    return sorted(status, key=lambda st: st["route_id"] != rid)
+
+
+def _route_reason(st: dict) -> str:
+    """Fixed, date-based sentence (no raw CLI output: reasons are copied into the shareable export packet)."""
+    n, state, step = st["name"], st["state"], st["next_step"]
+    if not st["installed"]:
+        return f"{n}: CLI not found on this PC."
+    if state == "AUTH_REQUIRED":
+        how = st["auth_method"]
+        return f"{n}: not signed in{f' ({how})' if how else ''}. Sign in, then Re-check."
+    if step == "recheck":
+        return f"{n}: the sign-in check timed out. Re-check (no model call)."
+    if state == "UNAVAILABLE" and st["verify_ok"] is False:
+        return (f"{n}: last verification failed on {_day(st['verified_at'])}. Verify again; the failure detail is "
+                "shown with the route.")
+    if state == "UNVERIFIED" and step == "verify" and st["verified_at"]:
+        return (f"{n}: verification expired on {_day(st['expires_at'])} (last verified {_day(st['verified_at'])}). "
+                "Verify with one test message to re-enable.")
+    if state == "UNVERIFIED" and step == "verify":
+        return f"{n}: installed but never verified in Studio. Verify with one test message to enable."
+    if state == "READY_METERED_DISABLED":
+        return f"{n}: metered route is off until you set a spend limit or turn on the mission permit."
+    if state == "UNVERIFIED" and "offline test mode" in st["evidence"]:
+        return f"{n}: not verified (probe skipped in offline test mode)."
+    return f"{n}: route is {state}; see Providers for the evidence."
+
+
+_NEEDS = {"verify": "verification needed", "login": "sign-in needed", "recheck": "sign-in check needed",
+          "install": "not installed"}
+
+
+def _route_type(cls, verified, routes, status=None) -> str:
     if not verified:
+        if cls in ("admin", "speaker") and status:
+            st = status[0]
+            kind = {"official_cli": "official CLI", "local_model": "local model"}.get(
+                st["route_type"], "API" if "api" in st["route_type"].lower() else "route")
+            if not st["installed"]:
+                need = "not installed"
+            elif st["state"] == "AUTH_REQUIRED":
+                need = "sign-in needed"
+            elif st["state"] == "UNAVAILABLE" and st["verify_ok"] is False:
+                need = "last verify failed"
+            elif st["state"] == "READY_METERED_DISABLED":
+                need = "metered, off"
+            else:
+                need = _NEEDS.get(st["next_step"], "not ready")
+            return f"{kind} · {need}"
         return {"research": "research tool", "review": "review tool"}.get(cls, "official CLI (not integrated)")
     kinds = sorted({"local model" if routes[r]["billing_basis"] == "local"
                     else "separately billed API" if routes[r]["billing_basis"] == "metered"
