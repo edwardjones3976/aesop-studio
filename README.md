@@ -20,7 +20,7 @@ Python **stdlib-only** server (`aesop_studio/`), vanilla JS UI (`static/`), loop
 
 **Browser:** `main` ships browser **v1** (Playwright over a separate Chrome profile). **Browser v2** (MV3 extension in your normal Chrome profile, DOM-first agent) lives on branch `codex/browser-v2-antigravity` until repair 4 lands.
 
-- **Chat & Model Lab:** project conversations through every **usable** in-app route (Codex, Claude Code, Cursor, Antigravity, Copilot CLI after **Verify**, optional Codex API, and the offline test adapter). Each message can pick a provider in the composer; switching away from the project default asks for confirmation. You can preview the exact context before it is sent.
+- **Chat & Model Lab:** project conversations through every **usable** in-app route (Codex, Claude Code, Cursor and Antigravity after **Verify**, optional Codex API, and the offline test adapter). Each message can pick a provider in the composer; switching away from the project default asks for confirmation. You can preview the exact context before it is sent.
 - **Developer workspace / Agent control:** supervised agent tasks scoped to the project folder. Each task shows live redacted output, the files it changed, and a cancel button that stops the owned process tree. Interrupted tasks are reconciled on restart and never replayed automatically.
 - **Research & Knowledge:** a cited notebook mixing public pages (fetched SSRF-safely) and approved local documents. Exports can include or exclude private sources.
 - **Project memory:** authoritative records, source-linked derived summaries, and explicitly promoted shared knowledge. Corrections supersede old records and keep them for provenance.
@@ -51,7 +51,7 @@ Data lives in `%LOCALAPPDATA%\AesopStudio` (override with `-Data` or `AESOP_DATA
 | `codex` (Codex) | `codex login status` → "Logged in using ChatGPT" | ChatGPT plan quota, $0 incremental |
 | `claude` (Claude Code) | `claude auth status` → `authMethod: claude.ai` | Claude plan quota, $0 incremental |
 | `openai-api` (Codex API) | `OPENAI_API_KEY` present (value never read into logs/UI) | Metered per token, streamed. Off until you set a monthly limit or turn on the mission permit |
-| `cursor` (Cursor) / `antigravity` (Antigravity) / `copilot` (Copilot CLI) | Providers → **Verify** (one tiny live call) | Their own plan quota; read-only ask/plan mode, chat only |
+| `cursor` (Cursor) / `antigravity` (Antigravity) | Providers → **Verify** (one tiny live call) | Their own plan quota; read-only ask/plan mode, chat only |
 | `grok` (Grok CLI) | installed | Blocked: billing basis not verifiable |
 | perplexity / firecrawl | not integrated | Handoff/research only |
 
@@ -102,7 +102,7 @@ Chat → **Roundtable** / **War Room** configures a multi-provider session from 
 - **Side-by-side compare:** one read-only chat turn per selected speaker (2–4), owner-confirmed, separate from the live broker.
 - **Live broker:** concurrent openings and a moderated open floor; read-only chat turns only — nothing said is executed.
 
-Use **Providers → Verify** for Cursor, Antigravity, and Copilot CLI before they count as roundtable speakers.
+Use **Providers → Verify** for Cursor and Antigravity before they count as roundtable speakers.
 
 ## Paid review tool
 
