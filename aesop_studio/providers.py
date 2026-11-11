@@ -61,11 +61,6 @@ def _agy_cmd() -> list[str] | None:
     return [exe] if exe and Path(exe).is_file() else None
 
 
-def _copilot_cmd() -> list[str] | None:
-    exe = shutil.which("copilot.exe")
-    return [exe] if exe else None
-
-
 def _grok_cmd() -> list[str] | None:
     exe = shutil.which("grok.exe") or str(Path.home() / ".grok" / "bin" / "grok.exe")
     return [exe] if exe and Path(exe).is_file() else None
@@ -76,7 +71,7 @@ def _grok_cmd() -> list[str] | None:
 ARGV_PROMPT_ROUTES = {"antigravity", "grok"}
 MAX_ARGV_PROMPT = 24_000
 # Live-verified CLI routes: an owner-triggered minimal call is the only proof of usable access + quota.
-LIVE_VERIFY_ROUTES = {"cursor", "antigravity", "copilot", "grok", "zai"}
+LIVE_VERIFY_ROUTES = {"cursor", "antigravity", "grok", "zai"}
 VERIFY_MAX_AGE_S = 7 * 24 * 3600
 
 
@@ -473,8 +468,6 @@ def probe(store=None) -> dict[str, dict]:
              "Cursor plan usage; overage depends on account settings (not observable here)"),
             ("antigravity", "google", _agy_cmd, "Google sign-in (Antigravity)",
              "Antigravity/Gemini account quota; billing not observable here"),
-            ("copilot", "github", _copilot_cmd, "GitHub sign-in (Copilot CLI)",
-             "GitHub Copilot premium-request quota; paid overage only if enabled on the account"),
             ("grok", "xai", _grok_cmd, "xAI sign-in (SuperGrok, grok CLI)",
              "SuperGrok subscription quota (owner-confirmed paid plan)"),
             ("zai", "zai", _zai_cmd, "Z.ai GLM Coding Plan key (claude-zai launcher)",
@@ -560,7 +553,7 @@ def refresh(store: Store) -> dict[str, dict]:
 DISPLAY = {
     "codex": ("Codex", "Codex"), "openai-api": ("Codex API", "Codex"), "claude": ("Claude Code", "Claude Code"),
     "cursor": ("Cursor", "Cursor"), "antigravity": ("Antigravity", "Antigravity"),
-    "copilot": ("Copilot CLI", "Copilot CLI"), "grok": ("Grok CLI", "Grok CLI"),
+    "grok": ("Grok CLI", "Grok CLI"),
     "zai": ("Z.ai GLM", "Z.ai GLM"),
     "director-lmstudio": ("Director · LM Studio", "Director"),
     "director-ollama": ("Director · Ollama", "Director"),
@@ -671,11 +664,6 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
                                "characters is refused")
         return cmd + ["--mode", "plan", "--print-timeout", "280s"] + (["--model", model] if model else []) + [
             "-p=" + prompt]
-    if route_id == "copilot" and mode == "chat":
-        cmd = _copilot_cmd()
-        if not cmd:
-            raise RuntimeError("copilot unavailable")
-        return cmd + ["-s", "--no-color"] + (["--model", model] if model else [])  # prompt via stdin
     if route_id == "grok" and mode in ("chat", "agent"):
         cmd = _grok_cmd()
         if not cmd:

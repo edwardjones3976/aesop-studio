@@ -3258,7 +3258,7 @@ function openGlobal(which) {
 function goSpend() { openGlobal("evidence").then(() => { const el = $("spend"); if (el) { el.scrollIntoView({ block: "start" }); const i = el.querySelector("input"); if (i) i.focus({ preventScroll: true }); } }); }
 // Per-route verification state for this session: { confirm, busy, started, result: {ok, detail, at, latency_s} }.
 const VERIFY = {};
-const VERIFIABLE = ["cursor", "antigravity", "copilot"];
+const VERIFIABLE = ["cursor", "antigravity"];
 const canVerify = (id, r) => VERIFIABLE.includes(id) && ["UNVERIFIED", "UNAVAILABLE"].includes(r.state);
 function verifyBlock(id, r) {
   const v = VERIFY[id] || (VERIFY[id] = {}); const name = routeName(id);
