@@ -54,6 +54,70 @@ def _err_tail(out_path: str, n: int = 300) -> str:
     return redact(" | ".join(lines[-3:]))[-n:]
 
 
+def _codex_err(out_path: str, n: int = 300) -> str:
+    """Extract failure reason from Codex JSON event stream in out_path (redacted, bounded)."""
+    try:
+        with open(out_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return ""
+    last_turn_failed = None
+    last_error = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            start = line.find("{")
+            end = line.rfind("}")
+            if start != -1 and end > start:
+                try:
+                    ev = json.loads(line[start:end + 1])
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            else:
+                continue
+        if not isinstance(ev, dict):
+            continue
+        etype = ev.get("type")
+        if etype == "turn.failed":
+            err = ev.get("error")
+            msg = None
+            if isinstance(err, dict):
+                m = err.get("message") or err.get("detail")
+                if isinstance(m, str) and m.strip():
+                    msg = m.strip()
+            elif isinstance(err, str) and err.strip():
+                msg = err.strip()
+            if not msg:
+                m = ev.get("message")
+                if isinstance(m, str) and m.strip():
+                    msg = m.strip()
+            if msg:
+                last_turn_failed = msg
+        elif etype == "error":
+            msg = None
+            m = ev.get("message")
+            if isinstance(m, str) and m.strip():
+                msg = m.strip()
+            if not msg:
+                err = ev.get("error")
+                if isinstance(err, dict):
+                    m = err.get("message") or err.get("detail")
+                    if isinstance(m, str) and m.strip():
+                        msg = m.strip()
+                elif isinstance(err, str) and err.strip():
+                    msg = err.strip()
+            if msg:
+                last_error = msg
+    raw = last_turn_failed or last_error
+    if not raw:
+        return ""
+    return redact(raw)[:n]
+
+
 IMAGE_TOKEN_BOUND = 2_000
 READ_TOOL_IMAGE_ROUTES = {"claude"}  # Claude Code opens staged photos with its Read tool
 
@@ -615,7 +679,9 @@ class Supervisor:
                                            if descendants_killed else None)
             else:
                 state, err = "FAILED", f"exit code {code}"
-                diag = _err_tail(out_path)
+                diag = _codex_err(out_path) if route_id == "codex" else _err_tail(out_path)
+                if not diag:
+                    diag = _err_tail(out_path)
                 if diag:
                     err += f": {diag}"
             cp = json.loads(self.get(tid)["checkpoint"] or "{}")
