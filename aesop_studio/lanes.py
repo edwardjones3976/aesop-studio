@@ -20,7 +20,7 @@ from .store import Store
 ADMINS = ("openai", "claude", "cursor")  # documented administrator identities (Codex, Claude Code, Cursor)
 # Owner naming rule: each family is titled by its code-based product (OpenAI/ChatGPT/Codex -> "Codex").
 DOCUMENTED_EXAMPLE = ["Codex", "Claude Code", "Cursor", "Director (local)", "Grok CLI", "Antigravity",
-                      "Perplexity", "Firecrawl", "Copilot CLI", "Z.ai GLM Coding"]
+                      "Perplexity", "Firecrawl", "Z.ai GLM Coding"]
 
 _HOME = Path.home()
 _LOCAL = Path(os.environ.get("LOCALAPPDATA", _HOME / "AppData" / "Local"))
@@ -41,8 +41,6 @@ CATALOG = [
      "research tool; not a conversational speaker"),
     ("firecrawl", "Firecrawl", "research", ["firecrawl"], [], ["firecrawl"],
      "research tool (credit-based); not a conversational speaker"),
-    ("copilot", "Copilot CLI", "speaker", ["copilot"], [], ["copilot"],
-     "GitHub Copilot premium-request quota"),
     ("zai", "Z.ai GLM Coding", "speaker", ["claude-zai"], [_HOME / ".local" / "bin" / "claude-zai.cmd"], ["zai"],
      "Z.ai GLM Coding Plan credits (owner-confirmed paid plan)"),
     ("director-local", "Director (local)", "speaker", ["lms", "ollama"], [],

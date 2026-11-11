@@ -3500,7 +3500,7 @@ function openGlobal(which) {
 function goSpend() { openGlobal("evidence").then(() => { const el = $("spend"); if (el) { el.scrollIntoView({ block: "start" }); const i = el.querySelector("input"); if (i) i.focus({ preventScroll: true }); } }); }
 // Per-route verification state for this session: { confirm, busy, started, result: {ok, detail, at, latency_s} }.
 const VERIFY = {};
-const VERIFIABLE_FALLBACK = ["cursor", "antigravity", "copilot", "grok", "zai"]; // server sends r.verifiable
+const VERIFIABLE_FALLBACK = ["cursor", "antigravity", "grok", "zai"]; // server sends r.verifiable
 const canVerify = (id, r) => (r.verifiable ?? VERIFIABLE_FALLBACK.includes(id)) && r.installed !== false
   && r.next_step !== "recheck" && ["UNVERIFIED", "UNAVAILABLE"].includes(r.state);
 function verifyBlock(id, r) {
