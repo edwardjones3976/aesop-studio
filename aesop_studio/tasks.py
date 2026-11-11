@@ -55,7 +55,7 @@ def _err_tail(out_path: str, n: int = 300) -> str:
 
 
 def _codex_err(out_path: str, n: int = 300) -> str:
-    """Extract failure reason from Codex JSON event stream in out_path (redacted, bounded)."""
+    """Extract failure reason from Codex output (JSON event stream or plain-text) in out_path (redacted, bounded)."""
     try:
         with open(out_path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
@@ -63,9 +63,17 @@ def _codex_err(out_path: str, n: int = 300) -> str:
         return ""
     last_turn_failed = None
     last_error = None
+    last_plain_error = None
     for line in text.splitlines():
         line = line.strip()
         if not line:
+            continue
+        if line.startswith("ERROR:"):
+            msg = line[len("ERROR:"):].strip()
+            if msg:
+                last_plain_error = msg
+            continue
+        if line.lower().startswith(("warning:", "hook:")):
             continue
         try:
             ev = json.loads(line)
@@ -112,7 +120,7 @@ def _codex_err(out_path: str, n: int = 300) -> str:
                     msg = err.strip()
             if msg:
                 last_error = msg
-    raw = last_turn_failed or last_error
+    raw = last_turn_failed or last_error or last_plain_error
     if not raw:
         return ""
     return redact(raw)[:n]

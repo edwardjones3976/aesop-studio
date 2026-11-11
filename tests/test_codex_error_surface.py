@@ -29,6 +29,17 @@ RECORDED_ITEM_WARNING = (
     '{"type":"item.completed","item":{"type":"error","message":"Codex is ignoring 1 '
     'unrecognized configuration setting..."}}'
 )
+RECORDED_PLAIN_TEXT_LINES = [
+    "warning: Codex is ignoring 1 unrecognized configuration setting. Check for typos or deprecated settings.",
+    r"  user (C:\Users\...\.codex\config.toml): `computer_use.windows.always_allowed_app_ids` is ignored.",
+    "warning: Under-development features enabled: local_thread_store_compression. ...",
+    "hook: SessionStart",
+    "hook: SessionStart Completed",
+    "hook: UserPromptSubmit",
+    "hook: UserPromptSubmit Completed",
+    "ERROR: You've hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at 8:36 PM.",
+    "ERROR: You've hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at 8:36 PM.",
+]
 
 
 def _wait_terminal(sup: Supervisor, tid: str, timeout: float = 30.0):
@@ -139,6 +150,60 @@ class TestCodexErrorSurface(unittest.TestCase):
         if hasattr(tasks, "_codex_err"):
             log_file = self.tmp / "test.log"
             log_file.write_text(RECORDED_TOP_LEVEL_ERROR + "\n" + RECORDED_TURN_FAILED + "\n", encoding="utf-8")
+            msg = tasks._codex_err(str(log_file))
+            self.assertEqual(
+                msg,
+                "You've hit your usage limit. Visit https://chatgpt.com/settings/usage "
+                "to purchase more credits or try again at 8:36 PM."
+            )
+
+    def test_codex_plain_text_error_surfaced(self):
+        t = self._run_with_codex_output(RECORDED_PLAIN_TEXT_LINES)
+        self.assertEqual(t["state"], "FAILED")
+        expected = (
+            "exit code 1: You've hit your usage limit. Visit https://chatgpt.com/settings/usage "
+            "to purchase more credits or try again at 8:36 PM."
+        )
+        self.assertEqual(t["error"], expected)
+
+    def test_codex_plain_text_warnings_and_hooks_ignored(self):
+        lines = [
+            "warning: Codex is ignoring 1 unrecognized configuration setting.",
+            "hook: SessionStart",
+            "hook: SessionStart Completed",
+        ]
+        t = self._run_with_codex_output(lines)
+        self.assertEqual(t["state"], "FAILED")
+        self.assertEqual(t["error"], "exit code 1")
+
+    def test_codex_plain_text_multiple_errors_picks_last(self):
+        lines = [
+            "ERROR: Initial error line",
+            "warning: some warning",
+            "hook: UserPromptSubmit",
+            "ERROR: Final error line",
+        ]
+        t = self._run_with_codex_output(lines)
+        self.assertEqual(t["state"], "FAILED")
+        self.assertEqual(t["error"], "exit code 1: Final error line")
+
+    def test_codex_plain_text_error_capped_at_300(self):
+        long_err = "ERROR: " + ("Y" * 400)
+        t = self._run_with_codex_output([long_err])
+        self.assertEqual(t["state"], "FAILED")
+        self.assertEqual(t["error"], f"exit code 1: {'Y' * 300}")
+
+    def test_codex_plain_text_error_redacted(self):
+        secret_err = "ERROR: Failed with token sk-proj-0123456789abcdef01234 on model"
+        t = self._run_with_codex_output([secret_err])
+        self.assertEqual(t["state"], "FAILED")
+        self.assertEqual(t["error"], "exit code 1: Failed with token [REDACTED] on model")
+
+    def test_codex_direct_helper_plain_text(self):
+        from aesop_studio import tasks
+        if hasattr(tasks, "_codex_err"):
+            log_file = self.tmp / "test_plain.log"
+            log_file.write_text("\n".join(RECORDED_PLAIN_TEXT_LINES) + "\n", encoding="utf-8")
             msg = tasks._codex_err(str(log_file))
             self.assertEqual(
                 msg,
