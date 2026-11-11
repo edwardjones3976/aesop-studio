@@ -18,4 +18,6 @@ Worked case: on 2026-10-26 Antigravity's default model (`gemini-4-argon-high`) r
 
 ## Process (owner-approved light path)
 
-Writer on its own worktree branch → Foreman live check + full suite (`scripts\run_tests.ps1`) → landed under the writer's identity → eligible non-author review → PR → merge. `main` is protected: green CI and one review required.
+Roles (owner, 2026-11-11): OpenAI Director, Claude Orchestrator, Cursor Foreman, local LLM Warden; see `CONTRIBUTING.md`.
+
+Writer on its own worktree branch → full suite (`scripts\run_tests.ps1`) plus needed live checks → PR → independent non-author review (exact-head gate verdicts from the Warden) → merge. `main` is protected: green CI and one review required. Whoever finds a defect fixes it (owner policy, 2026-11-08).

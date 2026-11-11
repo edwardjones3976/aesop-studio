@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -90,7 +91,11 @@ def _live_verification(store, rid: str) -> dict | None:
 VERIFY_TOKEN = "AESOP_VERIFY_OK"
 # Paid-plan CLI lanes the owner uses day to day: keep their verification fresh in the background so they never drop
 # out of the provider list after a quiet week, and re-check a failed verification instead of leaving it failed.
-AUTO_REVERIFY_ROUTES = {"zai", "grok"}
+# Cursor is a War Room administrator lane (lanes.ADMINS): owner decision 2026-11-11 to keep it fresh too.
+AUTO_REVERIFY_ROUTES = {"zai", "grok", "cursor"}
+# A failed record is retried in the background only for these. A failed Cursor check may be one exhausted model
+# (AGENTS.md: a model's quota is not the provider's), so it parks with its detail until the owner presses Verify.
+AUTO_RECHECK_FAILED_ROUTES = {"zai", "grok"}
 REVERIFY_BEFORE_S = VERIFY_MAX_AGE_S - 24 * 3600
 RECHECK_FAILED_S = 15 * 60
 
@@ -104,14 +109,42 @@ def due_reverify(store, now: float | None = None) -> list[str]:
         if not ver:
             continue  # never verified: that first call stays an owner action
         age = now - ver.get("at", 0)
-        if (ver.get("ok") and age > REVERIFY_BEFORE_S) or (not ver.get("ok") and age > RECHECK_FAILED_S):
+        stale_ok = ver.get("ok") and age > REVERIFY_BEFORE_S
+        retry_failed = not ver.get("ok") and rid in AUTO_RECHECK_FAILED_ROUTES and age > RECHECK_FAILED_S
+        if stale_ok or retry_failed:
             due.append(rid)
     return due
 
 
+def reverify_once(store) -> list[str]:
+    """One background pass: re-verify every due route, then rebuild the cached routes blob once."""
+    done = []
+    for rid in due_reverify(store):
+        try:
+            verify_live(store, rid, source="background")
+            done.append(rid)
+        except Exception as e:  # noqa: BLE001 - never let a provider hiccup stop the watcher
+            print(f"background verification of {rid} failed: {type(e).__name__}")
+    if done:
+        refresh(store)
+    return done
 
 
-def verify_live(store, rid: str) -> dict:
+_QUOTA_LINE = re.compile(r"limit|quota|usage|429|exhaust", re.IGNORECASE)
+
+
+def _verify_detail(out: str, code: int) -> str:
+    """Last output line, preferring the last one that names a limit/quota fault (it may not be the final line)."""
+    lines = [l.strip() for l in out.strip().splitlines() if l.strip()]
+    if not lines:
+        return f"exit {code}"
+    quota = [l for l in lines if _QUOTA_LINE.search(l)]
+    return (quota or lines)[-1]
+
+
+
+
+def verify_live(store, rid: str, source: str = "owner") -> dict:
     """Owner-triggered: one minimal read-only chat call proves sign-in + remaining quota for a CLI lane."""
     import tempfile
     from .security import redact
@@ -125,15 +158,16 @@ def verify_live(store, rid: str) -> dict:
         argv = build_argv(rid, "chat", cwd, str(Path(cwd) / "last.txt"), None, prompt=prompt)
         code, out = _contained(argv, 180, cwd=cwd, input_text=None if rid in ARGV_PROMPT_ROUTES else prompt)
         ok = VERIFY_TOKEN in out
-        detail = "reply matched" if ok else redact(out.strip().splitlines()[-1] if out.strip() else f"exit {code}")
+        detail = "reply matched" if ok else redact(_verify_detail(out, code))
     except (OSError, RuntimeError) as e:
         ok, detail = False, f"{type(e).__name__}: {str(e)[:160]}"
     finally:
         shutil.rmtree(cwd, ignore_errors=True)
-    rec = {"at": time.time(), "ok": ok, "detail": detail[:200], "latency_s": round(time.time() - t0, 1)}
+    rec = {"at": time.time(), "ok": ok, "detail": detail[:200], "latency_s": round(time.time() - t0, 1),
+           "source": source}
     store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
             (f"verify:{rid}", json.dumps(rec)))
-    store.event("route_live_verification", None, route=rid, ok=ok, latency_s=rec["latency_s"])
+    store.event("route_live_verification", None, route=rid, ok=ok, latency_s=rec["latency_s"], source=source)
     return rec
 
 
@@ -354,6 +388,24 @@ def _base(provider, route_type, endpoint, modes, auth_method, billing_basis, lim
             "state": "UNVERIFIED"}
 
 
+def _day_time(ts: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+
+_SIGNED_OUT = ("not logged in", "logged out", "not authenticated", "not signed in")
+
+
+def _cursor_signed_in(code: int, out: str) -> tuple[bool | None, bool]:
+    """(signed_in, timed_out) from `cursor-agent status`. "Not logged in" contains "logged in", so negatives are
+    checked first; a timeout says nothing about sign-in and is reported separately."""
+    if code == -1 and out.startswith("timed out"):
+        return None, True
+    low = out.lower()
+    if any(n in low for n in _SIGNED_OUT):
+        return False, False
+    return code == 0 and "logged in" in low, False
+
+
 def probe(store=None) -> dict[str, dict]:
     now = time.time()
     routes: dict[str, dict] = {}
@@ -482,9 +534,15 @@ def probe(store=None) -> dict[str, dict]:
         r = _base(prov, "official_cli", None, ["chat"], auth, "subscription_included", billing_note)
         r["filesystem_scope"] = ("chat only, read-only/ask/plan mode in an empty temp dir; not an isolation "
                                  "boundary — the CLI runs as your Windows user")
+        ver = _live_verification(store, rid)
+        r.update(installed=True, verifiable=rid in LIVE_VERIFY_ROUTES, verified_at=(ver or {}).get("at"),
+                 verify_ok=(ver or {}).get("ok"),
+                 verify_expires_at=(ver["at"] + VERIFY_MAX_AGE_S) if ver and ver.get("at") else None,
+                 next_step=None)
         cmd = cmdf()
         if not cmd:
-            r.update(state="UNAVAILABLE", evidence=f"{rid} CLI not found on this PC", last_verified_at=now)
+            r.update(state="UNAVAILABLE", evidence=f"{rid} CLI not found on this PC", last_verified_at=now,
+                     installed=False, next_step="install")
             routes[rid] = r
             continue
         if os.environ.get("AESOP_PROBE_OFFLINE") == "1":  # offline test runs never launch real CLIs
@@ -497,26 +555,34 @@ def probe(store=None) -> dict[str, dict]:
         first = (lines or out.strip().splitlines() or [""])[0][:80]
         r["version"] = first if code == 0 and first else None
         signed_in = None
+        status_timed_out = False
         if rid == "cursor":
             code, out = _run(cmd + ["status"], timeout=40)
-            signed_in = code == 0 and "logged in" in out.lower()  # account identity is never stored
-            r["auth_status"] = "signed_in" if signed_in else "not_signed_in"
-        ver = _live_verification(store, rid)
+            signed_in, status_timed_out = _cursor_signed_in(code, out)  # account identity is never stored
+            r["auth_status"] = ("unknown" if status_timed_out else "signed_in" if signed_in else "not_signed_in")
         fresh = ver and now - ver.get("at", 0) < VERIFY_MAX_AGE_S
-        if signed_in is False:
-            r.update(state="AUTH_REQUIRED", evidence="cursor-agent status: not signed in; run `cursor-agent login`")
+        if status_timed_out:
+            r.update(state="UNVERIFIED", next_step="recheck",
+                     evidence="cursor-agent status timed out; sign-in unknown. Re-check (no model call).")
+        elif signed_in is False:
+            r.update(state="AUTH_REQUIRED", next_step="login",
+                     evidence="cursor-agent status: not signed in; run `cursor-agent login`")
         elif fresh and ver.get("ok"):
             r.update(state="READY_INCLUDED", incremental_cost_status="plan quota (no $ visibility)",
-                     evidence=f"live verification {time.strftime('%Y-%m-%d %H:%M', time.localtime(ver['at']))}: "
-                              f"{ver.get('detail', 'ok')}")
+                     evidence=f"live verification {_day_time(ver['at'])}: {ver.get('detail', 'ok')}")
         elif fresh:
-            r.update(state="UNAVAILABLE", evidence=f"last live verification failed: {ver.get('detail', '')}"[:300])
+            r.update(state="UNAVAILABLE", next_step="verify",
+                     evidence=f"last live verification failed: {ver.get('detail', '')}"[:300])
+        elif ver:
+            r.update(state="UNVERIFIED", next_step="verify",
+                     evidence=(f"live verification expired {_day_time(ver['at'] + VERIFY_MAX_AGE_S)} (last verified "
+                               f"{_day_time(ver['at'])}); run Verify (one minimal live call) to enable"))
         else:
-            r.update(state="UNVERIFIED", evidence=("installed" + (" and signed in" if signed_in else "")
-                                                   + "; run Verify (one minimal live call) to enable"))
-        r["last_verified_at"] = (ver or {}).get("at") or now
+            r.update(state="UNVERIFIED", next_step="verify",
+                     evidence=("installed" + (" and signed in" if signed_in else "")
+                               + "; never verified in Studio; run Verify (one minimal live call) to enable"))
+        r["last_verified_at"] = (ver or {}).get("at")
         routes[rid] = r
-
 
     from . import research_routes
     have = research_routes.status() if os.environ.get("AESOP_PROBE_OFFLINE") != "1" else {"firecrawl": False,
@@ -548,10 +614,16 @@ def probe(store=None) -> dict[str, dict]:
     return routes
 
 
+_REFRESH_LOCK = threading.Lock()
+
+
 def refresh(store: Store) -> dict[str, dict]:
-    routes = _named(probe(store))
-    store.x("INSERT INTO kv(k,v) VALUES('routes',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (json.dumps(routes),))
-    store.event("routes_probed", None, states={k: v["state"] for k, v in routes.items()})
+    # Serialized: a slow probe that started before a Verify must not overwrite the newer snapshot.
+    with _REFRESH_LOCK:
+        routes = _named(probe(store))
+        store.x("INSERT INTO kv(k,v) VALUES('routes',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                (json.dumps(routes),))
+        store.event("routes_probed", None, states={k: v["state"] for k, v in routes.items()})
     return routes
 
 

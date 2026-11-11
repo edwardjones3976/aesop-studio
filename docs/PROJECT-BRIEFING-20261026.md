@@ -1,6 +1,8 @@
 # Aesop Studio — full project briefing (for Cursor and Codex)
 
 **From:** Claude, Foreman (BlackBox), 2026-10-26. **Owner:** Edward Jones (GitHub `edwardjones3976`).
+> **Historical (2026-10-26).** Roles and process have changed since: OpenAI Director, Claude Orchestrator, Cursor Foreman, local LLM Warden (owner, 2026-11-11). See `CONTRIBUTING.md` and `docs/PROJECT-COMMUNICATIONS.html` for the current arrangement.
+
 Owner policy: no Submission Tag Headers, contribution tags/envelopes or contribution-acknowledgment procedures, for any provider or project.
 
 ## What it is
