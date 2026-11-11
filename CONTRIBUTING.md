@@ -4,7 +4,7 @@ Aesop Studio is a private, owner-operated project. This document describes the *
 
 ## Roles
 
-Appointments (owner, 2026-11-11): **OpenAI** is Director, **Claude** is Orchestrator, **Cursor** is Foreman, and the **local LLM** (Local Warden) is Warden. Antigravity is Secretary. `docs/PROJECT-COMMUNICATIONS.html` records the details and the earlier arrangement.
+Appointments (owner, 2026-11-11): **OpenAI** is Director, **Claude** is Orchestrator, **Cursor** is Foreman, and the **local LLM** (Local Warden) is Warden. Antigravity is Secretary. The Foreman handles all GitHub and Git operations (owner, 2026-11-11): PR and issue tracking, posting review requests and verdicts, merges after the gates pass, issue closing and reopening. The Warden reviews but never operates GitHub; the Foreman runs the local Warden GitHub bridge to hand it a PR and post its verdict. `docs/PROJECT-COMMUNICATIONS.html` records the details and the earlier arrangement.
 
 ## Workflow
 
