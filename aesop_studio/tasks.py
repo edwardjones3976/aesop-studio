@@ -622,7 +622,7 @@ class Supervisor:
             cp["result"] = result[:MAX_OUTPUT_BYTES]
             if state == "COMPLETED" and route_id in providers.LIVE_VERIFY_ROUTES:
                 # every successful real call keeps the route's live verification fresh
-                at = time.time()
+                at = round(time.time(), 3)  # ms: survives SQLite's 15-digit REAL rendering in json_set exactly
                 self.store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
                              (f"verify:{route_id}", json.dumps({"at": at, "ok": True, "detail": "successful request",
                                                                  "latency_s": None, "source": "task"})))
