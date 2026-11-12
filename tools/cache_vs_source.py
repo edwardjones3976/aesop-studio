@@ -1,4 +1,4 @@
-"""Investigator check: does the cached `routes` kv blob agree with the per-route `verify:<rid>` records?
+﻿"""Consistency check: does the cached `routes` kv blob agree with the per-route `verify:<rid>` records?
 
 Usage: python tools/cache_vs_source.py [data_dir] [--fix]
 Lists every route whose cached state, evidence or last_verified_at differs from its verify record. `--fix` calls
