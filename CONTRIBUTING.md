@@ -2,14 +2,18 @@
 
 Aesop Studio is a private, owner-operated project. This document describes the **light path** the owner approved for changes.
 
+## Roles
+
+Appointments (owner, 2026-11-11): **OpenAI** is Director, **Claude** is Orchestrator, **Cursor** is Foreman, and the **local LLM** (Local Warden) is Warden. Antigravity is Secretary. The Foreman handles all GitHub and Git operations (owner, 2026-11-11): PR and issue tracking, posting review requests and verdicts, merges after the gates pass, issue closing and reopening. The Warden reviews but never operates GitHub; the Foreman runs the local Warden GitHub bridge to hand it a PR and post its verdict. `docs/PROJECT-COMMUNICATIONS.html` records the details and the earlier arrangement.
+
 ## Workflow
 
-1. **Writer** — Work in your own **git worktree** on a branch named `<provider>/<topic>` (examples: `cursor/repo-e2e-20261026`, `codex/browser-v2-antigravity`).
-2. **Foreman live check** — Run the full offline test suite and any live checks the change needs.
-3. **Land** — Commit under the writer’s identity; fast-forward `main` when ready.
-4. **Review** — An eligible non-author reviewer (the Foreman may review when only assisting).
+1. **Writer:** work in your own **git worktree** on a branch named `<provider>/<topic>` (examples: `cursor/repo-e2e-20261026`, `codex/browser-v2-antigravity`).
+2. **Checks:** run the full offline test suite and any live checks the change needs, and record the results in the PR.
+3. **Independent review:** a reviewer who did not write the change. Exact-head gate verdicts come from the Warden. Nobody approves or accepts their own work.
+4. **Merge:** `main` is protected and needs green CI plus one approving review. Merge, deployment and credentials stay with the owner.
 
-Director-Orchestrator merge gates (Warden desk, merge preflight, and so on) do **not** apply to this repository.
+**Repairs:** whoever finds a defect fixes it within their own authority (owner policy, 2026-11-08). The Foreman issues a repair order only when the finder cannot solve it, or after three failed, evidence-based attempts on the same issue.
 
 Record rulings in commit messages and under `docs/` when they affect behavior.
 

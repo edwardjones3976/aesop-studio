@@ -34,7 +34,7 @@ const fmtCost = (v) => fineUsd(v);
 const tone = (s) => {
   s = String(s);
   if (/^proposed$/i.test(s)) return "info";
-  if (/DISABLED|unread/i.test(s)) return "warn";
+  if (/DISABLED|unread|UNVERIFIED/i.test(s)) return "warn";
   return /COMPLETED|READY_INCLUDED|READY_LOCAL|READY_METERED|generated|cited|read|saved|current|ok/i.test(s) ? "ok"
     : /FAILED|BLOCKED|UNAVAILABLE|failed|unavailable|unsupported|malformed|too_large|encrypted|conflict|bad/i.test(s) ? "bad"
     : /RUNNING|STARTING|RESERVED|submitted|AUTH|HANDOFF|DISABLED|UNKNOWN|INTERRUPTED|stale|unread|SIMULATED/i.test(s) ? "warn" : "";
@@ -560,8 +560,7 @@ async function openRoundtable(opener, opts = {}) {
       api("GET", "/api/roundtable/researcher").catch(() => null)]);
     if (RT !== s) return;
     s.researcher = rsr;
-    s.lanes = lanes.lanes || []; s.gates = lanes.mission_gates || []; s.example = lanes.documented_example || [];
-    s.discovered = lanes.discovered_at || null; s.live = !!lanes.live_authorized; s.drafts = Array.isArray(drafts) ? drafts : [];
+    rtApplyLanes(s, lanes); s.drafts = Array.isArray(drafts) ? drafts : [];
   } catch (e) { if (RT === s) s.err = e.message; }
   if (RT !== s) return;
   s.loading = false; rtResearchRender(); rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtDraftsRender(); rtStartRender(); rtLiveRender();
@@ -571,6 +570,69 @@ async function openRoundtable(opener, opts = {}) {
     if (RT !== s) { clearInterval(s.liveTimer); return; }
     try { const r = await api("GET", "/api/roundtable/live-authorization"); if (RT === s && !!r.live_authorized !== !!s.live) rtLiveApply(!!r.live_authorized); } catch { /* next tick */ }
   }, 4000);
+}
+function rtApplyLanes(s, lanes) {
+  s.lanes = lanes.lanes || []; s.gates = lanes.mission_gates || []; s.example = lanes.documented_example || [];
+  s.discovered = lanes.discovered_at || null; s.live = !!lanes.live_authorized;
+}
+// Re-run lane discovery in place (after a Verify or Re-check) and redraw everything that depends on it.
+async function rtReloadLanes(s) {
+  const lanes = await api("GET", "/api/roundtable/lanes");
+  if (RT !== s) return false;
+  rtApplyLanes(s, lanes);
+  rtLanesRender(); rtRefresh(); rtGatesRender(); rtSideRender(); rtStartRender(); rtLiveRender();
+  return true;
+}
+// Verify (one tiny plan-quota call) or Re-check (probe only, no model call) from inside the War Room, then
+// re-discover lanes and re-run preflight so the result shows up without leaving the dialog.
+async function rtRouteAction(kind, routeId, laneId) {
+  const s = RT; if (!s || s.routeBusy) return;
+  s.routeBusy = { kind, routeId, started: Date.now() }; s.routeConfirm = null; rtLanesRender();
+  try {
+    if (kind === "verify") await verifyRoute(routeId, rtSay);
+    else { S.routes = await api("POST", "/api/routes/refresh"); rtSay("Re-checked provider routes (no model call).", "ok"); }
+  } catch (e) { if (RT === s) rtSay(e.message, "bad"); }
+  if (RT !== s) return;
+  s.routeBusy = null;
+  try { if (!(await rtReloadLanes(s))) return; } catch (e) { if (RT === s) { rtSay(`Lanes could not be reloaded: ${e.message}`, "bad"); rtLanesRender(); } return; }
+  if (s.pre) await rtPreflight(); else rtStale();
+  const b = $("rtla-" + routeId) || $("rtlane-" + laneId); if (b) b.focus(); // the button is gone once the lane is ready
+}
+// Route detail under an admin lane: state, verification dates, last failure output and the next action.
+function rtRouteDetail(l) {
+  const kids = [];
+  for (const st of l.route_status || []) {
+    if (!st.installed) continue;
+    const dates = [st.verified_at ? `verified ${fmtTime(st.verified_at)}` : "never verified in Studio",
+      st.expires_at ? `${st.expires_at * 1000 < Date.now() ? "expired" : "expires"} ${fmtTime(st.expires_at)}` : ""].filter(Boolean).join(" · ");
+    kids.push(h("div", { class: "lmeta" }, h("span", {}, `${st.name} route`), statePill(st.state), h("span", {}, dates)));
+    if (st.state === "UNAVAILABLE" && st.evidence) kids.push(h("details", { class: "faint" }, h("summary", {}, "Last verification output"), h("pre", { class: "out" }, st.evidence)));
+  }
+  const a = l.next_action; const s = RT;
+  if (!a) return kids;
+  const name = (l.route_status || []).find((x) => x.route_id === a.route_id)?.name || l.name;
+  if (s.routeBusy && s.routeBusy.routeId === a.route_id) {
+    kids.push(h("div", { class: "row" }, h("button", { type: "button", class: "btn sm", disabled: true, "aria-busy": "true" }, icon("refresh"),
+      s.routeBusy.kind === "verify" ? `Verifying ${name}…` : "Re-checking…")));
+    return kids;
+  }
+  if (a.kind === "verify" && s.routeConfirm === a.route_id) {
+    kids.push(h("div", { class: "verify-confirm", role: "group", "aria-label": `Confirm verifying ${name}` },
+      h("p", { class: "muted", id: "rtlm-" + a.route_id }, `Sends one tiny test message using ${name}'s own plan quota (~10–40s). Usage-based overage, if enabled on that account, is not visible here.`),
+      h("div", { class: "row" }, h("button", { type: "button", class: "btn sm", id: "rtlgo-" + a.route_id, "aria-describedby": "rtlm-" + a.route_id, onclick: () => rtRouteAction("verify", a.route_id, l.id) }, icon("send"), "Send test message"),
+        h("button", { type: "button", class: "btn ghost sm", onclick: () => { s.routeConfirm = null; rtLanesRender(); const b = $("rtla-" + a.route_id); if (b) b.focus(); } }, "Cancel"))));
+    return kids;
+  }
+  const busy = !!s.routeBusy;
+  if (a.kind === "verify") {
+    kids.push(h("div", { class: "row" }, h("button", { type: "button", class: "btn sm", id: "rtla-" + a.route_id, disabled: busy,
+      onclick: () => { s.routeConfirm = a.route_id; rtLanesRender(); const b = $("rtlgo-" + a.route_id); if (b) b.focus(); } }, icon("shield"), `Verify ${name}`)));
+  } else {
+    if (a.kind === "login") kids.push(h("p", { class: "faint" }, `Sign in with ${name}'s own CLI in a terminal (for Cursor: cursor-agent login), then Re-check.`));
+    kids.push(h("div", { class: "row" }, h("button", { type: "button", class: "btn sm", id: "rtla-" + a.route_id, disabled: busy,
+      onclick: () => rtRouteAction("recheck", a.route_id, l.id) }, icon("refresh"), "Re-check")));
+  }
+  return kids;
 }
 const RT_LIVE_GATE = "LIVE_ROUNDTABLES_OFF";
 function rtLiveApply(on) {
@@ -754,9 +816,10 @@ function rtLanesRender() {
   if (RT.f.mode === "war_room") {
     el.lanes.replaceChildren(h("ul", { class: "rt-admins" }, ...RT_ADMINS.map(([id, name]) => {
       const l = rtLane(id);
-      return h("li", { class: "lane" }, h("div", { class: "lbody" }, h("div", { class: "lname" }, h("strong", {}, name), h("span", { class: "tag lc-admin" }, "admin")),
+      return h("li", { class: "lane", id: "rtlane-" + id, tabindex: "-1" }, h("div", { class: "lbody" }, h("div", { class: "lname" }, h("strong", {}, name), h("span", { class: "tag lc-admin" }, "admin")),
         h("div", { class: "lmeta" }, statePill(l ? l.readiness : "NOT_DETECTED"), h("span", {}, (l && l.route_type) || "no route")),
-        l && (l.reasons || []).length ? h("p", { class: "faint" }, l.reasons[0]) : null));
+        ...(l ? (l.reasons || []).map((r) => h("p", { class: "faint" }, r)) : []),
+        ...(l && !l.counts_as_speaker ? rtRouteDetail(l) : [])));
     })));
     return;
   }
@@ -780,7 +843,7 @@ function rtLanesRender() {
       h("div", { class: "lbody" },
         h("div", { class: "lname" }, h("label", { for: cid }, l.name), h("span", { class: "tag lc-" + l.lane_class }, RT_CLASS[l.lane_class] || l.lane_class)),
         h("div", { class: "lmeta" }, statePill(l.readiness), h("span", {}, l.route_type || "no route"),
-          h("span", {}, l.conversation_support === "in_app_verified" ? "in-app conversation verified" : l.conversation_support === "adapter_missing" ? "conversation adapter missing" : "no conversation support"),
+          h("span", {}, l.conversation_support === "in_app_verified" ? "in-app conversation verified" : l.conversation_support === "adapter_missing" ? "conversation adapter missing" : l.conversation_support === "route_not_ready" ? "conversation adapter present; route not ready" : "no conversation support"),
           h("span", {}, `cost: ${l.cost_visibility || "unknown"}`)),
         h("ul", { class: "lwhy", id: rid }, ...(reasons.length ? reasons.map((r) => h("li", {}, r)) : [h("li", {}, l.detection || "No ineligibility reasons reported.")]))));
   }) : [h("p", { class: "muted" }, "No lanes match this search or filter.")]));
@@ -3258,8 +3321,9 @@ function openGlobal(which) {
 function goSpend() { openGlobal("evidence").then(() => { const el = $("spend"); if (el) { el.scrollIntoView({ block: "start" }); const i = el.querySelector("input"); if (i) i.focus({ preventScroll: true }); } }); }
 // Per-route verification state for this session: { confirm, busy, started, result: {ok, detail, at, latency_s} }.
 const VERIFY = {};
-const VERIFIABLE = ["cursor", "antigravity", "copilot"];
-const canVerify = (id, r) => VERIFIABLE.includes(id) && ["UNVERIFIED", "UNAVAILABLE"].includes(r.state);
+const VERIFIABLE_FALLBACK = ["cursor", "antigravity", "copilot", "grok", "zai"]; // server sends r.verifiable
+const canVerify = (id, r) => (r.verifiable ?? VERIFIABLE_FALLBACK.includes(id)) && r.installed !== false
+  && r.next_step !== "recheck" && ["UNVERIFIED", "UNAVAILABLE"].includes(r.state);
 function verifyBlock(id, r) {
   const v = VERIFY[id] || (VERIFY[id] = {}); const name = routeName(id);
   const result = v.result ? h("div", { class: "note " + (v.result.ok ? "ok" : "bad"), tabindex: "-1", id: "vres-" + id }, icon(v.result.ok ? "check" : "alert"),
@@ -3280,22 +3344,27 @@ function verifyBlock(id, r) {
   return h("div", { class: "section" }, result,
     h("div", { class: "row" }, h("button", { type: "button", class: "btn sm", id: "vbtn-" + id, onclick: () => { v.confirm = true; renderProviders(); const b = $("vgo-" + id); if (b) b.focus(); } }, icon("shield"), "Verify")));
 }
-async function runVerify(id) {
-  const v = VERIFY[id]; const name = routeName(id);
+// One live verification call; shared by the Providers panel and the War Room. `say` announces progress and result.
+async function verifyRoute(id, say = banner) {
+  const v = VERIFY[id] || (VERIFY[id] = {}); const name = routeName(id);
   v.confirm = false; v.busy = true; v.started = Date.now();
   if (S.global === "providers") renderProviders();
-  banner(`Verifying ${name} with one test message…`);
+  say(`Verifying ${name} with one test message…`);
   try {
     const r = await api("POST", `/api/routes/${id}/verify`);
     if (r && r.routes) S.routes = r.routes;
     v.result = (r && r.verification) || { ok: false, detail: "No verification result returned." };
-    banner(v.result.ok ? `${routeName(id)} verified.` : `${routeName(id)} verification failed: ${v.result.detail || "no detail"}`, v.result.ok ? "ok" : "bad");
+    say(v.result.ok ? `${name} verified.` : `${name} verification failed: ${v.result.detail || "no detail"}`, v.result.ok ? "ok" : "bad");
   } catch (e) {
     v.result = { ok: false, detail: e.message };
-    banner(`${name} verification failed: ${e.message}`, "bad");
+    say(`${name} verification failed: ${e.message}`, "bad");
   }
   v.busy = false;
   if (S.project) renderHeader();
+  return v.result;
+}
+async function runVerify(id) {
+  await verifyRoute(id);
   if (S.global === "providers") { renderProviders(); const n = $("vres-" + id); if (n) n.focus(); }
 }
 // Long URLs in cost text become short links instead of breaking mid-word.

@@ -140,8 +140,10 @@ def preflight(store: Store, rec: dict, discovered: dict | None = None) -> dict:
               f"selected admins: {', '.join(sorted(admins)) or 'none'}")
         check("admin_ready", "Each administrator has a verified in-app route",
               all(l["counts_as_speaker"] for l in lanes if l["lane_class"] == "admin") and len(admins) == 3,
-              ", ".join(f"{l['id']}: {l['readiness']}" for l in lanes if l["lane_class"] == "admin"))
-    not_ready = [l["id"] for l in lanes if l["lane_class"] in ("admin", "speaker") and not l["counts_as_speaker"]]
+              " ".join(f"{l['name']}: ready." if l["counts_as_speaker"]
+                        else (l["reasons"] or [f"{l['name']}: {l['readiness']}"])[0]
+                        for l in lanes if l["lane_class"] == "admin"))
+    not_ready = [l["name"] for l in lanes if l["lane_class"] in ("admin", "speaker") and not l["counts_as_speaker"]]
     check("funding", "Every selected speaker has a known funding source or included route", not not_ready,
           f"no verified route/funding: {', '.join(not_ready)}" if not_ready else "")
     check("sharing", "External-sharing preview acknowledged", rec["sharing_ack"])

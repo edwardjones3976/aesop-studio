@@ -920,12 +920,10 @@ def main(argv=None):
 
     def reverify_watch():
         while True:
-            for rid in providers.due_reverify(srv.app.store):
-                try:
-                    providers.verify_live(srv.app.store, rid)
-                    providers.refresh(srv.app.store)
-                except Exception as e:  # never let a provider hiccup stop the watcher
-                    print(f"background verification of {rid} failed: {type(e).__name__}")
+            try:
+                providers.reverify_once(srv.app.store)
+            except Exception as e:  # noqa: BLE001 - never let a provider hiccup stop the watcher
+                print(f"background verification pass failed: {type(e).__name__}")
             time.sleep(600)
 
     import threading as _threading
