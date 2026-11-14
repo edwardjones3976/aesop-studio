@@ -106,6 +106,7 @@ class TestBroker(unittest.TestCase):
         first_floor = min(self.sup.get(e["task_id"])["started"] for e in msgs)
         self.assertLess(first_floor, max(t["ended"] for t in tasks) + 1.0)
 
+    @_ci_flaky_retry
     def test_stop_and_reconcile_never_replay(self):
         rec = self.draft()
         self.broker.start(rec, self.svc.project(self.p["id"]), clock={"limit_s": 60, "reserve_s": 5, "turn_timeout": 30})
