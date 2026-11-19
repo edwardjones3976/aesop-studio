@@ -2259,6 +2259,51 @@ function photoViewer(url, name) {
   document.body.append(d); d.showModal();
 }
 window.addEventListener("paste", (e) => { if (S.chatPaste && !e.defaultPrevented) S.chatPaste(e); });
+async function shapePrompt(ta, grow, draftKey) {
+  if (!S.project) return;
+  await guard(async () => {
+    const schema = await api("GET", "/api/prompt-generator/schema");
+    const v = await dialog("Shape a prompt (offline)", [
+      { name: "idea", label: "What should the prompt accomplish?", type: "textarea", value: (ta.value || "").trim(), required: true,
+        help: "Aesop builds a structured scaffold locally. Nothing is sent to a provider until you Send." },
+      { name: "mode", label: "Mode", type: "select", value: "auto",
+        options: (schema.modes || []).map((m) => ({ value: m.id, label: m.label })) },
+      { name: "output_kind", label: "Output", type: "select", value: "ready",
+        options: (schema.output_kinds || []).map((m) => ({ value: m.id, label: m.label })) },
+      { name: "target", label: "Target", type: "select", value: "universal",
+        options: (schema.targets || []).map((m) => ({ value: m.id, label: m.label })) },
+      { name: "language", label: "Output language", type: "select", value: "en",
+        options: (schema.languages || []).map((m) => ({ value: m.id, label: m.label })) },
+      { name: "audience", label: "Audience (optional)", value: "" },
+      { name: "format", label: "Expected format (optional)", value: "" },
+      { name: "constraints", label: "Constraints (optional)", type: "textarea", value: "" },
+      { name: "context", label: "Extra context (optional)", type: "textarea", value: "" },
+    ], "Build prompt");
+    if (!v) return;
+    const before = ta.value;
+    const r = await api("POST", `/api/projects/${S.project.id}/prompt-generator`, {
+      idea: v.idea, mode: v.mode, output_kind: v.output_kind, target: v.target, language: v.language,
+      audience: v.audience, format: v.format, constraints: v.constraints, context: v.context,
+    });
+    // Don't clobber edits typed while the offline build was in flight (same idea as send clearing drafts).
+    if (ta.value !== before) {
+      banner("Prompt shaped, but the composer changed while building — left your edit in place.", "bad");
+      ta.focus();
+      return;
+    }
+    ta.value = r.prompt || "";
+    if (typeof grow === "function") grow();
+    if (draftKey) ssSet(draftKey, ta.value);
+    const tips = [];
+    if (r.recommended_routes && r.recommended_routes.length) {
+      tips.push("Routes: " + r.recommended_routes.map((x) => x.display_name || x.id).join(", "));
+    }
+    if (r.variables && r.variables.length) tips.push("Variables: " + r.variables.map((x) => "{" + x.name + "}").join(", "));
+    banner("Prompt shaped offline" + (tips.length ? " — " + tips.join(" · ") : "") + ".", "ok");
+    ta.focus();
+  });
+}
+
 async function renderChat() {
   if (!S.project || S.global || S.tab !== "chat") return;
   const pid = S.project.id;
@@ -2558,7 +2603,10 @@ async function renderChat() {
           const paint = () => { b.textContent = predictOn() ? "✦ predict on" : "predict off"; b.classList.toggle("off", !predictOn()); };
           b.onclick = () => { try { localStorage.setItem("aesop.predict", predictOn() ? "0" : "1"); } catch { /* */ } paint(); ta.focus(); };
           paint(); return b; })()),
-      h("div", { class: "row" }, btn("Preview context", preview, "ghost", "eye"), sendBtn)));
+      h("div", { class: "row" },
+        btn("Shape prompt", () => shapePrompt(ta, grow, draftKey), "ghost", "sparkle"),
+        btn("Preview context", preview, "ghost", "eye"),
+        sendBtn)));
   root.append(msgsEl, h("div", { class: "composer-dock" }, composer));
   // drop photos, files or whole folders anywhere on the chat
   let dragDepth = 0;

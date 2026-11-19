@@ -18,6 +18,8 @@ All notable changes to this repository are documented here. The server uses cale
 
 ## Unreleased (prior branches)
 
+- **testrun:** Prefer `python3` on PATH when `python` is absent (Linux offline suite).
+- **Prompt generator:** Offline idea → structured prompt scaffolds (modes, ready/reusable, variables, Studio route hints) via Chat “Shape prompt”; optional enhance on included/local/simulated chat routes only (`aesop_studio/prompt_generator.py`).
 - GitHub Actions CI (Windows + Ubuntu, Python 3.11/3.12/3.14).
 - Contributing, security, issue/PR templates, `CODEOWNERS`, editor and line-ending hygiene.
 - `LICENSE` (all rights reserved) and `docs/REPO-SETTINGS.md` per Foreman ruling.

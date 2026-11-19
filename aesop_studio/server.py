@@ -17,7 +17,26 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import arena, backup, browse_agent, study, browser as browser_mod, deletion, plan, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare
+from . import (
+    arena,
+    backup,
+    browse_agent,
+    study,
+    browser as browser_mod,
+    deletion,
+    plan,
+    derive,
+    evidence,
+    followup,
+    lanes,
+    team,
+    ledger,
+    providers,
+    prompt_generator,
+    researcher,
+    roundtable,
+    roundtable_compare,
+)
 from .security import MAX_UPLOAD_BYTES, ScopeError, redact
 from .services import Conflict, Services
 from .sessions import SESSION_DAYS, Sessions
@@ -628,6 +647,37 @@ class Handler(BaseHTTPRequestHandler):
     @route("POST", r"/api/projects/(\w+)/plan/draft")
     def plan_draft(self, sess, pid):
         self.json(plan.draft(self.app.store, self.app.sup, self.app.svc, pid), 202)
+
+    # ---- prompt generator (offline scaffolds; optional included-route enhance) ----
+    @route("GET", r"/api/prompt-generator/schema")
+    def prompt_generator_schema(self, sess):
+        self.json(prompt_generator.schema())
+
+    @route("POST", r"/api/projects/(\w+)/prompt-generator")
+    def prompt_generator_build(self, sess, pid):
+        self.app.svc.project(pid)
+        b = self.body()
+        self.json(prompt_generator.generate(
+            self.app.store, pid,
+            idea=b.get("idea") or "",
+            mode=b.get("mode") or "auto",
+            target=b.get("target") or "universal",
+            language=b.get("language") or "en",
+            output_kind=b.get("output_kind") or "ready",
+            audience=b.get("audience") or "",
+            output_format=b.get("format") or b.get("output_format") or "",
+            constraints=b.get("constraints") or "",
+            context=b.get("context") or "",
+        ), 201)
+
+    @route("POST", r"/api/projects/(\w+)/prompt-generator/enhance")
+    def prompt_generator_enhance(self, sess, pid):
+        self.app.svc.project(pid)
+        b = self.body()
+        self.json(prompt_generator.enhance(
+            self.app.store, self.app.sup, self.app.svc, pid,
+            b.get("prompt") or "", b.get("provider") or None,
+        ), 202)
 
     # ---- reference studies (R.E.A.) ----
     @route("GET", r"/api/study/refs")
