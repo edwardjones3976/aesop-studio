@@ -62,14 +62,14 @@ MAX_FIELD = 2000
 MAX_PROMPT = MAX_IDEA + 4 * MAX_FIELD + 2048
 ENHANCE_TIMEOUT = 120
 ENHANCE_PREFERRED = (
-    "simulated", "claude", "codex", "cursor", "antigravity", "copilot", "grok", "zai",
+    "simulated", "claude", "codex", "cursor", "antigravity", "grok", "zai",
     "director-lmstudio", "director-ollama",
 )
 
 # Studio routes preferred when target is universal / by mode family.
 _ROUTE_HINTS = {
     "research": ("perplexity-orchestrator", "perplexity", "claude", "codex", "cursor", "antigravity"),
-    "code": ("codex", "claude", "cursor", "antigravity", "copilot", "simulated"),
+    "code": ("codex", "claude", "cursor", "antigravity", "simulated"),
     "agent": ("codex", "claude", "cursor", "antigravity", "simulated"),
     "writing": ("claude", "codex", "cursor", "antigravity"),
     "planning": ("claude", "codex", "cursor", "antigravity"),

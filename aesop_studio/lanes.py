@@ -20,7 +20,10 @@ from .store import Store
 ADMINS = ("openai", "claude", "cursor")  # documented administrator identities (Codex, Claude Code, Cursor)
 # Owner naming rule: each family is titled by its code-based product (OpenAI/ChatGPT/Codex -> "Codex").
 DOCUMENTED_EXAMPLE = ["Codex", "Claude Code", "Cursor", "Director (local)", "Grok CLI", "Antigravity",
-                      "Perplexity", "Firecrawl", "Copilot CLI", "Z.ai GLM Coding"]
+                      "Perplexity", "Firecrawl", "Z.ai GLM Coding"]
+# Owner 2026-11-11: retired providers stay out of credential-only discovery; leftover *.dpapi files are
+# never opened or deleted (archive, don't delete).
+RETIRED_FROM_SECRET_DISCOVERY = frozenset({"copilot"})
 
 _HOME = Path.home()
 _LOCAL = Path(os.environ.get("LOCALAPPDATA", _HOME / "AppData" / "Local"))
@@ -41,8 +44,6 @@ CATALOG = [
      "research tool; not a conversational speaker"),
     ("firecrawl", "Firecrawl", "research", ["firecrawl"], [], ["firecrawl"],
      "research tool (credit-based); not a conversational speaker"),
-    ("copilot", "Copilot CLI", "speaker", ["copilot"], [], ["copilot"],
-     "GitHub Copilot premium-request quota"),
     ("zai", "Z.ai GLM Coding", "speaker", ["claude-zai"], [_HOME / ".local" / "bin" / "claude-zai.cmd"], ["zai"],
      "Z.ai GLM Coding Plan credits (owner-confirmed paid plan)"),
     ("director-local", "Director (local)", "speaker", ["lms", "ollama"], [],
@@ -153,7 +154,7 @@ def discover(store: Store) -> dict:
                       "cost_visibility": r.get("incremental_cost_status", "unknown"), "billing_note": r["limitations"],
                       "counts_as_speaker": False,  # unknown/test lanes never inflate a roundtable count
                       "reasons": ["Discovered lane outside the documented roster; not counted as a speaker."]})
-    for name in sorted(secrets - known - {"anthropic", "gemini", "xai"}):
+    for name in sorted(secrets - known - {"anthropic", "gemini", "xai"} - RETIRED_FROM_SECRET_DISCOVERY):
         lanes.append({"id": f"secret:{name}", "name": name, "lane_class": "speaker", "detected": True,
                       "detection": "credential registered in provider store", "readiness": "INSTALLED_UNVERIFIED",
                       "route_type": "unknown", "route_id": None, "verified_routes": [],
