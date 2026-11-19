@@ -161,6 +161,45 @@ class TestPromptGenerator(unittest.TestCase):
         routes["simulated"] = dict(ok, id="simulated")
         self.assertEqual(prompt_generator._pick_enhance_route(routes), "simulated")
 
+    def test_enhance_clears_foreign_model_when_route_switches(self):
+        project = {"id": "prj_x", "provider_default": "claude", "model": "opus", "root": "/tmp"}
+        switched = prompt_generator._project_for_enhance(project, "director-lmstudio")
+        self.assertNotIn("model", switched)
+        self.assertEqual(switched["provider_default"], "claude")
+        same = prompt_generator._project_for_enhance(project, "claude")
+        self.assertEqual(same.get("model"), "opus")
+        # Live enhance: pin a foreign model on claude default, only simulated enhance-ok.
+        self.svc.update_project(self.p["id"], {"provider_default": "claude", "model": "opus"})
+        routes = providers.cached(self.store)
+        for rid, r in list(routes.items()):
+            r = dict(r, id=rid)
+            if rid == "simulated":
+                r.update(state="SIMULATED", supported_modes=["chat"])
+            else:
+                r.update(state="READY_METERED_DISABLED", supported_modes=["chat"])
+            routes[rid] = r
+        self.store.x(
+            "INSERT INTO kv(k,v) VALUES('routes',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            (json.dumps(routes),),
+        )
+        seen = {}
+        real_create = self.sup.create
+
+        def wrap(project, route_id, prompt, mode="agent", timeout=120, images=None, research=None, study=None):
+            seen["model"] = project.get("model")
+            seen["route"] = route_id
+            return real_create(project, route_id, prompt, mode=mode, timeout=timeout,
+                               images=images, research=research, study=study)
+
+        self.sup.create = wrap  # type: ignore[method-assign]
+        out = prompt_generator.enhance(
+            self.store, self.sup, self.svc, self.p["id"],
+            "Improve this structured prompt with clear constraints and output format.",
+        )
+        self.assertEqual(out["route"], "simulated")
+        self.assertEqual(seen["route"], "simulated")
+        self.assertIsNone(seen.get("model"))
+
 
 if __name__ == "__main__":
     unittest.main()

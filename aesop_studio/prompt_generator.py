@@ -200,6 +200,14 @@ def _pick_enhance_route(routes: dict, preferred: str | None = None) -> str | Non
     return None
 
 
+def _project_for_enhance(project: dict, route: str) -> dict:
+    """Drop a foreign model pin when enhance switches away from the project's default provider."""
+    out = dict(project)
+    if route != project.get("provider_default"):
+        out.pop("model", None)
+    return out
+
+
 def generate(
     store,
     pid: str,
@@ -325,7 +333,10 @@ def enhance(store, sup, svc, pid: str, prompt: str, provider: str | None = None)
         "Return ONLY the improved prompt text. Do not add commentary.\n\n"
         f"PROMPT:\n{prompt}"
     )
-    tid = sup.create(p, route, instruction, mode="chat", timeout=ENHANCE_TIMEOUT)
+    # Supervisor.create forwards project["model"] into build_argv; a Claude opus pin must not
+    # follow the call onto director-lmstudio / another route that rejects foreign models.
+    tid = sup.create(_project_for_enhance(p, route), route, instruction, mode="chat",
+                     timeout=ENHANCE_TIMEOUT)
     end = time.time() + ENHANCE_TIMEOUT + 30
     while time.time() < end:
         t = sup.final(tid)
