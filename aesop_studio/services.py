@@ -11,7 +11,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import providers
-from .security import (ScopeError, extract, html_to_text, redact, safe_fetch, sanitize_url,  # noqa: F401
+from .security import (extract, html_to_text, redact, safe_fetch, sanitize_url,
                        validate_root)
 from .store import Store, new_id
 from .tasks import TERMINAL, Supervisor
@@ -28,7 +28,6 @@ RESEARCH_ROUTES = ("firecrawl", "perplexity")  # answer on the spot from the web
 MAX_IMAGES_PER_MESSAGE = 12  # 6 photos from the owner; very tall or wide ones may be split into parts
 MAX_IMAGE_BYTES_PER_MESSAGE = 20 * 1024 * 1024
 
-CONTEXT_MESSAGES = 8  # (kept for older callers)
 HISTORY_MESSAGES = 30
 HISTORY_MESSAGE_CHARS = 6000
 # Room for the conversation so far, per provider (characters). Argv-prompt routes (Grok, Antigravity) cap at 24k.
