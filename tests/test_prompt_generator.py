@@ -77,6 +77,30 @@ class TestPromptGenerator(unittest.TestCase):
         with self.assertRaises(ValueError):
             prompt_generator.generate(self.store, self.p["id"], idea="enough text here", mode="nope")
 
+    def test_preserves_internal_newlines_and_indentation(self):
+        idea = (
+            "Use this snippet in the prompt:\n"
+            "```yaml\n"
+            "services:\n"
+            "  api:\n"
+            "    image: app:latest\n"
+            "```\n"
+        )
+        context = "\n  leading and trailing\n\tindented line\n"
+        r = prompt_generator.generate(
+            self.store, self.p["id"],
+            idea=idea,
+            mode="code",
+            output_kind="ready",
+            context=context,
+        )
+        self.assertIn("```yaml\nservices:\n  api:\n    image: app:latest\n```", r["prompt"])
+        self.assertIn("leading and trailing\n\tindented line", r["prompt"])
+        # enhance path uses the same cleaner
+        cleaned = prompt_generator._clean("  a:\n    b: 1\n  ", 100)
+        self.assertEqual(cleaned, "a:\n    b: 1")
+        self.assertNotEqual(cleaned, "a: b: 1")
+
     def test_enhance_with_simulated(self):
         base = prompt_generator.generate(
             self.store, self.p["id"], idea="Summarize the project memory rules for a new agent",

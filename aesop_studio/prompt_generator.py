@@ -92,7 +92,8 @@ def schema() -> dict:
 
 
 def _clean(text: str, limit: int) -> str:
-    return " ".join((text or "").split())[:limit]
+    """Trim only surrounding whitespace; keep internal newlines/indentation (fenced code, YAML)."""
+    return (text or "").strip()[:limit]
 
 
 def _lang_label(code: str) -> str:
