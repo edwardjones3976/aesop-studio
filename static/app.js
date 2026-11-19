@@ -2280,10 +2280,17 @@ async function shapePrompt(ta, grow, draftKey) {
       { name: "context", label: "Extra context (optional)", type: "textarea", value: "" },
     ], "Build prompt");
     if (!v) return;
+    const before = ta.value;
     const r = await api("POST", `/api/projects/${S.project.id}/prompt-generator`, {
       idea: v.idea, mode: v.mode, output_kind: v.output_kind, target: v.target, language: v.language,
       audience: v.audience, format: v.format, constraints: v.constraints, context: v.context,
     });
+    // Don't clobber edits typed while the offline build was in flight (same idea as send clearing drafts).
+    if (ta.value !== before) {
+      banner("Prompt shaped, but the composer changed while building — left your edit in place.", "bad");
+      ta.focus();
+      return;
+    }
     ta.value = r.prompt || "";
     if (typeof grow === "function") grow();
     if (draftKey) ssSet(draftKey, ta.value);

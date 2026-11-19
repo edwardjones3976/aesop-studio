@@ -58,7 +58,13 @@ _MODE_META = {
 _VAR_RE = re.compile(r"\{([a-z][a-z0-9_]{0,39})\}")
 MAX_IDEA = 4000
 MAX_FIELD = 2000
+# Fits a full generate() scaffold (max idea + four fields + section labels), not a silent 8k cut.
+MAX_PROMPT = MAX_IDEA + 4 * MAX_FIELD + 2048
 ENHANCE_TIMEOUT = 120
+ENHANCE_PREFERRED = (
+    "simulated", "claude", "codex", "cursor", "antigravity", "copilot", "grok", "zai",
+    "director-lmstudio", "director-ollama",
+)
 
 # Studio routes preferred when target is universal / by mode family.
 _ROUTE_HINTS = {
@@ -92,8 +98,14 @@ def schema() -> dict:
 
 
 def _clean(text: str, limit: int) -> str:
-    """Trim only surrounding whitespace; keep internal newlines/indentation (fenced code, YAML)."""
-    return (text or "").strip()[:limit]
+    """Trim only surrounding whitespace; keep internal newlines/indentation (fenced code, YAML).
+
+    Oversized input is rejected (not truncated) so enhance never drops the tail of a valid scaffold.
+    """
+    out = (text or "").strip()
+    if len(out) > limit:
+        raise ValueError(f"text exceeds {limit} characters ({len(out)} given)")
+    return out
 
 
 def _lang_label(code: str) -> str:
@@ -173,6 +185,19 @@ def _enhance_ok(route: dict) -> bool:
     return bool(route) and providers.usable(route, "chat") and route.get("state") in (
         "READY_INCLUDED", "READY_LOCAL", "SIMULATED",
     )
+
+
+def _pick_enhance_route(routes: dict, preferred: str | None = None) -> str | None:
+    """Prefer an explicit/project route, then ENHANCE_PREFERRED, then any other eligible cached route."""
+    if preferred and preferred in routes and _enhance_ok(routes[preferred]):
+        return preferred
+    for rid in ENHANCE_PREFERRED:
+        if rid in routes and _enhance_ok(routes[rid]):
+            return rid
+    for rid, route in routes.items():
+        if rid not in ENHANCE_PREFERRED and _enhance_ok(route):
+            return rid
+    return None
 
 
 def generate(
@@ -284,15 +309,12 @@ def generate(
 
 def enhance(store, sup, svc, pid: str, prompt: str, provider: str | None = None) -> dict:
     """Optional polish via an included/local/simulated chat route. Never uses metered billing."""
-    prompt = redact(_clean(prompt, MAX_IDEA * 2))
+    prompt = redact(_clean(prompt, MAX_PROMPT))
     if len(prompt) < 20:
         raise ValueError("paste a prompt to enhance first")
     p = svc.project(pid)
     routes = providers.cached(store)
-    route = provider or p.get("provider_default")
-    if not route or not _enhance_ok(routes.get(route, {})):
-        route = next((r for r in ("simulated", "claude", "codex", "cursor", "antigravity")
-                      if r in routes and _enhance_ok(routes[r])), None)
+    route = _pick_enhance_route(routes, provider or p.get("provider_default"))
     if not route:
         raise ValueError(
             "enhance needs an included, local, or simulated chat route; "

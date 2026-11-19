@@ -126,6 +126,41 @@ class TestPromptGenerator(unittest.TestCase):
             prompt_generator.enhance(self.store, self.sup, self.svc, self.p["id"], "x" * 40)
         self.assertIn("metered", str(ctx.exception).lower())
 
+    def test_enhance_rejects_oversized_instead_of_truncating(self):
+        too_big = "p" * (prompt_generator.MAX_PROMPT + 1)
+        with self.assertRaises(ValueError) as ctx:
+            prompt_generator.enhance(self.store, self.sup, self.svc, self.p["id"], too_big)
+        self.assertIn("exceeds", str(ctx.exception).lower())
+        # A full generate scaffold still fits the enhance limit.
+        base = prompt_generator.generate(
+            self.store, self.p["id"],
+            idea="x" * prompt_generator.MAX_IDEA,
+            mode="general",
+            output_kind="ready",
+            audience="a" * prompt_generator.MAX_FIELD,
+            output_format="f" * prompt_generator.MAX_FIELD,
+            constraints="c" * prompt_generator.MAX_FIELD,
+            context="k" * prompt_generator.MAX_FIELD,
+        )
+        self.assertLessEqual(len(base["prompt"]), prompt_generator.MAX_PROMPT)
+        out = prompt_generator.enhance(
+            self.store, self.sup, self.svc, self.p["id"], base["prompt"], "simulated",
+        )
+        self.assertEqual(out["route"], "simulated")
+
+    def test_enhance_falls_back_beyond_preferred_list(self):
+        ok = {"state": "SIMULATED", "supported_modes": ["chat"]}
+        bad = {"state": "READY_METERED_DISABLED", "supported_modes": ["chat"]}
+        routes = {rid: dict(bad, id=rid) for rid in prompt_generator.ENHANCE_PREFERRED}
+        routes["extra-local"] = dict(ok, id="extra-local")
+        self.assertEqual(prompt_generator._pick_enhance_route(routes), "extra-local")
+        self.assertEqual(
+            prompt_generator._pick_enhance_route(routes, preferred="extra-local"),
+            "extra-local",
+        )
+        routes["simulated"] = dict(ok, id="simulated")
+        self.assertEqual(prompt_generator._pick_enhance_route(routes), "simulated")
+
 
 if __name__ == "__main__":
     unittest.main()
