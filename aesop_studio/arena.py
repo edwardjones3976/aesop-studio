@@ -93,7 +93,12 @@ def estimate(store: Store, route_id: str, demo_id: str) -> dict:
         "live_dispatch": False,
         "brief_bytes": brief,
     }
-    if basis in ("subscription_included", "local") or state in ("READY_INCLUDED", "READY_LOCAL", "SIMULATED"):
+    # READY_METERED_DISABLED can keep billing_basis="subscription_included" (e.g. Codex CLI on
+    # API-key auth). Treat any METERED state as metered so estimates never report $0 for it.
+    metered_state = "METERED" in str(state)
+    if not metered_state and (
+            basis in ("subscription_included", "local")
+            or state in ("READY_INCLUDED", "READY_LOCAL", "SIMULATED")):
         out.update(
             estimate_usd=0.0,
             estimate_kind="included_or_local",
@@ -101,7 +106,7 @@ def estimate(store: Store, route_id: str, demo_id: str) -> dict:
             price_source=route.get("incremental_cost_status") or basis,
         )
         return out
-    if basis == "metered" or "METERED" in str(state):
+    if basis == "metered" or metered_state:
         # Only Codex API has a verified in-repo price table. Other metered routes stay honest.
         if route_id == "openai-api":
             model = openai_api.DEFAULT_MODEL

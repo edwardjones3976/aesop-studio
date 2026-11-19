@@ -11,8 +11,8 @@ Dual-lane model comparison shell **inside Aesop Studio** — left rail tab **Are
 ## What v1 ships
 
 - **Split panes** — Lane A / Lane B.
-- **Lane pickers** — each lane independently selects any Studio route from `/api/routes` (codex, claude, cursor, antigravity, grok, zai, director-lmstudio/ollama, simulated, etc.). Preferences persist per browser.
-- **Cost readout** — per-lane estimate from `/api/arena/estimate` (and bundled `/api/arena/compare`). Uses ledger-aligned billing basis: included/local/simulated → `$0`; Codex API → verified price-table ceiling for a reference brief; other metered routes → honest “unknown” note. **Nothing is reserved or dispatched.**
+- **Lane pickers** — each lane independently selects any Studio route from `/api/routes` (codex, claude, cursor, antigravity, grok, zai, director-lmstudio/ollama, simulated, etc.), including `READY_METERED_DISABLED` so metered estimates can be compared while spend stays off. Preferences persist per browser.
+- **Cost readout** — per-lane estimate from `/api/arena/estimate` (and bundled `/api/arena/compare`). Uses ledger-aligned billing basis / state: included/local/simulated → `$0`; any `METERED` state (even when `billing_basis` still says subscription) is never reported as free; Codex API → verified price-table ceiling for a reference brief; other metered routes → honest “unknown” note. **Nothing is reserved or dispatched.** Stale estimate responses are ignored via a cost-request generation.
 - **Loadable demos** (interactive fixtures, not screenshots-only): Alpine Atlas, Lost Valley, Deep Time Atlas, Optical Gallery. Plain canvas/CSS under `static/arena/`; no new Python deps, no CDN (CSP `script-src 'self'`).
 
 ## What v1 does not do
