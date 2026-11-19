@@ -17,7 +17,7 @@ from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import backup, browse_agent, study, browser as browser_mod, deletion, plan, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare
+from . import arena, backup, browse_agent, study, browser as browser_mod, deletion, plan, derive, evidence, followup, lanes, team, ledger, providers, researcher, roundtable, roundtable_compare
 from .security import MAX_UPLOAD_BYTES, ScopeError, redact
 from .services import Conflict, Services
 from .sessions import SESSION_DAYS, Sessions
@@ -214,6 +214,38 @@ class Handler(BaseHTTPRequestHandler):
     @route("GET", r"/api/routes")
     def routes(self, sess):
         self.json(providers.cached(self.app.store))
+
+    @route("GET", r"/api/arena/demos")
+    def arena_demos(self, sess):
+        self.json({"demos": arena.demos(), "live_dual_generation": False, "live_note": arena.LIVE_NOTE})
+
+    @route("GET", r"/api/arena/estimate")
+    def arena_estimate(self, sess):
+        """Read-only lane cost readout. Never reserves ledger funds or dispatches providers."""
+        q = self.query
+        route_id = (q.get("route") or [""])[0]
+        demo_id = (q.get("demo") or ["alpine"])[0]
+        if not route_id:
+            raise ValueError("route query parameter is required")
+        self.json(arena.estimate(self.app.store, route_id, demo_id))
+
+    @route("GET", r"/api/arena/compare")
+    def arena_compare(self, sess):
+        """Bundle demo catalog + estimates for lanes A/B. Read-only; no dispatch."""
+        q = self.query
+        demo_id = (q.get("demo") or ["alpine"])[0]
+        lane_a = (q.get("a") or [""])[0]
+        lane_b = (q.get("b") or [""])[0]
+        routes = providers.cached(self.app.store)
+        if not lane_a or lane_a not in routes:
+            lane_a = next((rid for rid, r in routes.items() if "READY" in str(r.get("state", "")) or r.get("state") == "SIMULATED"),
+                          next(iter(routes), ""))
+        if not lane_b or lane_b not in routes:
+            ids = list(routes)
+            lane_b = next((rid for rid in ids if rid != lane_a), lane_a)
+        if not lane_a:
+            raise ValueError("no Studio routes available for Arena")
+        self.json(arena.compare_payload(self.app.store, lane_a, lane_b, demo_id))
 
     @route("POST", r"/api/routes/refresh")
     def routes_refresh(self, sess):

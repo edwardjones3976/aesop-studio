@@ -52,7 +52,7 @@ const access = (state) => state === "READY_INCLUDED" ? "official CLI · plan quo
   : state === "SIMULATED" ? "simulated test route" : "unavailable";
 const hashIdx = (s, n) => { let x = 0; for (const c of String(s)) x = (x * 31 + c.charCodeAt(0)) >>> 0; return x % n; };
 const initials = (s) => { const w = String(s || "?").trim().split(/[\s_\-.]+/).filter(Boolean); return ((w[0] || "?")[0] + (w.length > 1 ? w[1][0] : (w[0] || "").slice(1, 2))).toUpperCase(); };
-const WS = { chat: "Chat", agent: "Build", memory: "Memory", artifacts: "Saved" }; // research lives inside Chat
+const WS = { chat: "Chat", agent: "Build", arena: "Arena", memory: "Memory", artifacts: "Saved" }; // research lives inside Chat
 const GL = { providers: "Providers", evidence: "Evidence" };
 
 // ---------- icons (inline SVG via createElementNS; no markup strings) ----------
@@ -75,7 +75,8 @@ const ICONS = {
   shield: "M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z", db: "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zM4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
   dollar: "M12 2v20M17 6H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6", note: "M4 4h16v16H4zM8 9h8M8 13h8M8 17h5",
   help: "M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0z",
-  panel: "M3 4h18v16H3zM15 4v16", more: "M12 5h.01M12 12h.01M12 19h.01", users: "M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM22 19v-1a4 4 0 0 0-3-3.9M16 4.1a3 3 0 0 1 0 5.8", diff: "M12 3v12M6 9h12M6 21h12", trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3", list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+  panel: "M3 4h18v16H3zM15 4v16", more: "M12 5h.01M12 12h.01M12 19h.01", users: "M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM22 19v-1a4 4 0 0 0-3-3.9M16 4.1a3 3 0 0 1 0 5.8", diff: "M12 3v12M6 9h12M6 21h12", trash: "M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3",   list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+  columns: "M4 4h6v16H4zM14 4h6v16h-6z",
 };
 function icon(name, cls = "") {
   const s = document.createElementNS(SVGNS, "svg");
@@ -201,7 +202,7 @@ function dialog(title, fields, submitLabel = "Save") {
 }
 function showShortcuts() {
   const rows = [[["Ctrl", "K"], "Open the command palette"], [["Ctrl", "Enter"], "Send message / start task"], [["Ctrl", "1"], "Chat"], [["Ctrl", "2"], "Build"],
-    [["Ctrl", "3"], "Research notebook (in Chat)"], [["Esc"], "Close a dialog, drawer or sheet"], [["?"], "Show this list"], [["←", "→"], "Resize a focused panel divider"]];
+    [["Ctrl", "3"], "Research notebook (in Chat)"], [["Ctrl", "4"], "Arena compare"], [["Esc"], "Close a dialog, drawer or sheet"], [["?"], "Show this list"], [["←", "→"], "Resize a focused panel divider"]];
   if ($("dlg").open || $("rtDlg").open) return Promise.resolve(null);
   const done = dialog("Keyboard shortcuts", [], "Close");
   $("dlgForm").insertBefore(h("dl", { class: "keylist" }, ...rows.flatMap(([k, d]) => [h("dt", {}, ...k.map((x) => h("kbd", {}, x))), h("dd", {}, d)])), $("dlgForm").querySelector(".actions"));
@@ -348,9 +349,10 @@ function globalKeys(e) {
     return;
   }
   if (isTyping(e.target)) return;
-  if (e.ctrlKey && !e.altKey && !e.shiftKey && ["1", "2", "3"].includes(e.key) && S.project) {
+  if (e.ctrlKey && !e.altKey && !e.shiftKey && ["1", "2", "3", "4"].includes(e.key) && S.project) {
     e.preventDefault();
     if (e.key === "3") { openResearch(); return; }
+    if (e.key === "4") { setTab("arena"); return; }
     setTab(["chat", "agent"][Number(e.key) - 1]); return;
   }
   if (e.key === "?" && !e.ctrlKey && !e.altKey) { e.preventDefault(); showShortcuts(); }
@@ -376,7 +378,7 @@ function routeIndicator() {
 let PAL = { items: [], sel: 0, opener: null };
 function paletteItems() {
   const it = [];
-  if (S.project) for (const [k, v] of Object.entries(WS)) it.push({ g: "Workspace", ico: { chat: "chat", agent: "terminal", memory: "layers", artifacts: "bookmark" }[k], label: `Go to ${v}`, key: { chat: "Ctrl 1", agent: "Ctrl 2" }[k], run: () => setTab(k) });
+  if (S.project) for (const [k, v] of Object.entries(WS)) it.push({ g: "Workspace", ico: { chat: "chat", agent: "terminal", arena: "columns", memory: "layers", artifacts: "bookmark" }[k], label: `Go to ${v}`, key: { chat: "Ctrl 1", agent: "Ctrl 2", arena: "Ctrl 4" }[k], run: () => setTab(k) });
   if (S.project) it.push({ g: "Workspace", ico: "search", label: "Open the research notebook (in Chat)", key: "Ctrl 3", run: () => openResearch() });
   for (const p of S.projects) it.push({ g: "Project", ico: "folder", label: `Switch to ${p.name}`, hint: p.root, run: () => openProject(p.id) });
   it.push({ g: "Action", ico: "plus", label: "New project", run: newProject });
@@ -1373,8 +1375,8 @@ function rtMenu() {
 // ---------- boot ----------
 // Navigation token: every project/view switch bumps navGen and viewGen. Async work checks its token before touching state or the DOM.
 S.navGen = 0; S.viewGen = 0;
-function navBump() { S.navGen++; S.viewGen++; clearInterval(S.poll); }
-const RENDER = { chat: () => renderChat(), agent: (sel) => renderAgent(sel), memory: () => renderMemory(), artifacts: () => renderArtifacts() };
+function navBump() { S.navGen++; S.viewGen++; clearInterval(S.poll); if (typeof arenaDestroyMounts === "function") arenaDestroyMounts(); }
+const RENDER = { chat: () => renderChat(), agent: (sel) => renderAgent(sel), arena: () => renderArena(), memory: () => renderMemory(), artifacts: () => renderArtifacts() };
 function errorView(msg, retry) {
   return h("div", { class: "note bad", role: "alert" }, icon("alert"), h("div", { class: "section" }, h("span", {}, msg), retry ? h("div", {}, btn("Retry", retry, "sm", "refresh")) : null));
 }
@@ -3166,6 +3168,122 @@ function saveAsFinding(pid, text) {
 }
 
 // ---------- memory ----------
+// ---------- Arena (dual-lane compare shell; demos + pickers + cost; no live dual-gen in v1) ----------
+const ARENA = { demo: "alpine", a: "", b: "", mounts: { a: null, b: null }, demos: [], note: "" };
+function arenaRouteOptions(selected) {
+  return Object.entries(S.routes).map(([id, r]) => {
+    const usable = USABLE.includes(r.state);
+    return h("option", { value: id, selected: id === selected, disabled: !usable && id !== selected },
+      `${routeName(id)} · ${access(r.state)}`);
+  });
+}
+function arenaDefaultLanes() {
+  const ids = Object.keys(S.routes);
+  const usable = ids.filter((id) => USABLE.includes(S.routes[id].state));
+  const pick = usable.length ? usable : ids;
+  const a = ARENA.a && S.routes[ARENA.a] ? ARENA.a : (pick[0] || "");
+  const b = ARENA.b && S.routes[ARENA.b] ? ARENA.b : (pick.find((id) => id !== a) || pick[0] || a);
+  ARENA.a = a; ARENA.b = b;
+  return { a, b };
+}
+function arenaCostText(est) {
+  if (!est) return "—";
+  if (typeof est.estimate_usd === "number") return "≈ " + fmtCost(est.estimate_usd);
+  if (est.estimate_kind === "metered_unknown") return "metered · see note";
+  return "—";
+}
+function arenaDestroyMounts() {
+  for (const k of ["a", "b"]) {
+    try { if (ARENA.mounts[k] && ARENA.mounts[k].destroy) ARENA.mounts[k].destroy(); } catch { /* detached */ }
+    ARENA.mounts[k] = null;
+  }
+}
+function arenaMountDemo(demoId) {
+  arenaDestroyMounts();
+  const demos = window.AesopArenaDemos;
+  const aHost = $("arenaStageA"), bHost = $("arenaStageB");
+  if (!demos || !aHost || !bHost) return;
+  try {
+    ARENA.mounts.a = demos.mount(demoId, aHost, { variant: "a" });
+    ARENA.mounts.b = demos.mount(demoId, bHost, { variant: "b" });
+  } catch (e) {
+    banner(`Arena demo failed to load: ${e.message}`, "bad");
+  }
+}
+async function arenaRefreshCosts() {
+  const aEl = $("arenaCostA"), bEl = $("arenaCostB"), note = $("arenaCostNote");
+  if (!ARENA.a || !ARENA.b) return;
+  try {
+    const data = await api("GET", `/api/arena/compare?demo=${encodeURIComponent(ARENA.demo)}&a=${encodeURIComponent(ARENA.a)}&b=${encodeURIComponent(ARENA.b)}`);
+    if (S.tab !== "arena" || S.global) return;
+    ARENA.note = data.live_note || "";
+    if (aEl) { aEl.textContent = arenaCostText(data.lanes.a); aEl.title = data.lanes.a.note || ""; }
+    if (bEl) { bEl.textContent = arenaCostText(data.lanes.b); bEl.title = data.lanes.b.note || ""; }
+    if (note) note.textContent = [data.lanes.a.note, data.lanes.b.note, data.live_note].filter(Boolean).join(" · ");
+  } catch (e) {
+    if (note) note.textContent = e.message;
+  }
+}
+function arenaLane(side, routeId) {
+  const label = side === "a" ? "Lane A" : "Lane B";
+  const costId = side === "a" ? "arenaCostA" : "arenaCostB";
+  const stageId = side === "a" ? "arenaStageA" : "arenaStageB";
+  const sel = h("select", { "aria-label": `${label} provider`, onchange: (e) => {
+    ARENA[side] = e.target.value;
+    try { localStorageSet("aesop.arena." + side, ARENA[side]); } catch { /* ignore */ }
+    arenaRefreshCosts();
+  } }, ...arenaRouteOptions(routeId));
+  return h("section", { class: "arena-lane", "aria-label": label },
+    h("header", { class: "arena-lane-head" },
+      h("div", { class: "arena-lane-pick" }, h("span", { class: "ademo-k" }, label), sel),
+      h("div", { class: "arena-cost", id: costId, title: "Estimate only — nothing reserved" }, "—")),
+    h("div", { class: "arena-stage", id: stageId, role: "region", "aria-label": label + " demo" }));
+}
+async function renderArena() {
+  if (!S.project || S.global || S.tab !== "arena") return;
+  arenaDestroyMounts();
+  const savedDemo = localStorageGet("aesop.arena.demo");
+  const savedA = localStorageGet("aesop.arena.a");
+  const savedB = localStorageGet("aesop.arena.b");
+  if (savedDemo) ARENA.demo = savedDemo;
+  if (savedA) ARENA.a = savedA;
+  if (savedB) ARENA.b = savedB;
+  let catalog = ARENA.demos;
+  try {
+    const d = await api("GET", "/api/arena/demos");
+    if (S.tab !== "arena" || S.global) return;
+    catalog = ARENA.demos = d.demos || [];
+    ARENA.note = d.live_note || "";
+    if (!catalog.some((x) => x.id === ARENA.demo) && catalog[0]) ARENA.demo = catalog[0].id;
+  } catch (e) {
+    $("view").replaceChildren(errorView(`Could not load Arena demos: ${e.message}`, () => setTab("arena")));
+    return;
+  }
+  const { a, b } = arenaDefaultLanes();
+  const demoSel = h("select", { id: "arenaDemoSel", "aria-label": "Loadable demo genre", onchange: (e) => {
+    ARENA.demo = e.target.value;
+    try { localStorageSet("aesop.arena.demo", ARENA.demo); } catch { /* ignore */ }
+    setActivity(catalog.find((x) => x.id === ARENA.demo)?.title || "");
+    arenaMountDemo(ARENA.demo);
+    arenaRefreshCosts();
+  } }, ...catalog.map((d) => h("option", { value: d.id, selected: d.id === ARENA.demo }, `${d.title} — ${d.subtitle}`)));
+  const cur = catalog.find((x) => x.id === ARENA.demo) || catalog[0];
+  setActivity(cur ? cur.title : "");
+  $("view").replaceChildren(
+    h("div", { class: "arena" },
+      h("header", { class: "arena-bar" },
+        h("div", { class: "arena-title" }, icon("columns"), h("div", {},
+          h("strong", {}, "Arena"),
+          h("p", { class: "meta" }, cur ? cur.blurb : "Dual-lane compare shell"))),
+        h("label", { class: "arena-demo-pick" }, h("span", {}, "Demo"), demoSel),
+        h("button", { type: "button", class: "btn ghost", disabled: true, title: ARENA.note || "Live dual generation is off in v1" },
+          "Run both (soon)")),
+      h("div", { class: "arena-split" }, arenaLane("a", a), arenaLane("b", b)),
+      h("p", { class: "arena-note", id: "arenaCostNote", role: "note" }, ARENA.note || "")));
+  arenaMountDemo(ARENA.demo);
+  await arenaRefreshCosts();
+}
+
 async function renderMemory() {
   if (!S.project || S.global || S.tab !== "memory") return;
   const pid = S.project.id;

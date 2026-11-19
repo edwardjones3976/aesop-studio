@@ -11,7 +11,11 @@ All notable changes to this repository are documented here. The server uses cale
 - **Tests:** Launch-port fall-forward test hardened for adjacent free ports (`2d21fb5`).
 - **Docs:** Full project briefing for contributors (`6b841b6` on branch `cursor/repo-e2e-20261026`).
 
-## Unreleased (this branch)
+## Unreleased
+
+- **Arena compare tab:** Left-rail **Arena** workspace with dual lanes, per-lane provider pickers, cost estimates (`/api/arena/*`), and four interactive demo fixtures (Alpine, Lost Valley, Deep Time, Optical). Live dual generation stays off in v1. See `docs/arena-compare.md`.
+
+## Unreleased (prior branches)
 
 - GitHub Actions CI (Windows + Ubuntu, Python 3.11/3.12/3.14).
 - Contributing, security, issue/PR templates, `CODEOWNERS`, editor and line-ending hygiene.
