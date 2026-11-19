@@ -30,7 +30,7 @@ def _python(root: Path) -> str | None:
                  root / ".venv" / "bin" / "python", root / "venv" / "bin" / "python"):
         if cand.is_file():
             return str(cand)
-    return shutil.which("python") or shutil.which("py")
+    return shutil.which("python") or shutil.which("python3") or shutil.which("py")
 
 
 def _has_py_tests(root: Path) -> bool:
