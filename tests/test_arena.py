@@ -52,6 +52,42 @@ class TestArenaUnit(unittest.TestCase):
         self.assertEqual(p["lanes"]["a"]["demo_id"], "optical")
         self.assertIn("v1", p["live_note"])
 
+    def test_metered_disabled_not_reported_as_free(self):
+        """Codex CLI on API-key auth keeps billing_basis=subscription_included but state is metered."""
+        routes = providers.cached(self.store)
+        routes["codex"] = {
+            **routes.get("codex", {}),
+            "id": "codex",
+            "state": "READY_METERED_DISABLED",
+            "billing_basis": "subscription_included",
+            "display_name": "Codex",
+            "incremental_cost_status": "metered; disabled until owner sets operating limits",
+        }
+        self.store.x("INSERT INTO kv(k,v) VALUES('routes',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                     (json.dumps(routes),))
+        est = arena.estimate(self.store, "codex", "alpine")
+        self.assertNotEqual(est["estimate_kind"], "included_or_local")
+        self.assertIsNone(est["estimate_usd"])
+        self.assertEqual(est["estimate_kind"], "metered_unknown")
+        self.assertIn("METERED", est["state"])
+
+    def test_openai_api_metered_ceiling(self):
+        routes = providers.cached(self.store)
+        routes["openai-api"] = {
+            **routes.get("openai-api", {}),
+            "id": "openai-api",
+            "state": "READY_METERED_DISABLED",
+            "billing_basis": "metered",
+            "display_name": "Codex API",
+            "incremental_cost_status": "metered; prices: test",
+        }
+        self.store.x("INSERT INTO kv(k,v) VALUES('routes',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                     (json.dumps(routes),))
+        est = arena.estimate(self.store, "openai-api", "alpine")
+        self.assertEqual(est["estimate_kind"], "metered_ceiling")
+        self.assertIsInstance(est["estimate_usd"], float)
+        self.assertGreater(est["estimate_usd"], 0)
+
 
 class TestArenaHttp(unittest.TestCase):
     @classmethod
@@ -140,6 +176,18 @@ class TestArenaHttp(unittest.TestCase):
         for rel in ("static/app.js", "static/arena/demos.js"):
             r = subprocess.run([node, "--check", str(root / rel)], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, f"{rel}: {r.stderr}")
+
+    def test_app_js_guards_stale_arena_responses(self):
+        st, _, body = self.req("GET", "/app.js")
+        self.assertEqual(st, 200)
+        text = body.decode("utf-8")
+        self.assertIn("ARENA_PICKABLE", text)
+        self.assertIn("READY_METERED_DISABLED", text)
+        self.assertIn("costGen", text)
+        self.assertIn("gen !== S.viewGen", text)
+        # cost refresh must ignore stale success and error paths
+        self.assertRegex(text, r"async function arenaRefreshCosts\(\)[\s\S]*?stale\(\)")
+        self.assertRegex(text, r"catch \(e\) \{\s*if \(stale\(\)\) return;")
 
 
 if __name__ == "__main__":

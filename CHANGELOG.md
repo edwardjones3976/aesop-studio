@@ -13,6 +13,7 @@ All notable changes to this repository are documented here. The server uses cale
 
 ## Unreleased
 
+- **Arena Copilot fixes:** Metered/`READY_METERED_DISABLED` routes are not reported as free; they are selectable for estimate comparison; cost and demo fetches ignore stale responses (`costGen` / `viewGen`).
 - **Arena compare tab:** Left-rail **Arena** workspace with dual lanes, per-lane provider pickers, cost estimates (`/api/arena/*`), and four interactive demo fixtures (Alpine, Lost Valley, Deep Time, Optical). Live dual generation stays off in v1. See `docs/arena-compare.md`.
 
 ## Unreleased (prior branches)

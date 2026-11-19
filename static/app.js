@@ -3169,17 +3169,19 @@ function saveAsFinding(pid, text) {
 
 // ---------- memory ----------
 // ---------- Arena (dual-lane compare shell; demos + pickers + cost; no live dual-gen in v1) ----------
-const ARENA = { demo: "alpine", a: "", b: "", mounts: { a: null, b: null }, demos: [], note: "" };
+// Arena never dispatches: include READY_METERED_DISABLED so owners can compare metered estimates while spend stays off.
+const ARENA_PICKABLE = USABLE.concat(["READY_METERED_DISABLED"]);
+const ARENA = { demo: "alpine", a: "", b: "", mounts: { a: null, b: null }, demos: [], note: "", costGen: 0 };
 function arenaRouteOptions(selected) {
   return Object.entries(S.routes).map(([id, r]) => {
-    const usable = USABLE.includes(r.state);
-    return h("option", { value: id, selected: id === selected, disabled: !usable && id !== selected },
+    const pickable = ARENA_PICKABLE.includes(r.state);
+    return h("option", { value: id, selected: id === selected, disabled: !pickable && id !== selected },
       `${routeName(id)} · ${access(r.state)}`);
   });
 }
 function arenaDefaultLanes() {
   const ids = Object.keys(S.routes);
-  const usable = ids.filter((id) => USABLE.includes(S.routes[id].state));
+  const usable = ids.filter((id) => ARENA_PICKABLE.includes(S.routes[id].state));
   const pick = usable.length ? usable : ids;
   const a = ARENA.a && S.routes[ARENA.a] ? ARENA.a : (pick[0] || "");
   const b = ARENA.b && S.routes[ARENA.b] ? ARENA.b : (pick.find((id) => id !== a) || pick[0] || a);
@@ -3211,16 +3213,23 @@ function arenaMountDemo(demoId) {
   }
 }
 async function arenaRefreshCosts() {
-  const aEl = $("arenaCostA"), bEl = $("arenaCostB"), note = $("arenaCostNote");
   if (!ARENA.a || !ARENA.b) return;
+  const gen = ++ARENA.costGen;
+  const viewGen = S.viewGen;
+  const demo = ARENA.demo, laneA = ARENA.a, laneB = ARENA.b;
+  const stale = () => gen !== ARENA.costGen || viewGen !== S.viewGen || S.tab !== "arena" || S.global
+    || ARENA.demo !== demo || ARENA.a !== laneA || ARENA.b !== laneB;
   try {
-    const data = await api("GET", `/api/arena/compare?demo=${encodeURIComponent(ARENA.demo)}&a=${encodeURIComponent(ARENA.a)}&b=${encodeURIComponent(ARENA.b)}`);
-    if (S.tab !== "arena" || S.global) return;
+    const data = await api("GET", `/api/arena/compare?demo=${encodeURIComponent(demo)}&a=${encodeURIComponent(laneA)}&b=${encodeURIComponent(laneB)}`);
+    if (stale()) return;
+    const aEl = $("arenaCostA"), bEl = $("arenaCostB"), note = $("arenaCostNote");
     ARENA.note = data.live_note || "";
     if (aEl) { aEl.textContent = arenaCostText(data.lanes.a); aEl.title = data.lanes.a.note || ""; }
     if (bEl) { bEl.textContent = arenaCostText(data.lanes.b); bEl.title = data.lanes.b.note || ""; }
     if (note) note.textContent = [data.lanes.a.note, data.lanes.b.note, data.live_note].filter(Boolean).join(" · ");
   } catch (e) {
+    if (stale()) return;
+    const note = $("arenaCostNote");
     if (note) note.textContent = e.message;
   }
 }
@@ -3241,6 +3250,7 @@ function arenaLane(side, routeId) {
 }
 async function renderArena() {
   if (!S.project || S.global || S.tab !== "arena") return;
+  const gen = ++S.viewGen;
   arenaDestroyMounts();
   const savedDemo = localStorageGet("aesop.arena.demo");
   const savedA = localStorageGet("aesop.arena.a");
@@ -3251,14 +3261,16 @@ async function renderArena() {
   let catalog = ARENA.demos;
   try {
     const d = await api("GET", "/api/arena/demos");
-    if (S.tab !== "arena" || S.global) return;
+    if (gen !== S.viewGen || S.tab !== "arena" || S.global) return;
     catalog = ARENA.demos = d.demos || [];
     ARENA.note = d.live_note || "";
     if (!catalog.some((x) => x.id === ARENA.demo) && catalog[0]) ARENA.demo = catalog[0].id;
   } catch (e) {
+    if (gen !== S.viewGen || S.tab !== "arena" || S.global) return;
     $("view").replaceChildren(errorView(`Could not load Arena demos: ${e.message}`, () => setTab("arena")));
     return;
   }
+  if (gen !== S.viewGen || S.tab !== "arena" || S.global) return;
   const { a, b } = arenaDefaultLanes();
   const demoSel = h("select", { id: "arenaDemoSel", "aria-label": "Loadable demo genre", onchange: (e) => {
     ARENA.demo = e.target.value;
@@ -3280,6 +3292,7 @@ async function renderArena() {
           "Run both (soon)")),
       h("div", { class: "arena-split" }, arenaLane("a", a), arenaLane("b", b)),
       h("p", { class: "arena-note", id: "arenaCostNote", role: "note" }, ARENA.note || "")));
+  if (gen !== S.viewGen) return;
   arenaMountDemo(ARENA.demo);
   await arenaRefreshCosts();
 }
