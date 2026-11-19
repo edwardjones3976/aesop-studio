@@ -49,7 +49,7 @@ class Base(unittest.TestCase):
         with mock.patch.dict(os.environ, {"AESOP_PROBE_OFFLINE": "0"}), \
                 mock.patch.object(providers, "_cursor_cmd", lambda: list(cmd) if cmd else None), \
                 mock.patch.object(providers, "_codex_cmd", none), mock.patch.object(providers, "_claude_cmd", none), \
-                mock.patch.object(providers, "_agy_cmd", none), mock.patch.object(providers, "_copilot_cmd", none), \
+                mock.patch.object(providers, "_agy_cmd", none), \
                 mock.patch.object(providers, "_grok_cmd", none), mock.patch.object(providers, "_zai_cmd", none), \
                 mock.patch.object(providers, "_local_models", lambda *a: None), \
                 mock.patch("aesop_studio.research_routes.status",
