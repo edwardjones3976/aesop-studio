@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("AESOP_PROBE_OFFLINE", "1")
 
@@ -10,6 +11,7 @@ from aesop_studio import lanes, providers
 from aesop_studio.store import Store
 
 ROOT = Path(__file__).resolve().parent.parent
+_RETIRED_FILTER = 'RETIRED_FROM_SECRET_DISCOVERY = frozenset({"copilot"})'
 
 
 class NoCopilot(unittest.TestCase):
@@ -36,9 +38,25 @@ class NoCopilot(unittest.TestCase):
         found = lanes.discover(self.store)["lanes"]
         self.assertFalse([lane["id"] for lane in found if "copilot" in lane["id"].lower()])
 
+    def test_registered_secret_file_does_not_surface_a_lane(self):
+        """A leftover copilot.dpapi name must not become secret:copilot; the file is never deleted."""
+        self.assertIn("copilot", lanes.RETIRED_FROM_SECRET_DISCOVERY)
+        with mock.patch.object(lanes, "_secret_store_names", return_value=["copilot", "other-vendor"]):
+            found = lanes.discover(self.store)["lanes"]
+        ids = [lane["id"] for lane in found]
+        self.assertNotIn("secret:copilot", ids)
+        self.assertNotIn("copilot", [lane["id"] for lane in found])
+        self.assertIn("secret:other-vendor", ids)
+
     def test_page_and_package_do_not_mention_it(self):
         for path in [ROOT / "static" / "app.js", *sorted((ROOT / "aesop_studio").glob("*.py"))]:
-            self.assertNotIn("copilot", path.read_text(encoding="utf-8").lower(), path.name)
+            text = path.read_text(encoding="utf-8")
+            if path.name == "lanes.py":
+                self.assertIn(_RETIRED_FILTER, text)
+                stripped = text.replace(_RETIRED_FILTER, "")
+                self.assertNotIn("copilot", stripped.lower(), path.name)
+                continue
+            self.assertNotIn("copilot", text.lower(), path.name)
 
 
 if __name__ == "__main__":

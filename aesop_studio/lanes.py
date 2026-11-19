@@ -21,6 +21,9 @@ ADMINS = ("openai", "claude", "cursor")  # documented administrator identities (
 # Owner naming rule: each family is titled by its code-based product (OpenAI/ChatGPT/Codex -> "Codex").
 DOCUMENTED_EXAMPLE = ["Codex", "Claude Code", "Cursor", "Director (local)", "Grok CLI", "Antigravity",
                       "Perplexity", "Firecrawl", "Z.ai GLM Coding"]
+# Owner 2026-11-11: retired providers stay out of credential-only discovery; leftover *.dpapi files are
+# never opened or deleted (archive, don't delete).
+RETIRED_FROM_SECRET_DISCOVERY = frozenset({"copilot"})
 
 _HOME = Path.home()
 _LOCAL = Path(os.environ.get("LOCALAPPDATA", _HOME / "AppData" / "Local"))
@@ -151,7 +154,7 @@ def discover(store: Store) -> dict:
                       "cost_visibility": r.get("incremental_cost_status", "unknown"), "billing_note": r["limitations"],
                       "counts_as_speaker": False,  # unknown/test lanes never inflate a roundtable count
                       "reasons": ["Discovered lane outside the documented roster; not counted as a speaker."]})
-    for name in sorted(secrets - known - {"anthropic", "gemini", "xai"}):
+    for name in sorted(secrets - known - {"anthropic", "gemini", "xai"} - RETIRED_FROM_SECRET_DISCOVERY):
         lanes.append({"id": f"secret:{name}", "name": name, "lane_class": "speaker", "detected": True,
                       "detection": "credential registered in provider store", "readiness": "INSTALLED_UNVERIFIED",
                       "route_type": "unknown", "route_id": None, "verified_routes": [],
