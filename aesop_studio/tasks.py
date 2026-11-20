@@ -268,10 +268,12 @@ class _RedactingLog:
     HOLD = 160
     MAX_BUF = 64 * 1024
 
-    def __init__(self, path: str, max_bytes: int = MAX_OUTPUT_BYTES):
-        self.f = open(path, "w", encoding="utf-8")
+    def __init__(self, path: str, max_bytes: int = MAX_OUTPUT_BYTES, *, append: bool = False):
+        # Append across model-fallback attempts so Terminal/chat poll offsets stay valid.
+        size = os.path.getsize(path) if append and os.path.exists(path) else 0
+        self.f = open(path, "a" if append else "w", encoding="utf-8")
         self.buf = ""
-        self.left = max_bytes
+        self.left = max(0, max_bytes - size)
         self.truncated = False
 
     def _emit(self, text: str) -> None:
@@ -645,11 +647,16 @@ class Supervisor:
 
             for attempt_i, attempt_model in enumerate(models):
                 proc = job = timer = None
+                if tid in self.cancel_flags:
+                    state, err, code = "CANCELLED", "cancelled by owner (local process tree terminated)", -1
+                    break
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     state, err, code = "FAILED", f"timed out after {timeout}s", -1
                     break
-                for path in (out_path, last_file, out_path + ".err"):
+                # Keep the task output stream append-only across model attempts (poll offsets stay valid).
+                # Per-attempt last.txt / stderr files are still reset; they are not offset-polled.
+                for path in (last_file, out_path + ".err"):
                     try:
                         os.remove(path)
                     except OSError:
@@ -669,6 +676,10 @@ class Supervisor:
                 prev = self.get(tid) or {}
                 started_at = prev["started"] if prev.get("started") else time.time()
                 self._set(tid, "STARTING", argv_meta=json.dumps(meta), started=started_at)
+                # Re-check after STARTING: Stop may have landed during the quota→fallback gap.
+                if tid in self.cancel_flags:
+                    state, err, code = "CANCELLED", "cancelled by owner (local process tree terminated)", -1
+                    break
                 try:
                     # Claude Code-based routes write banners/diagnostics to stderr: keep them out of the answer.
                     errf = open(out_path + ".err", "wb") if route_id in SEPARATE_STDERR_ROUTES else None
@@ -691,7 +702,7 @@ class Supervisor:
                                                             winjob.terminate(job), kill_tree(proc.pid)))
                 timer.daemon = True
                 timer.start()
-                log = _RedactingLog(out_path)
+                log = _RedactingLog(out_path, append=attempt_i > 0)
 
                 def reader():
                     dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -905,9 +916,13 @@ class Supervisor:
         if api_ev:
             api_ev.set()
             return True
-        if not proc:
+        t = self.get(tid)
+        if not t or t["state"] in TERMINAL:
             return False
+        # Remember Stop even when no process is registered (multi-model quota→next-model gap).
         self.cancel_flags.add(tid)
+        if not proc:
+            return True
         with self.lock:
             by_job = winjob.terminate(self.jobs.get(tid))
         return kill_tree(proc.pid) or by_job

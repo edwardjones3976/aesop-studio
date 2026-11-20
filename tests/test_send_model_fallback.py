@@ -173,6 +173,49 @@ class SendModelFallback(unittest.TestCase):
         self.assertIn("model list unavailable", t["error"])
         self.assertEqual(self.attempts, [])
 
+    def test_cancel_during_quota_fallback_gap_skips_next_model(self):
+        """Stop between attempts (no registered process) must not launch Flash."""
+        script = self._fake_agy_script({ARGON})
+        tid_box: list[str] = []
+        real_record = providers.record_model_quota
+
+        def record_then_cancel(store, rid, model, code, output):
+            ok = real_record(store, rid, model, code, output)
+            if ok and model == ARGON and tid_box:
+                # Process already deregistered; cancel must still stick before Flash launches.
+                self.assertIsNone(self.sup.procs.get(tid_box[0]))
+                self.assertTrue(self.sup.cancel(tid_box[0]))
+            return ok
+
+        with self._patch_build(script), \
+                patch.object(providers, "record_model_quota", side_effect=record_then_cancel):
+            tid = self.sup.create(self.p, "antigravity", "hello", mode="chat", timeout=30)
+            tid_box.append(tid)
+            t = _wait_terminal(self.sup, tid)
+        self.assertEqual(t["state"], "CANCELLED")
+        self.assertEqual(self.attempts, [ARGON])
+        self.assertIn(tid, self.sup.cancel_flags)
+
+    def test_output_offsets_survive_model_fallback(self):
+        """Terminal/chat poll offsets must still see Flash after consuming Argon's quota bytes."""
+        script = self._fake_agy_script({ARGON})
+        with self._patch_build(script):
+            tid = self.sup.create(self.p, "antigravity", "hello", mode="chat", timeout=30)
+            t = _wait_terminal(self.sup, tid)
+        self.assertEqual(t["state"], "COMPLETED")
+        full, end = self.sup.output(tid, 0)
+        self.assertIn("RESOURCE_EXHAUSTED", full)
+        self.assertIn("ok from " + FLASH, full)
+        # Simulate a watcher that already consumed the quota line, then polls again.
+        quota_at = full.index("RESOURCE_EXHAUSTED")
+        offset = full.index("\n", quota_at) + 1
+        self.assertGreater(offset, 0)
+        self.assertLess(offset, end)
+        rest, final = self.sup.output(tid, offset)
+        self.assertEqual(final, end)
+        self.assertIn("ok from " + FLASH, rest)
+        self.assertNotIn("RESOURCE_EXHAUSTED", rest)
+
 
 if __name__ == "__main__":
     unittest.main()
