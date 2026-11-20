@@ -3216,10 +3216,32 @@ function saveAsFinding(pid, text) {
 }
 
 // ---------- memory ----------
-// ---------- Arena (dual-lane compare shell; demos + pickers + cost; no live dual-gen in v1) ----------
-// Arena never dispatches: include READY_METERED_DISABLED so owners can compare metered estimates while spend stays off.
+// ---------- Arena (dual-lane compare; demos + pickers + cost; Run both for free routes) ----------
+// Metered routes stay pickable for cost compare (READY_METERED_DISABLED) but Run both refuses them.
 const ARENA_PICKABLE = USABLE.concat(["READY_METERED_DISABLED"]);
-const ARENA = { demo: "alpine", a: "", b: "", mounts: { a: null, b: null }, demos: [], note: "", costGen: 0 };
+const ARENA = {
+  demo: "alpine", a: "", b: "", mounts: { a: null, b: null }, demos: [], note: "",
+  costGen: 0, runGen: 0, running: false, lanes: { a: null, b: null }, poll: null, eligible: false,
+};
+function arenaLaneEligible(routeId) {
+  const r = S.routes[routeId];
+  if (!r) return false;
+  const state = String(r.state || "");
+  if (/METERED/i.test(state)) return false;
+  const basis = r.billing_basis || "unknown";
+  return basis === "subscription_included" || basis === "local"
+    || state === "READY_INCLUDED" || state === "READY_LOCAL" || state === "SIMULATED";
+}
+function arenaBothEligible() {
+  return !!(ARENA.a && ARENA.b && arenaLaneEligible(ARENA.a) && arenaLaneEligible(ARENA.b));
+}
+function arenaRefuseHint() {
+  if (arenaBothEligible()) return ARENA.note || "Dispatch two free-route chat turns side by side.";
+  const bad = [ARENA.a, ARENA.b].filter((id) => id && !arenaLaneEligible(id));
+  if (!bad.length) return "Pick two included, local, or simulated lanes to enable Run both.";
+  return "Run both needs free lanes only. Metered routes stay off until a limit or permit — nothing is reserved. "
+    + bad.map((id) => routeName(id) || id).join(", ") + " is not eligible.";
+}
 function arenaRouteOptions(selected) {
   return Object.entries(S.routes).map(([id, r]) => {
     const pickable = ARENA_PICKABLE.includes(r.state);
@@ -3230,7 +3252,8 @@ function arenaRouteOptions(selected) {
 function arenaDefaultLanes() {
   const ids = Object.keys(S.routes);
   const usable = ids.filter((id) => ARENA_PICKABLE.includes(S.routes[id].state));
-  const pick = usable.length ? usable : ids;
+  const free = usable.filter((id) => arenaLaneEligible(id));
+  const pick = free.length ? free : (usable.length ? usable : ids);
   const a = ARENA.a && S.routes[ARENA.a] ? ARENA.a : (pick[0] || "");
   const b = ARENA.b && S.routes[ARENA.b] ? ARENA.b : (pick.find((id) => id !== a) || pick[0] || a);
   ARENA.a = a; ARENA.b = b;
@@ -3242,7 +3265,11 @@ function arenaCostText(est) {
   if (est.estimate_kind === "metered_unknown") return "metered · see note";
   return "—";
 }
+function arenaStopPoll() {
+  if (ARENA.poll) { clearInterval(ARENA.poll); ARENA.poll = null; }
+}
 function arenaDestroyMounts() {
+  arenaStopPoll();
   for (const k of ["a", "b"]) {
     try { if (ARENA.mounts[k] && ARENA.mounts[k].destroy) ARENA.mounts[k].destroy(); } catch { /* detached */ }
     ARENA.mounts[k] = null;
@@ -3260,6 +3287,32 @@ function arenaMountDemo(demoId) {
     banner(`Arena demo failed to load: ${e.message}`, "bad");
   }
 }
+function arenaUpdateRunControls() {
+  const runBtn = $("arenaRunBoth"), stopBtn = $("arenaStopBoth"), hint = $("arenaRunHint");
+  const demoSel = $("arenaDemoSel");
+  ARENA.eligible = arenaBothEligible();
+  const title = arenaRefuseHint();
+  if (runBtn) {
+    runBtn.disabled = ARENA.running || !ARENA.eligible;
+    runBtn.title = ARENA.running ? "Dual run in progress" : title;
+    runBtn.textContent = ARENA.running ? "Running…" : "Run both";
+  }
+  if (stopBtn) stopBtn.hidden = !ARENA.running;
+  if (hint) hint.textContent = ARENA.running ? "Stop cancels both local process trees (remote stop is not provable)." : title;
+  if (demoSel) demoSel.disabled = ARENA.running;
+  for (const sel of document.querySelectorAll(".arena-lane-pick select")) sel.disabled = ARENA.running;
+}
+function arenaPaintResult(side, lane) {
+  const el = $(side === "a" ? "arenaResultA" : "arenaResultB");
+  if (!el || !lane) return;
+  const name = routeName(lane.route_id) || lane.route_id || "Lane";
+  const st = lane.state || (lane.error ? "FAILED" : "…");
+  const body = lane.text || lane.error || (DONE.includes(st) ? "(no text)" : "Waiting for the provider…");
+  el.replaceChildren(
+    h("div", { class: "arena-result-head" },
+      h("strong", {}, name), statePill(st)),
+    h("pre", { class: "arena-result-body" + (lane.error ? " err" : "") }, body));
+}
 async function arenaRefreshCosts() {
   if (!ARENA.a || !ARENA.b) return;
   const gen = ++ARENA.costGen;
@@ -3267,24 +3320,152 @@ async function arenaRefreshCosts() {
   const demo = ARENA.demo, laneA = ARENA.a, laneB = ARENA.b;
   const stale = () => gen !== ARENA.costGen || viewGen !== S.viewGen || S.tab !== "arena" || S.global
     || ARENA.demo !== demo || ARENA.a !== laneA || ARENA.b !== laneB;
+  arenaUpdateRunControls();
   try {
     const data = await api("GET", `/api/arena/compare?demo=${encodeURIComponent(demo)}&a=${encodeURIComponent(laneA)}&b=${encodeURIComponent(laneB)}`);
     if (stale()) return;
     const aEl = $("arenaCostA"), bEl = $("arenaCostB"), note = $("arenaCostNote");
     ARENA.note = data.live_note || "";
+    ARENA.eligible = !!data.live_dual_generation;
     if (aEl) { aEl.textContent = arenaCostText(data.lanes.a); aEl.title = data.lanes.a.note || ""; }
     if (bEl) { bEl.textContent = arenaCostText(data.lanes.b); bEl.title = data.lanes.b.note || ""; }
     if (note) note.textContent = [data.lanes.a.note, data.lanes.b.note, data.live_note].filter(Boolean).join(" · ");
+    arenaUpdateRunControls();
   } catch (e) {
     if (stale()) return;
     const note = $("arenaCostNote");
     if (note) note.textContent = e.message;
+    arenaUpdateRunControls();
   }
+}
+async function arenaFetchLaneText(lane) {
+  if (!lane || !S.project) return;
+  try {
+    const msgs = await api("GET", `/api/projects/${S.project.id}/conversations/${lane.conversation_id}/messages`);
+    const m = (msgs || []).find((x) => x.id === lane.message_id) || (msgs || []).filter((x) => x.role === "assistant").pop();
+    if (m) {
+      if (m.content) lane.text = m.content;
+      if (m.status === "failed") lane.error = m.content || lane.error || "failed";
+    }
+  } catch { /* task poll still advances state */ }
+}
+async function arenaPollTick(runGen, viewGen) {
+  const stale = () => runGen !== ARENA.runGen || viewGen !== S.viewGen || S.tab !== "arena" || S.global || !ARENA.running;
+  if (stale()) return;
+  let pending = 0;
+  for (const side of ["a", "b"]) {
+    const lane = ARENA.lanes[side];
+    if (!lane || !lane.task_id) continue;
+    if (lane.done) continue;
+    pending++;
+    try {
+      const r = await api("GET", `/api/tasks/${lane.task_id}?offset=${lane.offset || 0}`);
+      if (stale()) return;
+      lane.offset = r.offset;
+      if (r.output && r.stream_is_answer) lane.text = (lane.text || "") + r.output;
+      if (r.task) {
+        lane.state = r.task.state;
+        if (DONE.includes(r.task.state)) {
+          lane.done = true;
+          if (r.task.error) lane.error = r.task.error;
+          await arenaFetchLaneText(lane);
+          if (stale()) return;
+        }
+      }
+    } catch (e) {
+      if (stale()) return;
+      lane.error = e.message;
+      lane.state = "FAILED";
+      lane.done = true;
+    }
+    arenaPaintResult(side, lane);
+  }
+  if (!pending) {
+    ARENA.running = false;
+    arenaStopPoll();
+    arenaUpdateRunControls();
+    banner("Arena dual run finished.", "ok");
+  }
+}
+function arenaStartPoll(runGen, viewGen) {
+  arenaStopPoll();
+  const timer = setInterval(() => {
+    if (runGen !== ARENA.runGen || viewGen !== S.viewGen || S.tab !== "arena" || S.global) {
+      clearInterval(timer);
+      if (ARENA.poll === timer) ARENA.poll = null;
+      return;
+    }
+    arenaPollTick(runGen, viewGen);
+  }, 1000);
+  ARENA.poll = timer;
+  arenaPollTick(runGen, viewGen);
+}
+async function arenaRunBoth() {
+  if (!S.project || ARENA.running) return;
+  if (!arenaBothEligible()) {
+    banner(arenaRefuseHint(), "bad");
+    arenaUpdateRunControls();
+    return;
+  }
+  const runGen = ++ARENA.runGen;
+  const viewGen = S.viewGen;
+  const demo = ARENA.demo, laneA = ARENA.a, laneB = ARENA.b, pid = S.project.id;
+  const stale = () => runGen !== ARENA.runGen || viewGen !== S.viewGen || S.tab !== "arena" || S.global
+    || ARENA.demo !== demo || ARENA.a !== laneA || ARENA.b !== laneB || !S.project || S.project.id !== pid;
+  ARENA.running = true;
+  ARENA.lanes = { a: null, b: null };
+  arenaUpdateRunControls();
+  arenaPaintResult("a", { route_id: laneA, state: "STARTING", text: "" });
+  arenaPaintResult("b", { route_id: laneB, state: "STARTING", text: "" });
+  try {
+    const data = await api("POST", `/api/projects/${pid}/arena/run`, { a: laneA, b: laneB, demo });
+    if (stale()) return;
+    ARENA.lanes = {
+      a: { ...data.lanes.a, offset: 0, text: "", state: "RUNNING" },
+      b: { ...data.lanes.b, offset: 0, text: "", state: "RUNNING" },
+    };
+    arenaPaintResult("a", ARENA.lanes.a);
+    arenaPaintResult("b", ARENA.lanes.b);
+    banner("Arena dual run submitted on free routes.", "ok");
+    arenaStartPoll(runGen, viewGen);
+  } catch (e) {
+    if (stale()) return;
+    ARENA.running = false;
+    arenaStopPoll();
+    arenaUpdateRunControls();
+    banner(e.message || "Arena Run both refused.", "bad");
+    arenaPaintResult("a", { route_id: laneA, state: "FAILED", error: e.message });
+    arenaPaintResult("b", { route_id: laneB, state: "FAILED", error: e.message });
+  }
+}
+async function arenaStopBoth() {
+  const runGen = ARENA.runGen;
+  const lanes = ARENA.lanes;
+  ARENA.running = false;
+  arenaStopPoll();
+  arenaUpdateRunControls();
+  for (const side of ["a", "b"]) {
+    const lane = lanes[side];
+    if (!lane || !lane.task_id || lane.done) continue;
+    try {
+      await api("POST", `/api/tasks/${lane.task_id}/cancel`);
+      if (runGen !== ARENA.runGen) return;
+      lane.state = "CANCELLED";
+      lane.done = true;
+      lane.error = lane.error || "Cancelled locally; remote work stop is not provable.";
+      arenaPaintResult(side, lane);
+    } catch (e) {
+      if (runGen !== ARENA.runGen) return;
+      banner(`Could not cancel lane ${side.toUpperCase()}: ${e.message}`, "bad");
+    }
+  }
+  banner("Arena stop signalled for both lanes.", "");
 }
 function arenaLane(side, routeId) {
   const label = side === "a" ? "Lane A" : "Lane B";
   const costId = side === "a" ? "arenaCostA" : "arenaCostB";
   const stageId = side === "a" ? "arenaStageA" : "arenaStageB";
+  const resultId = side === "a" ? "arenaResultA" : "arenaResultB";
   const sel = h("select", { "aria-label": `${label} provider`, onchange: (e) => {
     ARENA[side] = e.target.value;
     try { localStorageSet("aesop.arena." + side, ARENA[side]); } catch { /* ignore */ }
@@ -3294,12 +3475,17 @@ function arenaLane(side, routeId) {
     h("header", { class: "arena-lane-head" },
       h("div", { class: "arena-lane-pick" }, h("span", { class: "ademo-k" }, label), sel),
       h("div", { class: "arena-cost", id: costId, title: "Estimate only — nothing reserved" }, "—")),
-    h("div", { class: "arena-stage", id: stageId, role: "region", "aria-label": label + " demo" }));
+    h("div", { class: "arena-stage", id: stageId, role: "region", "aria-label": label + " demo" }),
+    h("div", { class: "arena-result", id: resultId, role: "region", "aria-live": "polite",
+      "aria-label": label + " dual-run answer" },
+      h("p", { class: "muted" }, "Run both answers appear here for free lanes.")));
 }
 async function renderArena() {
   if (!S.project || S.global || S.tab !== "arena") return;
   const gen = ++S.viewGen;
   arenaDestroyMounts();
+  ARENA.running = false;
+  ARENA.lanes = { a: null, b: null };
   const savedDemo = localStorageGet("aesop.arena.demo");
   const savedA = localStorageGet("aesop.arena.a");
   const savedB = localStorageGet("aesop.arena.b");
@@ -3329,6 +3515,11 @@ async function renderArena() {
   } }, ...catalog.map((d) => h("option", { value: d.id, selected: d.id === ARENA.demo }, `${d.title} — ${d.subtitle}`)));
   const cur = catalog.find((x) => x.id === ARENA.demo) || catalog[0];
   setActivity(cur ? cur.title : "");
+  const runBtn = h("button", { type: "button", id: "arenaRunBoth", class: "btn primary",
+    disabled: true, title: arenaRefuseHint(), onclick: () => arenaRunBoth() }, "Run both");
+  const stopBtn = h("button", { type: "button", id: "arenaStopBoth", class: "btn ghost danger",
+    hidden: true, title: "Cancel both local process trees", onclick: () => arenaStopBoth() },
+    icon("stop", "sm"), "Stop");
   $("view").replaceChildren(
     h("div", { class: "arena" },
       h("header", { class: "arena-bar" },
@@ -3336,8 +3527,8 @@ async function renderArena() {
           h("strong", {}, "Arena"),
           h("p", { class: "meta" }, cur ? cur.blurb : "Dual-lane compare shell"))),
         h("label", { class: "arena-demo-pick" }, h("span", {}, "Demo"), demoSel),
-        h("button", { type: "button", class: "btn ghost", disabled: true, title: ARENA.note || "Live dual generation is off in v1" },
-          "Run both (soon)")),
+        h("div", { class: "arena-actions" }, runBtn, stopBtn)),
+      h("p", { class: "arena-run-hint", id: "arenaRunHint", role: "note" }, arenaRefuseHint()),
       h("div", { class: "arena-split" }, arenaLane("a", a), arenaLane("b", b)),
       h("p", { class: "arena-note", id: "arenaCostNote", role: "note" }, ARENA.note || "")));
   if (gen !== S.viewGen) return;
