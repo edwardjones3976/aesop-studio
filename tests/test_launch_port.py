@@ -12,6 +12,23 @@ os.environ["AESOP_PROBE_OFFLINE"] = "1"
 
 from aesop_studio.server import PortUnavailableError, make_server  # noqa: E402
 
+# Windows Hyper-V / HTTP.sys excluded ranges return WinError 10013 on exclusive bind.
+# Probe with the same SO_EXCLUSIVEADDRUSE Studio uses, and allow fall-forward past holes.
+_SCAN = 32
+
+
+def _exclusive_bind_ok(port: int) -> bool:
+    """True if Studio's exclusive loopback claim would succeed on this port right now."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        probe.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
 
 @unittest.skipUnless(os.name == "nt", "exclusive loopback port bind (SO_EXCLUSIVEADDRUSE) is Windows-only")
 class TestPortClaim(unittest.TestCase):
@@ -25,35 +42,44 @@ class TestPortClaim(unittest.TestCase):
         self.squat.server_close()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
+    def _respawn_squatter(self):
+        self.squat.server_close()
+        self.squat = HTTPServer(("127.0.0.1", 0), SimpleHTTPRequestHandler)
+        self.port = self.squat.server_address[1]
+
     def test_busy_port_is_refused_not_shared(self):
         with self.assertRaises(PortUnavailableError):
             make_server(str(self.tmp / "a"), self.port, tries=1)
 
     def test_busy_port_moves_to_the_next_free_one(self):
-        # Pick a squatter port whose neighbour is also free, so the fall-forward target is deterministic
-        # (a random ephemeral port's neighbour is sometimes taken on a busy machine).
-        for _ in range(20):
-            nxt = self.port + 1
-            probe = socket.socket()
+        # A plain bind() probe is not enough: Windows excluded ports can look free until SO_EXCLUSIVEADDRUSE
+        # (CI 2026-11-20 windows-latest: neighbour → "forbidden by its access permissions").
+        for _ in range(64):
+            expected = None
+            for candidate in range(self.port + 1, self.port + _SCAN):
+                if _exclusive_bind_ok(candidate):
+                    expected = candidate
+                    break
+            if expected is None:
+                self._respawn_squatter()
+                continue
             try:
-                probe.bind(("127.0.0.1", nxt))
-                break
-            except OSError:
-                self.squat.server_close()
-                self.squat = HTTPServer(("127.0.0.1", 0), SimpleHTTPRequestHandler)
-                self.port = self.squat.server_address[1]
+                srv = make_server(str(self.tmp / "b"), self.port, tries=_SCAN)
+            except PortUnavailableError:
+                self._respawn_squatter()
+                continue
+            try:
+                if srv.server_address[1] != expected:
+                    # Exclusion map or another listener moved between probe and claim; try a new pair.
+                    self._respawn_squatter()
+                    continue
+                self.assertEqual(srv.app.port, expected)
+                self.assertIn(f"127.0.0.1:{expected}", srv.app.allowed_hosts())
+                return
             finally:
-                probe.close()
-        else:
-            self.skipTest("could not find two adjacent free ports")
-        srv = make_server(str(self.tmp / "b"), self.port, tries=2)
-        try:
-            self.assertEqual(srv.server_address[1], nxt)
-            self.assertEqual(srv.app.port, nxt)
-            self.assertIn(f"127.0.0.1:{nxt}", srv.app.allowed_hosts())
-        finally:
-            srv.server_close()
-            srv.app._instance_lock.close()
+                srv.server_close()
+                srv.app._instance_lock.close()
+        self.skipTest("could not claim the next exclusive-free port near a squatter")
 
     def test_refused_bind_releases_the_data_dir_lock(self):
         with self.assertRaises(PortUnavailableError):

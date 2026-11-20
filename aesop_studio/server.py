@@ -961,7 +961,11 @@ class StudioHTTPServer(ThreadingHTTPServer):
 
 
 def make_server(data_dir: str, port: int, tries: int = 1) -> ThreadingHTTPServer:
-    """Bind the first free port in [port, port + tries). The data-directory lock is taken first, as before."""
+    """Bind the first free port in [port, port + tries). The data-directory lock is taken first, as before.
+
+    On Windows, advance past both in-use ports and excluded ranges (Hyper-V / HTTP.sys): those fail the
+    exclusive bind with WinError 10013 ("access permissions") rather than address-in-use.
+    """
     app = App(data_dir, port)
     handler = type("BoundHandler", (Handler,), {"app": app})
     errors = []
