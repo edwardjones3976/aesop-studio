@@ -62,6 +62,7 @@ class TestBroker(unittest.TestCase):
 
     def tearDown(self):
         self.patch.stop()
+        self.broker.shutdown()  # cancel auto-off timers + join session threads before deleting the DB
         self.store.close()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
@@ -149,14 +150,26 @@ class TestBroker(unittest.TestCase):
         self.assertEqual(before, after)  # only read-only chat turns ever run
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestResearcher(TestBroker):
     @unittest.skip("exercised in TestBroker (avoid duplicate flaky timing run)")
     def test_rt05_concurrent_fanout_fanin_with_causal_ids(self):
         super().test_rt05_concurrent_fanout_fanin_with_causal_ids()
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run under research env)")
+    def test_switch_turns_off_after_conclusion_and_history_kept(self):
+        super().test_switch_turns_off_after_conclusion_and_history_kept()
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run under research env)")
+    def test_stop_and_reconcile_never_replay(self):
+        super().test_stop_and_reconcile_never_replay()
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run under research env)")
+    def test_restart_switches_live_off(self):
+        super().test_restart_switches_live_off()
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run under research env)")
+    def test_rt06_nothing_said_is_executed(self):
+        super().test_rt06_nothing_said_is_executed()
 
     def setUp(self):
         super().setUp()
@@ -189,20 +202,31 @@ class TestResearcher(TestBroker):
         prompts = [self.sup.get(e["task_id"])["prompt"] for e in evs if e["kind"] == "message" and e["task_id"]]
         self.assertTrue(any("Researcher (web sources" in p for p in prompts))  # speakers saw the sources
 
+    @_ci_flaky_retry
     def test_owner_can_ask_and_switch_off(self):
         rec = self.draft()
-        res = self.broker.start(rec, self.svc.project(self.p["id"]), clock={"limit_s": 30, "reserve_s": 5,
+        res = self.broker.start(rec, self.svc.project(self.p["id"]), clock={"limit_s": 40, "reserve_s": 5,
                                                                              "turn_timeout": 30})
         self.assertTrue(res["started"])
         q = self.broker.ask_research(rec["id"], "latest sqlite release notes")
         self.assertTrue(q["queued"])
         with self.assertRaises(ValueError):
             self.broker.ask_research(rec["id"], "x")
+        # Wait for the owner lookup to land before the session clock can close the floor.
+        end = time.time() + 30
+        while time.time() < end:
+            evs = self.broker.events(rec["id"])
+            if any(e["kind"] == "research" and "Owner" in e["content"] for e in evs):
+                break
+            time.sleep(0.1)
+        else:
+            self.fail("owner research result never joined the timeline")
         end = time.time() + 90
         while time.time() < end and self.broker.status(rec["id"])["live_status"] in ("RUNNING", "PAUSED"):
             time.sleep(0.2)
-        evs = self.broker.events(rec["id"])
-        self.assertTrue(any(e["kind"] == "research" and "Owner" in e["content"] for e in evs))
+        s = self.broker.sessions.get(rec["id"])
+        if s:
+            s["thread"].join(10)
         off = roundtable.save(self.store, self.p["id"], {**{k: rec[k] for k in ("mode", "objective", "deliverable",
                               "outcome_type", "time_limit_min")}, "roster": [l["id"] for l in self.lanes],
                               "sharing_ack": True, "caps": {"max_turns": 4, "max_messages_per_speaker": 1,
@@ -216,6 +240,22 @@ class TestFollowUp(TestBroker):
     @unittest.skip("exercised in TestBroker (avoid duplicate flaky timing run)")
     def test_rt05_concurrent_fanout_fanin_with_causal_ids(self):
         super().test_rt05_concurrent_fanout_fanin_with_causal_ids()
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run)")
+    def test_switch_turns_off_after_conclusion_and_history_kept(self):
+        super().test_switch_turns_off_after_conclusion_and_history_kept()
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run)")
+    def test_stop_and_reconcile_never_replay(self):
+        super().test_stop_and_reconcile_never_replay()
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run)")
+    def test_restart_switches_live_off(self):
+        super().test_restart_switches_live_off()
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run)")
+    def test_rt06_nothing_said_is_executed(self):
+        super().test_rt06_nothing_said_is_executed()
 
     def test_collect_parse_and_merge(self):
         from aesop_studio import followup
@@ -246,15 +286,19 @@ class TestFollowUp(TestBroker):
         if s:
             s["thread"].join(10)
 
+    @_ci_flaky_retry
     def test_complete_saves_once_runs_round_and_replaces_only_on_change(self):
         from aesop_studio import deletion, followup
         rec = self.draft()
         project = self.svc.project(self.p["id"])
-        clock = {"limit_s": 20, "reserve_s": 5, "turn_timeout": 30}
+        # Roomier clock than the old 20s: under CI load a tight limit left in-flight turns racing
+        # synthesis and marked the follow-up round FAILED (seen on windows-latest / ubuntu py3.14).
+        clock = {"limit_s": 45, "reserve_s": 5, "turn_timeout": 30}
         self.assertTrue(self.broker.start(rec, project, clock=clock)["started"])
         with self.assertRaises(ValueError):  # only after the session ends
             followup.prepare(self.store, self.sup, self.broker, rec, project)
         self._wait_end(rec["id"])
+        self.assertEqual(self.broker.status(rec["id"])["live_status"], "COMPLETED")
         self.broker._event(rec["id"], "message", "Which storage engine should we freeze for v1?", speaker="alpha",
                            phase="exchange", names={"alpha": "Alpha"})
         d = followup.prepare(self.store, self.sup, self.broker, rec, project)
@@ -273,7 +317,8 @@ class TestFollowUp(TestBroker):
         self.assertIn("SQLite, WAL mode", r2["objective"])  # the owner's answers go to the speakers
         self.assertEqual(self.broker.status(rec["id"])["next_round"]["id"], r2_id)
         self._wait_end(r2_id)
-        self.assertEqual(self.broker.status(r2_id)["live_status"], "COMPLETED")
+        self.assertEqual(self.broker.status(r2_id)["live_status"], "COMPLETED",
+                         self.broker.events(r2_id)[-3:])
         owner = [e for e in self.broker.events(rec["id"]) if e["kind"] == "owner"]
         self.assertEqual(len(owner), 1)
         self.assertEqual(owner[0]["reply_to"], ["E2"])
@@ -307,14 +352,45 @@ class TestFollowUp(TestBroker):
         self.assertIsNone(self.store.one("SELECT v FROM kv WHERE k LIKE ?", (f"followup:{rec['id']}%",)))
 
 
-class TestFollowUpRetry(TestFollowUp):
+class TestFollowUpRetry(TestBroker):
+    """Retry-only path; does not re-run TestBroker/TestFollowUp (that doubled the flake surface on CI)."""
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run)")
+    def test_rt05_concurrent_fanout_fanin_with_causal_ids(self):
+        super().test_rt05_concurrent_fanout_fanin_with_causal_ids()
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run)")
+    def test_switch_turns_off_after_conclusion_and_history_kept(self):
+        super().test_switch_turns_off_after_conclusion_and_history_kept()
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run)")
+    def test_stop_and_reconcile_never_replay(self):
+        super().test_stop_and_reconcile_never_replay()
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run)")
+    def test_restart_switches_live_off(self):
+        super().test_restart_switches_live_off()
+
+    @unittest.skip("exercised in TestBroker (avoid duplicate run)")
+    def test_rt06_nothing_said_is_executed(self):
+        super().test_rt06_nothing_said_is_executed()
+
+    def _wait_end(self, rid, secs=90):
+        end = time.time() + secs
+        while time.time() < end and self.broker.status(rid)["live_status"] in ("RUNNING", "PAUSED", "DRAFT"):
+            time.sleep(0.2)
+        s = self.broker.sessions.get(rid)
+        if s:
+            s["thread"].join(10)
+
     def test_round_that_cannot_start_leaves_no_draft_and_complete_retries(self):
         from aesop_studio import followup
         rec = self.draft()
         project = self.svc.project(self.p["id"])
-        clock = {"limit_s": 15, "reserve_s": 5, "turn_timeout": 30}
+        clock = {"limit_s": 45, "reserve_s": 5, "turn_timeout": 30}
         self.assertTrue(self.broker.start(rec, project, clock=clock)["started"])
         self._wait_end(rec["id"])
+        self.assertEqual(self.broker.status(rec["id"])["live_status"], "COMPLETED")
         body = {"answers": [{"question": "Which engine?", "answer": "SQLite", "refs": []}]}
         keep = self.lanes
         self.lanes = keep[:2]  # two speakers short: preflight blocks the follow-up round
@@ -326,3 +402,8 @@ class TestFollowUpRetry(TestFollowUp):
         self.assertTrue(r["unchanged"] and r["retried"] and r["round"]["started"])
         self.assertEqual(len([e for e in self.broker.events(rec["id"]) if e["kind"] == "owner"]), 1)
         self._wait_end(r["round"]["id"])
+        self.assertEqual(self.broker.status(r["round"]["id"])["live_status"], "COMPLETED")
+
+
+if __name__ == "__main__":
+    unittest.main()

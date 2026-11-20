@@ -68,6 +68,7 @@ class Store:
         self.path = self.data_dir / "aesop.db"
         self._local = threading.local()
         self.write_lock = threading.RLock()
+        self.closed = False
         with self.conn() as c:
             c.executescript(SCHEMA)
             cols = {r[1] for r in c.execute("PRAGMA table_info(ledger)")}
@@ -118,6 +119,7 @@ class Store:
                (kind, project_id, json.dumps(data), time.time()))
 
     def close(self) -> None:
+        self.closed = True
         c = getattr(self._local, "c", None)
         if c is not None:
             c.close()
