@@ -839,13 +839,13 @@ class Supervisor:
                     break
                 state, err = "FAILED", f"exit code {code}"
                 # Prefer this attempt's log slice for Codex JSON events; fall back to stderr tail.
-                diag = ""
+                # Do not raw-last-line Codex stdout: _codex_err_text intentionally skips hooks /
+                # item.completed warnings (test_codex_*_ignored). Argv-prompt routes still need
+                # stdout-as-diag when .err is empty.
                 if route_id == "codex":
                     diag = _codex_err_text(attempt_out) or _err_tail(out_path)
                 else:
-                    diag = _err_tail(out_path)
-                if not diag:
-                    diag = (attempt_out.strip().splitlines() or [""])[-1][:300]
+                    diag = _err_tail(out_path) or (attempt_out.strip().splitlines() or [""])[-1][:300]
                 if diag:
                     err += f": {diag}"
                 # Quota / fault classification must not see earlier attempts' append-only bytes.
