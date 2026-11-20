@@ -54,17 +54,22 @@ def _err_tail(out_path: str, n: int = 300) -> str:
     return redact(" | ".join(lines[-3:]))[-n:]
 
 
-def _codex_err(out_path: str, n: int = 300) -> str:
-    """Extract failure reason from Codex output (JSON event stream or plain-text) in out_path (redacted, bounded)."""
+def _log_from(out_path: str, offset: int, limit: int = MAX_OUTPUT_BYTES) -> str:
+    """Bytes written to the append-only task log from *offset* (already redacted by _RedactingLog)."""
     try:
-        with open(out_path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
+        with open(out_path, "rb") as f:
+            f.seek(max(0, int(offset)))
+            return f.read(max(0, int(limit))).decode("utf-8", errors="replace")
     except OSError:
         return ""
+
+
+def _codex_err_text(text: str, n: int = 300) -> str:
+    """Extract failure reason from Codex JSON/plain text (redacted, bounded)."""
     last_turn_failed = None
     last_error = None
     last_plain_error = None
-    for line in text.splitlines():
+    for line in (text or "").splitlines():
         line = line.strip()
         if not line:
             continue
@@ -124,6 +129,16 @@ def _codex_err(out_path: str, n: int = 300) -> str:
     if not raw:
         return ""
     return redact(raw)[:n]
+
+
+def _codex_err(out_path: str, n: int = 300) -> str:
+    """Extract failure reason from Codex output in out_path (redacted, bounded)."""
+    try:
+        with open(out_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return ""
+    return _codex_err_text(text, n)
 
 
 IMAGE_TOKEN_BOUND = 2_000
@@ -665,6 +680,8 @@ class Supervisor:
             code = -1
             tried: list[str | None] = []
             complete = False
+            # Last attempt's stdout slice (shared log stays append-only for poll offsets).
+            attempt_out = ""
             env = {k: v for k, v in os.environ.items() if k.upper() not in providers.BILLING_ENV}
 
             for attempt_i, attempt_model in enumerate(models):
@@ -730,6 +747,8 @@ class Supervisor:
                                                             winjob.terminate(job), kill_tree(proc.pid)))
                 timer.daemon = True
                 timer.start()
+                # Slice this attempt out of the shared poll log for quota/result classification.
+                attempt_off = os.path.getsize(out_path) if attempt_i > 0 and os.path.exists(out_path) else 0
                 log = _RedactingLog(out_path, append=attempt_i > 0)
 
                 def reader():
@@ -785,6 +804,7 @@ class Supervisor:
                     except (OSError, ValueError):
                         changed = json.dumps({"added": [], "removed": [], "modified": [], "incomplete": True,
                                               "note": "change snapshot unavailable"})
+                attempt_out = _log_from(out_path, attempt_off)
                 result = ""
                 try:
                     with open(last_file, "rb") as f:  # bounded read, then the raw (unredacted) file is removed
@@ -796,6 +816,9 @@ class Supervisor:
                         os.remove(last_file)
                     except OSError:
                         pass
+                # Routes without last_file (e.g. Antigravity argv-prompt) use this attempt's stdout only.
+                if not result:
+                    result = attempt_out[:MAX_OUTPUT_BYTES]
                 tried.append(attempt_model)
                 if tid in self.cancel_flags:
                     state, err = "CANCELLED", "cancelled by owner (local process tree terminated)"
@@ -815,16 +838,19 @@ class Supervisor:
                         providers.record_model_success(self.store, route_id, attempt_model)
                     break
                 state, err = "FAILED", f"exit code {code}"
-                diag = _codex_err(out_path) if route_id == "codex" else _err_tail(out_path)
-                if not diag:
+                # Prefer this attempt's log slice for Codex JSON events; fall back to stderr tail.
+                diag = ""
+                if route_id == "codex":
+                    diag = _codex_err_text(attempt_out) or _err_tail(out_path)
+                else:
                     diag = _err_tail(out_path)
+                if not diag:
+                    diag = (attempt_out.strip().splitlines() or [""])[-1][:300]
                 if diag:
                     err += f": {diag}"
-                try:
-                    probe = (Path(out_path).read_text(encoding="utf-8", errors="replace")[-4000:] + " "
-                             + _err_tail(out_path, 2000) + " " + (result or "") + " " + err)
-                except OSError:
-                    probe = err
+                # Quota / fault classification must not see earlier attempts' append-only bytes.
+                probe = (attempt_out[-4000:] + " " + _err_tail(out_path, 2000)
+                         + " " + (result or "") + " " + err)
                 if (multi and attempt_model
                         and providers.record_model_quota(self.store, route_id, attempt_model, code, probe)):
                     nxt = models[attempt_i + 1] if attempt_i + 1 < len(models) else None
@@ -851,10 +877,8 @@ class Supervisor:
                 detail = err or "all catalog models have recorded quota exhaustion"
                 self._record_send_verification(route_id, ok=False, detail=detail, complete=True)
                 cp.update(providers._model_state(self.store, route_id))
-            try:
-                tail = Path(out_path).read_text(encoding="utf-8", errors="replace")[-4000:] + " " + _err_tail(out_path, 2000)
-            except OSError:
-                tail = ""
+            # Transient-retry classification: current attempt only (not the combined poll log).
+            tail = attempt_out[-4000:] + " " + _err_tail(out_path, 2000)
             retry = self._maybe_retry(tid, route_id, mode, state, cp, tail + " " + (err or ""))
             if retry:  # recorded before going terminal, so readers following final() never see a dead end
                 cp["retried_as"] = retry

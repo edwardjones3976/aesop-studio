@@ -242,18 +242,66 @@ class SendModelFallback(unittest.TestCase):
     def test_success_restores_unavailable_route(self):
         """A successful send must clear a concurrent catalog-exhaustion UNAVAILABLE park."""
         script = self._fake_agy_script(set())
-        with self._patch_build(script):
+        real_verify = self.sup._record_send_verification
+
+        def park_then_verify(route_id, *, ok, detail, complete=False):
+            # Inject competing UNAVAILABLE immediately before success bookkeeping so the race
+            # cannot lose to a send that finishes before the test writes the park.
+            if ok:
+                routes = json.loads(self.store.one("SELECT v FROM kv WHERE k='routes'")["v"])
+                routes["antigravity"].update(
+                    state="UNAVAILABLE", next_step="verify", installed=True,
+                    evidence="last live send failed: all catalog models exhausted")
+                self.store.x("UPDATE kv SET v=? WHERE k='routes'", (json.dumps(routes),))
+            return real_verify(route_id, ok=ok, detail=detail, complete=complete)
+
+        with self._patch_build(script), \
+                patch.object(self.sup, "_record_send_verification", side_effect=park_then_verify):
             tid = self.sup.create(self.p, "antigravity", "hello", mode="chat", timeout=30)
-            # Concurrent peer parked the route while this send is still in flight.
-            routes = json.loads(self.store.one("SELECT v FROM kv WHERE k='routes'")["v"])
-            routes["antigravity"].update(state="UNAVAILABLE", next_step="verify", installed=True,
-                                         evidence="last live send failed: all catalog models exhausted")
-            self.store.x("UPDATE kv SET v=? WHERE k='routes'", (json.dumps(routes),))
             t = _wait_terminal(self.sup, tid)
         self.assertEqual(t["state"], "COMPLETED")
         route = json.loads(self.store.one("SELECT v FROM kv WHERE k='routes'")["v"])["antigravity"]
         self.assertEqual(route["state"], "READY_INCLUDED")
         self.assertIsNone(route.get("next_step"))
+
+    def test_quota_probe_ignores_prior_attempt_log(self):
+        """Argon quota text must not make Flash's auth failure look like a quota fault."""
+        script = self.tmp / f"fake_agy_mixed_{time.time_ns()}.py"
+        script.write_text(
+            "import sys\n"
+            f"argon, flash, quota = {ARGON!r}, {FLASH!r}, {QUOTA!r}\n"
+            "argv = sys.argv[1:]\n"
+            "model = argv[argv.index('--model') + 1] if '--model' in argv else None\n"
+            "if model == argon:\n"
+            "    sys.stdout.write(quota + '\\n')\n"
+            "    sys.exit(1)\n"
+            "sys.stdout.write('authentication required\\n')\n"
+            "sys.exit(1)\n",
+            encoding="utf-8",
+        )
+        with self._patch_build(script):
+            tid = self.sup.create(self.p, "antigravity", "hello", mode="chat", timeout=30)
+            t = _wait_terminal(self.sup, tid)
+        self.assertEqual(t["state"], "FAILED")
+        self.assertEqual(self.attempts, [ARGON, FLASH])
+        exhausted = {e["model"] for e in providers._model_state(self.store, "antigravity")["models_exhausted"]}
+        self.assertEqual(exhausted, {ARGON})
+        self.assertNotEqual(providers.cached(self.store)["antigravity"]["state"], "UNAVAILABLE")
+
+    def test_fallback_result_is_attempt_stdout_not_combined(self):
+        """Checkpoint result must be Flash's answer, not Argon's quota line from the poll log."""
+        script = self._fake_agy_script({ARGON})
+        with self._patch_build(script):
+            tid = self.sup.create(self.p, "antigravity", "hello", mode="chat", timeout=30)
+            t = _wait_terminal(self.sup, tid)
+        self.assertEqual(t["state"], "COMPLETED")
+        cp = json.loads(t["checkpoint"] or "{}")
+        self.assertIn("ok from " + FLASH, cp.get("result") or "")
+        self.assertNotIn("RESOURCE_EXHAUSTED", cp.get("result") or "")
+        # Poll stream still append-only for Terminal watchers.
+        full, _ = self.sup.output(tid, 0)
+        self.assertIn("RESOURCE_EXHAUSTED", full)
+        self.assertIn("ok from " + FLASH, full)
 
     def test_cancel_during_catalog_load_skips_launch(self):
         """Stop while available_models blocks must cancel before any CLI launch."""
