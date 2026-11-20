@@ -23,7 +23,7 @@ from .tasks import TERMINAL
 MAX_QUESTIONS = 7
 MAX_CANDIDATES = 30
 CONDENSE_TIMEOUT = 120
-CONDENSE_ROUTES = ("claude", "codex", "zai", "grok", "cursor", "antigravity", "simulated")
+CONDENSE_ROUTES = ("claude", "codex", "cursor", "antigravity", "simulated")
 _MEMO_SECTIONS = re.compile(r"follow-?ups?|unresolved|open questions?|conditions|questions for", re.I)
 _OWNER_CUES = re.compile(r"\b(you|your|owner|we need|confirm|clarify|decide|which|what|does|do|is|are|should|"
                          r"how|when|who|will|can)\b", re.I)

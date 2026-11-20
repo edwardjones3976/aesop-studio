@@ -46,7 +46,7 @@ class TestDrive(unittest.TestCase):
         with self.assertRaises(ValueError):                       # too short a goal
             self.d.start(self.p, "claude", "x")
         with self.assertRaises(ValueError):                       # not a vision route
-            self.d.start(self.p, "grok", "find the rules of bid whist")
+            self.d.start(self.p, "firecrawl", "find the rules of bid whist")
         # vision route but file-sharing off for the project
         with mock_vision(self.d, ["claude"]):
             with self.assertRaises(ValueError) as e:

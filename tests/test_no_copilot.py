@@ -11,7 +11,7 @@ from aesop_studio import lanes, providers
 from aesop_studio.store import Store
 
 ROOT = Path(__file__).resolve().parent.parent
-_RETIRED_FILTER = 'RETIRED_FROM_SECRET_DISCOVERY = frozenset({"copilot"})'
+_RETIRED_FILTER = 'RETIRED_FROM_SECRET_DISCOVERY = frozenset({"copilot", "grok", "xai", "zai"})'
 
 
 class NoCopilot(unittest.TestCase):

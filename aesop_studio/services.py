@@ -17,21 +17,20 @@ from .store import Store, new_id
 from .tasks import TERMINAL, Supervisor
 from .security import IMAGE_MIMES, image_kind
 
-# Routes verified live to see a photo (2026-10-23). Z.ai's GLM model can't: its Read tool uploads the file but the
-# model never receives the image, so it is left out and the composer offers a switch instead.
+# Routes verified live to see a photo (2026-10-23). Keep this list honest rather than optimistic.
 IMAGE_ROUTES = ("codex", "claude", "openai-api", "simulated")
 MAX_FILES_PER_MESSAGE = 60
-# Text room per provider for attached files (characters). Grok and Antigravity take the prompt as a command-line
+# Text room per provider for attached files (characters). Antigravity takes the prompt as a command-line
 # argument (24k cap); the Codex API reservation is bounded by bytes; CLIs read stdin.
-FILE_BUDGET = {"grok": 16_000, "antigravity": 16_000, "openai-api": 200_000, "default": 160_000}
+FILE_BUDGET = {"antigravity": 16_000, "openai-api": 200_000, "default": 160_000}
 RESEARCH_ROUTES = ("firecrawl", "perplexity")  # answer on the spot from the web; questions and links only
 MAX_IMAGES_PER_MESSAGE = 12  # 6 photos from the owner; very tall or wide ones may be split into parts
 MAX_IMAGE_BYTES_PER_MESSAGE = 20 * 1024 * 1024
 
 HISTORY_MESSAGES = 30
 HISTORY_MESSAGE_CHARS = 6000
-# Room for the conversation so far, per provider (characters). Argv-prompt routes (Grok, Antigravity) cap at 24k.
-HISTORY_BUDGET = {"grok": 9_000, "antigravity": 9_000, "openai-api": 60_000, "default": 40_000}
+# Room for the conversation so far, per provider (characters). Argv-prompt routes (Antigravity) cap at 24k.
+HISTORY_BUDGET = {"antigravity": 9_000, "openai-api": 60_000, "default": 40_000}
 CONTEXT_ATTACHMENT_CHARS = 20_000
 
 

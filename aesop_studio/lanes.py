@@ -19,11 +19,11 @@ from .store import Store
 
 ADMINS = ("openai", "claude", "cursor")  # documented administrator identities (Codex, Claude Code, Cursor)
 # Owner naming rule: each family is titled by its code-based product (OpenAI/ChatGPT/Codex -> "Codex").
-DOCUMENTED_EXAMPLE = ["Codex", "Claude Code", "Cursor", "Director (local)", "Grok CLI", "Antigravity",
-                      "Perplexity", "Firecrawl", "Z.ai GLM Coding"]
-# Owner 2026-11-11: retired providers stay out of credential-only discovery; leftover *.dpapi files are
-# never opened or deleted (archive, don't delete).
-RETIRED_FROM_SECRET_DISCOVERY = frozenset({"copilot"})
+DOCUMENTED_EXAMPLE = ["Codex", "Claude Code", "Cursor", "Director (local)", "Antigravity",
+                      "Perplexity", "Firecrawl"]
+# Owner 2026-11-11 / 2026-11-19: retired providers stay out of credential-only discovery; leftover *.dpapi
+# files are never opened or deleted (archive, don't delete).
+RETIRED_FROM_SECRET_DISCOVERY = frozenset({"copilot", "grok", "xai", "zai"})
 
 _HOME = Path.home()
 _LOCAL = Path(os.environ.get("LOCALAPPDATA", _HOME / "AppData" / "Local"))
@@ -35,8 +35,6 @@ CATALOG = [
      "claude.ai plan quota"),
     ("cursor", "Cursor", "admin", ["cursor-agent"], [_LOCAL / "cursor-agent" / "cursor-agent.ps1"], ["cursor"],
      "Cursor plan; usage-based overage possible and not verifiable from here"),
-    ("grok", "Grok CLI", "speaker", ["grok"], [_HOME / ".grok" / "bin" / "grok.exe"], ["grok"],
-     "SuperGrok subscription quota (owner-confirmed paid plan)"),
     ("antigravity", "Antigravity", "speaker", ["agy", "antigravity"], [_LOCAL / "agy" / "bin" / "agy.exe"],
      ["antigravity"],
      "Google billing not verified as included"),
@@ -44,8 +42,6 @@ CATALOG = [
      "research tool; not a conversational speaker"),
     ("firecrawl", "Firecrawl", "research", ["firecrawl"], [], ["firecrawl"],
      "research tool (credit-based); not a conversational speaker"),
-    ("zai", "Z.ai GLM Coding", "speaker", ["claude-zai"], [_HOME / ".local" / "bin" / "claude-zai.cmd"], ["zai"],
-     "Z.ai GLM Coding Plan credits (owner-confirmed paid plan)"),
     ("director-local", "Director (local)", "speaker", ["lms", "ollama"], [],
      ["director-lmstudio", "director-ollama"], "$0 provider spend; local CPU/GPU"),
 ]
@@ -154,7 +150,7 @@ def discover(store: Store) -> dict:
                       "cost_visibility": r.get("incremental_cost_status", "unknown"), "billing_note": r["limitations"],
                       "counts_as_speaker": False,  # unknown/test lanes never inflate a roundtable count
                       "reasons": ["Discovered lane outside the documented roster; not counted as a speaker."]})
-    for name in sorted(secrets - known - {"anthropic", "gemini", "xai"} - RETIRED_FROM_SECRET_DISCOVERY):
+    for name in sorted(secrets - known - {"anthropic", "gemini"} - RETIRED_FROM_SECRET_DISCOVERY):
         lanes.append({"id": f"secret:{name}", "name": name, "lane_class": "speaker", "detected": True,
                       "detection": "credential registered in provider store", "readiness": "INSTALLED_UNVERIFIED",
                       "route_type": "unknown", "route_id": None, "verified_routes": [],

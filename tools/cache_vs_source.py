@@ -3,7 +3,7 @@
 Usage: python tools/cache_vs_source.py [data_dir] [--fix]
 Lists every route whose cached state, evidence or last_verified_at differs from its verify record. `--fix` calls
 providers.refresh() so the blob is rebuilt from the records. Exit 0 = consistent, 1 = drift found, 2 = error.
-Background: 2026-10-26 the panel showed UNVERIFIED for cursor/grok/zai/perplexity while the verify records were
+Background: 2026-10-26 the panel showed UNVERIFIED for cursor/perplexity (and since-retired lanes) while the verify records were
 ok, because verify_live() wrote the record but never refreshed the blob (fixed in PR #4). This catches a regression.
 """
 import json

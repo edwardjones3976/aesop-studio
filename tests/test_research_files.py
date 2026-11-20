@@ -119,7 +119,7 @@ class TestResearchRoutes(Base):
 
 class TestFilesAndFolders(Base):
     def test_folder_paths_budget_and_secret_files(self):
-        self.svc.update_project(self.p["id"], {"transfer_policy": {"simulated": True, "grok": True}})
+        self.svc.update_project(self.p["id"], {"transfer_policy": {"simulated": True, "antigravity": True}})
         self.assertEqual(_clean_rel_name("C:/proj/../src/app.py"), "proj/src/app.py")
         ids = [self.svc.attach(self.p["id"], f"app/src/f{i}.py", (f"# file {i}\n" + "x" * 9000).encode())["id"] for i in range(5)]
         env = self.svc.attach(self.p["id"], "app/.env", b"KEY=secret")
@@ -127,8 +127,8 @@ class TestFilesAndFolders(Base):
         ctx = self.svc.build_context(self.p["id"], self.c["id"], "review", ids, "simulated")
         self.assertIn('<file name="app/src/f0.py"', ctx)
         self.assertIn("[5 files attached:", ctx)
-        small = self.svc.build_context(self.p["id"], self.c["id"], "review", ids, "grok")
-        self.assertLess(len(small), FILE_BUDGET["grok"] + 3000)  # fair shares inside the argv-prompt room
+        small = self.svc.build_context(self.p["id"], self.c["id"], "review", ids, "antigravity")
+        self.assertLess(len(small), FILE_BUDGET["antigravity"] + 3000)  # fair shares inside the argv-prompt room
         self.assertIn('truncated="', small)
         with self.assertRaises(ValueError):
             self.svc.build_context(self.p["id"], self.c["id"], "x", [env["id"]], "simulated")
@@ -171,11 +171,11 @@ class TestHandoff(Base):
             self.store.x("INSERT INTO messages(id,conversation_id,role,content,status,provider,created,meta) VALUES(?,?,?,?,?,?,?,?)",
                          (f"m{i}", self.c["id"], "user" if i % 2 == 0 else "assistant", f"turn {i} " + "x" * 3000,
                           "saved" if i % 2 == 0 else "generated", None if i % 2 == 0 else "codex", 1000 + i, "{}"))
-        ctx = self.svc.build_context(self.p["id"], self.c["id"], "next", [], "grok")
+        ctx = self.svc.build_context(self.p["id"], self.c["id"], "next", [], "antigravity")
         self.assertIn("older message(s) not shown", ctx)
         self.assertIn("turn 39", ctx)       # the newest turns are the ones kept
         self.assertNotIn("turn 0 ", ctx)
-        self.assertLess(len(ctx), 24_000)   # fits Grok's argv-prompt limit
+        self.assertLess(len(ctx), 24_000)   # fits Antigravity's argv-prompt limit
 
 
 class TestRedo(Base):
@@ -185,7 +185,11 @@ class TestRedo(Base):
         return [m for m in self.svc.messages(self.p["id"], self.c["id"]) if m["id"] == r["message_id"]][0]
 
     def test_retry_failed_regenerate_latest_edit_latest(self):
-        bad = self._answer("first question", route="grok")    # Grok can't run in tests: the answer fails
+        # Seed a failed assistant turn without a retired provider: dispatch raises after the placeholder lands.
+        with mock.patch.object(self.sup, "create", side_effect=RuntimeError("dispatch failed")):
+            with self.assertRaises(RuntimeError):
+                self.svc.send(self.p["id"], self.c["id"], "first question", [], "simulated")
+        bad = [m for m in self.svc.messages(self.p["id"], self.c["id"]) if m["role"] == "assistant"][-1]
         self.assertEqual(bad["status"], "failed")
         r = self.svc.redo(self.p["id"], self.c["id"], bad["id"], "simulated", None)
         self.assertEqual(r["message_id"], bad["id"])           # replaced in place, no duplicate answer

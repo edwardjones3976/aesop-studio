@@ -19,7 +19,7 @@ A personal, local-first browser workspace for AI projects on Windows. One Python
 | Area | Files | Notes |
 |---|---|---|
 | HTTP server, routes, auth | `aesop_studio/server.py` | Session cookie + one-time launch code + CSRF + `X-Aesop-Key`; Host/Origin checks; CSP. Exclusive port bind (`SO_EXCLUSIVEADDRUSE`). |
-| Providers | `providers.py`, `openai_api.py`, `perplexity_api.py`, `research_routes.py` | CLI routes (codex, claude, cursor, antigravity, copilot, grok, zai) verified by live probe; metered API routes (openai-api, perplexity-orchestrator) gated by the ledger. `BILLING_ENV` keys are stripped from child processes. |
+| Providers | `providers.py`, `openai_api.py`, `perplexity_api.py`, `research_routes.py` | CLI routes (codex, claude, cursor, antigravity; Copilot / Z.ai / Grok retired) verified by live probe; metered API routes (openai-api, perplexity-orchestrator) gated by the ledger. `BILLING_ENV` keys are stripped from child processes. |
 | Spend | `ledger.py` | Reserve worst-case cost before send; settle from real usage; cancelled/cut-off keeps exposure; monthly limit or mission permit required. |
 | Agent tasks | `tasks.py` (Supervisor), `winjob.py` | One writer per project; job-object process trees; reconcile on restart; never replay. |
 | Research | `researcher.py` | Firecrawl first, then Perplexity Search (multi-query, dedupe, filters); SESSION_CAP 8, DAILY_CAP 60. |
