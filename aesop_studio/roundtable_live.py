@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import threading
 import time
 
@@ -54,7 +55,30 @@ class Broker:
         self.store, self.sup = store, sup
         self.sessions: dict[str, dict] = {}
         self.lock = threading.RLock()
+        self._auto_off_timers: list[threading.Timer] = []
         ensure_schema(store)
+
+    def shutdown(self) -> None:
+        """Cancel deferred auto-off work and join session threads before the store is closed.
+
+        Tests delete their temp DB in tearDown; without this, Timer/_research threads race
+        sqlite (`unable to open database file`) and can mark an otherwise-good session FAILED.
+        """
+        with self.lock:
+            timers = list(self._auto_off_timers)
+            self._auto_off_timers.clear()
+            sessions = list(self.sessions.values())
+        for t in timers:
+            t.cancel()
+        for s in sessions:
+            s["stop"].set()
+            with s["cond"]:
+                s["cond"].notify_all()
+            th = s.get("thread")
+            if th is not None and th.is_alive():
+                th.join(5)
+        with self.lock:
+            self.sessions.clear()
 
     # ---- events ----
     def _event(self, rt_id, kind, content, speaker=None, phase=None, seen_upto=None, task_id=None, latency=None,
@@ -387,13 +411,24 @@ class Broker:
             except Exception as e:  # noqa: BLE001 - a lookup failure is a gap, never a crash
                 res = {"ok": False, "query": query, "results": [], "error": type(e).__name__, "latency_s": None}
             text = res.pop("text", None) or researcher.render(res, asked_by)
-            self._event(rt_id, "research" if res["ok"] else "gap", text,
-                        speaker="researcher", phase="research", latency=res.get("latency_s"), reply_to=reply)
-            with self.lock:
-                s["rinflight"] -= 1
-                self._set_speaker(rt_id, s, "researcher", state="working" if s["rinflight"] else "idle",
-                                  turns=st["turns"] + (1 if res["ok"] else 0),
-                                  failures=st["failures"] + (0 if res["ok"] else 1), last_latency_s=res.get("latency_s"))
+            try:
+                if not getattr(self.store, "closed", False):
+                    self._event(rt_id, "research" if res["ok"] else "gap", text,
+                                speaker="researcher", phase="research", latency=res.get("latency_s"),
+                                reply_to=reply)
+                    with self.lock:
+                        s["rinflight"] -= 1
+                        self._set_speaker(rt_id, s, "researcher",
+                                          state="working" if s["rinflight"] else "idle",
+                                          turns=st["turns"] + (1 if res["ok"] else 0),
+                                          failures=st["failures"] + (0 if res["ok"] else 1),
+                                          last_latency_s=res.get("latency_s"))
+                else:
+                    with self.lock:
+                        s["rinflight"] -= 1
+            except sqlite3.OperationalError:
+                with self.lock:  # store closed/removed while the lookup was in flight
+                    s["rinflight"] = max(0, s["rinflight"] - 1)
             with s["cond"]:
                 s["cond"].notify_all()
 
@@ -436,9 +471,14 @@ class Broker:
         seq = self._event(rt_id, "system", f"{asked_by} asked the Researcher: {query}", phase="research")
         return self._research(rt_id, s, query, asked_by, seq)
 
-    def _wait(self, rt_id, s, done, hard=False):
+    def _wait(self, rt_id, s, done, hard=False, grace_s: float | None = None):
+        deadline = None if grace_s is None else time.time() + grace_s
         while not done():
-            if s["stop"].is_set() or (hard and self._elapsed(rt_id, s) >= s["limit_s"]):
+            if s["stop"].is_set():
+                return
+            if hard and self._elapsed(rt_id, s) >= s["limit_s"]:
+                return
+            if deadline is not None and time.time() >= deadline:
                 return
             with s["cond"]:
                 s["cond"].wait(0.5)
@@ -484,6 +524,8 @@ class Broker:
                 self._wait(rt_id, s, lambda: not s["inflight"], hard=True)
             for tid in list(s["inflight"].values()):
                 self.sup.cancel(tid)
+            # Let cancelled/late turns record their gaps before synthesis (avoids FAILED under CI load).
+            self._wait(rt_id, s, lambda: not s["inflight"] and not s["rinflight"], grace_s=5.0)
             stopped = s["stop"].is_set()
             if not stopped:
                 self._event(rt_id, "system", "Exchange closed. Synthesizing the decision memo from the transcript.",
@@ -491,8 +533,15 @@ class Broker:
                 self._synthesize(rt_id, s)
             self._finish(rt_id, s, "STOPPED" if stopped else "COMPLETED")
         except Exception as e:  # noqa: BLE001 - end honestly, never hang
-            self._event(rt_id, "gap", f"Relay error: {type(e).__name__}: {str(e)[:200]}. Session ended.", phase="error")
-            self._finish(rt_id, s, "FAILED")
+            try:
+                self._event(rt_id, "gap", f"Relay error: {type(e).__name__}: {str(e)[:200]}. Session ended.",
+                            phase="error")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self._finish(rt_id, s, "FAILED")
+            except sqlite3.OperationalError:
+                pass
 
     def _synthesize(self, rt_id, s):
         transcript, _ = self._transcript(rt_id, s["names"])
@@ -551,13 +600,21 @@ class Broker:
         # (unless another session is still live). The saved record/history is unaffected.
         t = threading.Timer(AUTO_OFF_S, self._auto_off, args=(rt_id,))
         t.daemon = True
+        with self.lock:
+            self._auto_off_timers.append(t)
         t.start()
 
     def _auto_off(self, rt_id: str) -> None:
-        busy = self.store.one("SELECT COUNT(*) n FROM roundtables WHERE live_status IN ('RUNNING','PAUSED')")["n"]
-        if not busy and lane_mod.live_authorized(self.store):
-            lane_mod.set_live_authorized(self.store, False)
-            self.store.event("roundtable_live_auto_off", None, after_session=rt_id, seconds=AUTO_OFF_S)
+        try:
+            if getattr(self.store, "closed", False):
+                return
+            busy = self.store.one(
+                "SELECT COUNT(*) n FROM roundtables WHERE live_status IN ('RUNNING','PAUSED')")["n"]
+            if not busy and lane_mod.live_authorized(self.store):
+                lane_mod.set_live_authorized(self.store, False)
+                self.store.event("roundtable_live_auto_off", None, after_session=rt_id, seconds=AUTO_OFF_S)
+        except sqlite3.OperationalError:
+            return  # store closed/removed before the deferred switch-off ran
 
     def export(self, rt_id: str) -> dict:
         r = self.store.one("SELECT * FROM roundtables WHERE id=?", (rt_id,))
