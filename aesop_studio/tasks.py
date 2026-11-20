@@ -350,6 +350,9 @@ class Supervisor:
             return None
         if tid in self.cancel_flags or tid + ":timeout" in self.cancel_flags:
             return None
+        # Multi-model routes already tried every eligible model in-task on explicit quota faults.
+        if route_id in providers.MODEL_PREFERENCES and cp.get("models_tried") is not None:
+            return None
         low = output_tail.lower()
         if not any(m in low for m in TRANSIENT_MARKERS):
             return None
@@ -363,6 +366,44 @@ class Supervisor:
         self.store.x("UPDATE tasks SET checkpoint=json_set(COALESCE(checkpoint,'{}'),'$.retry_of',?) WHERE id=?", (tid, new))
         self.store.event("task_retry", t["project_id"], task_id=tid, retry_task_id=new, route=route_id)
         return new
+
+    def _chat_models(self, route_id: str, mode: str, requested: str | None) -> list[str | None]:
+        """Ordered models for one chat send; non-preference routes keep a single requested/default slot."""
+        if mode != "chat" or route_id not in providers.MODEL_PREFERENCES:
+            return [requested]
+        return providers.available_models(self.store, route_id, requested)
+
+    def _record_send_verification(self, route_id: str, *, ok: bool, detail: str, complete: bool = False) -> dict | None:
+        """Keep verify:{route} + routes blob aligned with verify_live after a chat send."""
+        if route_id not in providers.LIVE_VERIFY_ROUTES:
+            return None
+        at = round(time.time(), 3)
+        rec = {"at": at, "ok": ok, "detail": detail[:200], "latency_s": None, "source": "task"}
+        if route_id in providers.MODEL_PREFERENCES:
+            rec.update(providers._model_state(self.store, route_id))
+            if ok:
+                rec["state"] = "READY_INCLUDED"
+            elif complete:
+                rec["state"] = ("UNAVAILABLE" if not providers.available_models(self.store, route_id)
+                                else "UNVERIFIED")
+            else:
+                rec["state"] = "UNVERIFIED"
+        self.store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                     (f"verify:{route_id}", json.dumps(rec)))
+        path = '$."' + route_id + '"'
+        if ok:
+            self.store.x("UPDATE kv SET v=json_set(v, ?, ?, ?, ?, ?, ?, ?, ?) WHERE k='routes' "
+                         "AND json_extract(v, ?)='READY_INCLUDED'",
+                         (path + ".last_verified_at", at, path + ".verified_at", at,
+                          path + ".verify_expires_at", at + providers.VERIFY_MAX_AGE_S,
+                          path + ".evidence", f"live verification {providers._day_time(at)}: {detail[:120]}",
+                          path + ".state"))
+        elif rec.get("state") == "UNAVAILABLE":
+            self.store.x("UPDATE kv SET v=json_set(v, ?, ?, ?, ?, ?, ?, ?, ?) WHERE k='routes'",
+                         (path + ".state", "UNAVAILABLE", path + ".next_step", "verify",
+                          path + ".evidence", (f"last live send failed: {detail}")[:300],
+                          path + ".last_verified_at", at))
+        return rec
 
     def get(self, task_id: str) -> dict | None:
         return self.store.one("SELECT * FROM tasks WHERE id=?", (task_id,))
@@ -574,140 +615,201 @@ class Supervisor:
     def _run(self, tid, route_id, mode, cwd, prompt, out_path, timeout, lid, model, images=None, study=None):
         last_file = out_path + ".last.txt"
         proc = job = timer = None
+        multi = mode == "chat" and route_id in providers.MODEL_PREFERENCES
+        deadline = time.time() + timeout
         try:
             try:
                 rel = _stage_images(cwd, images) if images else []
                 if rel and route_id in READ_TOOL_IMAGE_ROUTES:
                     prompt += ("\n\n[Attached photos are in your working folder: " + ", ".join(rel)
                                + ". Open each one with the Read tool before you answer.]")
-                argv = providers.build_argv(route_id, mode, cwd, last_file, model, prompt=prompt, images=rel, study=study)
+                models = self._chat_models(route_id, mode, model)
             except RuntimeError as e:
                 if mode == "chat":
                     _remove_chat_dir(cwd)
                 return self._end(tid, "FAILED", lid, 0, error=str(e))
-            meta = {"executable": Path(argv[0]).name,  # never record the prompt (argv-prompt routes) or the cwd
-                    "args": ["-p=<prompt>" if a.startswith("-p=") else a for a in argv[1:] if not a.startswith(cwd)][:20]}
-            self._set(tid, "STARTING", argv_meta=json.dumps(meta), started=time.time())
-            env = {k: v for k, v in os.environ.items() if k.upper() not in providers.BILLING_ENV}
-            try:
-                # Claude Code-based routes write banners/diagnostics to stderr: keep them out of the answer.
-                errf = open(out_path + ".err", "wb") if route_id in SEPARATE_STDERR_ROUTES else None
-                proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                        stderr=errf if errf else subprocess.STDOUT, creationflags=NEW_GROUP, env=env)
-                if errf:
-                    errf.close()  # the child holds its own handle
-            except OSError as e:
+            if multi and not models:
+                detail = "all catalog models have recorded quota exhaustion"
+                self._record_send_verification(route_id, ok=False, detail=detail, complete=True)
                 if mode == "chat":
                     _remove_chat_dir(cwd)
-                return self._end(tid, "FAILED", lid, 0, error=f"launch failed: {e}")
-            job = winjob.contain(proc.pid)  # whole-tree containment, including detached descendants
-            with self.lock:
-                self.procs[tid] = proc
-                self.jobs[tid] = job
-            # watchdog and output drain start BEFORE the prompt is written: a child that never reads stdin or that
-            # fills stdout first can no longer deadlock the supervisor outside the timeout
-            timer = threading.Timer(timeout, lambda: (self.cancel_flags.add(tid + ":timeout"),
-                                                      winjob.terminate(job), kill_tree(proc.pid)))
-            timer.daemon = True
-            timer.start()
-            log = _RedactingLog(out_path)
+                cp = json.loads(self.get(tid)["checkpoint"] or "{}")
+                cp.update(providers._model_state(self.store, route_id), models_tried=[])
+                return self._end(tid, "FAILED", lid, 0, error=detail, checkpoint=json.dumps(cp))
 
-            def reader():
-                dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
-                try:
-                    while True:
-                        chunk = proc.stdout.read1(READ_CHUNK) if hasattr(proc.stdout, "read1") else \
-                            proc.stdout.read(READ_CHUNK)
-                        if not chunk:
-                            break
-                        if log.left > 0:
-                            log.write(dec.decode(chunk))
-                        # past the cap: keep draining so the child never blocks on a full pipe
-                    log.write(dec.decode(b"", final=True))
-                finally:
-                    log.close()
+            state = err = result = changed = None
+            code = -1
+            tried: list[str | None] = []
+            complete = False
+            env = {k: v for k, v in os.environ.items() if k.upper() not in providers.BILLING_ENV}
 
-            rt = threading.Thread(target=reader, daemon=True)
-            rt.start()
+            for attempt_i, attempt_model in enumerate(models):
+                proc = job = timer = None
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    state, err, code = "FAILED", f"timed out after {timeout}s", -1
+                    break
+                for path in (out_path, last_file, out_path + ".err"):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                try:
+                    argv = providers.build_argv(route_id, mode, cwd, last_file, attempt_model,
+                                                prompt=prompt, images=rel, study=study)
+                except RuntimeError as e:
+                    if mode == "chat":
+                        _remove_chat_dir(cwd)
+                    return self._end(tid, "FAILED", lid, 0, error=str(e))
+                meta = {"executable": Path(argv[0]).name,  # never record the prompt (argv-prompt routes) or the cwd
+                        "args": ["-p=<prompt>" if a.startswith("-p=") else a for a in argv[1:]
+                                 if not a.startswith(cwd)][:20]}
+                if attempt_model:
+                    meta["model"] = attempt_model
+                prev = self.get(tid) or {}
+                started_at = prev["started"] if prev.get("started") else time.time()
+                self._set(tid, "STARTING", argv_meta=json.dumps(meta), started=started_at)
+                try:
+                    # Claude Code-based routes write banners/diagnostics to stderr: keep them out of the answer.
+                    errf = open(out_path + ".err", "wb") if route_id in SEPARATE_STDERR_ROUTES else None
+                    proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                            stderr=errf if errf else subprocess.STDOUT, creationflags=NEW_GROUP,
+                                            env=env)
+                    if errf:
+                        errf.close()  # the child holds its own handle
+                except OSError as e:
+                    if mode == "chat":
+                        _remove_chat_dir(cwd)
+                    return self._end(tid, "FAILED", lid, 0, error=f"launch failed: {e}")
+                job = winjob.contain(proc.pid)  # whole-tree containment, including detached descendants
+                with self.lock:
+                    self.procs[tid] = proc
+                    self.jobs[tid] = job
+                # watchdog and output drain start BEFORE the prompt is written: a child that never reads stdin or that
+                # fills stdout first can no longer deadlock the supervisor outside the timeout
+                timer = threading.Timer(remaining, lambda: (self.cancel_flags.add(tid + ":timeout"),
+                                                            winjob.terminate(job), kill_tree(proc.pid)))
+                timer.daemon = True
+                timer.start()
+                log = _RedactingLog(out_path)
 
-            def writer():
-                try:
-                    if route_id not in providers.ARGV_PROMPT_ROUTES:
-                        proc.stdin.write(prompt.encode("utf-8"))
-                    proc.stdin.close()
-                except (OSError, ValueError):
-                    pass  # child exited or was killed; the pipe is gone
+                def reader():
+                    dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
+                    try:
+                        while True:
+                            chunk = proc.stdout.read1(READ_CHUNK) if hasattr(proc.stdout, "read1") else \
+                                proc.stdout.read(READ_CHUNK)
+                            if not chunk:
+                                break
+                            if log.left > 0:
+                                log.write(dec.decode(chunk))
+                            # past the cap: keep draining so the child never blocks on a full pipe
+                        log.write(dec.decode(b"", final=True))
+                    finally:
+                        log.close()
 
-            wt = threading.Thread(target=writer, daemon=True)
-            wt.start()
-            self._set(tid, "RUNNING", pid=proc.pid)
-            code = proc.wait()
-            timer.cancel()
-            wt.join(5)
-            rt.join(10)
-            descendants_killed, orphaned = False, False
-            if rt.is_alive():  # a detached descendant still holds the output pipe: end the whole job
-                descendants_killed = winjob.terminate(job)
-                rt.join(5)
-                orphaned = rt.is_alive()
-            with self.lock:  # unregister and close atomically so cancel() never uses a recycled handle
-                self.procs.pop(tid, None)
-                self.jobs.pop(tid, None)
-                winjob.close(job)
-                job = None
-            changed = None
-            if mode == "agent":
+                rt = threading.Thread(target=reader, daemon=True)
+                rt.start()
+
+                def writer():
+                    try:
+                        if route_id not in providers.ARGV_PROMPT_ROUTES:
+                            proc.stdin.write(prompt.encode("utf-8"))
+                        proc.stdin.close()
+                    except (OSError, ValueError):
+                        pass  # child exited or was killed; the pipe is gone
+
+                wt = threading.Thread(target=writer, daemon=True)
+                wt.start()
+                self._set(tid, "RUNNING", pid=proc.pid)
+                code = proc.wait()
+                timer.cancel()
+                wt.join(5)
+                rt.join(10)
+                descendants_killed, orphaned = False, False
+                if rt.is_alive():  # a detached descendant still holds the output pipe: end the whole job
+                    descendants_killed = winjob.terminate(job)
+                    rt.join(5)
+                    orphaned = rt.is_alive()
+                with self.lock:  # unregister and close atomically so cancel() never uses a recycled handle
+                    self.procs.pop(tid, None)
+                    self.jobs.pop(tid, None)
+                    winjob.close(job)
+                    job = None
+                changed = None
+                if mode == "agent":
+                    try:
+                        saved = json.loads(Path(out_path + ".before.json").read_text(encoding="utf-8"))
+                        after, trunc_after = snapshot(cwd)
+                        changed = json.dumps(diff_snapshots(saved.get("entries", {}), after,
+                                                            bool(saved.get("truncated")) or trunc_after))
+                    except (OSError, ValueError):
+                        changed = json.dumps({"added": [], "removed": [], "modified": [], "incomplete": True,
+                                              "note": "change snapshot unavailable"})
+                result = ""
                 try:
-                    saved = json.loads(Path(out_path + ".before.json").read_text(encoding="utf-8"))
-                    after, trunc_after = snapshot(cwd)
-                    changed = json.dumps(diff_snapshots(saved.get("entries", {}), after,
-                                                        bool(saved.get("truncated")) or trunc_after))
-                except (OSError, ValueError):
-                    changed = json.dumps({"added": [], "removed": [], "modified": [], "incomplete": True,
-                                          "note": "change snapshot unavailable"})
-            result = ""
-            try:
-                with open(last_file, "rb") as f:  # bounded read, then the raw (unredacted) file is removed
-                    result = redact(f.read(MAX_OUTPUT_BYTES).decode("utf-8", errors="replace"))
-            except OSError:
-                pass
-            finally:
-                try:
-                    os.remove(last_file)
+                    with open(last_file, "rb") as f:  # bounded read, then the raw (unredacted) file is removed
+                        result = redact(f.read(MAX_OUTPUT_BYTES).decode("utf-8", errors="replace"))
                 except OSError:
                     pass
-            if tid in self.cancel_flags:
-                state, err = "CANCELLED", "cancelled by owner (local process tree terminated)"
-            elif tid + ":timeout" in self.cancel_flags:
-                state, err = "FAILED", f"timed out after {timeout}s"
-            elif orphaned:
-                state, err = "EFFECT_UNKNOWN", "main process exited but a descendant kept running; review before reuse"
-            elif code == 0:
-                state, err = "COMPLETED", ("left-over descendant processes were terminated via the task's job object"
-                                           if descendants_killed else None)
-            else:
+                finally:
+                    try:
+                        os.remove(last_file)
+                    except OSError:
+                        pass
+                tried.append(attempt_model)
+                if tid in self.cancel_flags:
+                    state, err = "CANCELLED", "cancelled by owner (local process tree terminated)"
+                    break
+                if tid + ":timeout" in self.cancel_flags:
+                    state, err = "FAILED", f"timed out after {timeout}s"
+                    break
+                if orphaned:
+                    state, err = "EFFECT_UNKNOWN", (
+                        "main process exited but a descendant kept running; review before reuse")
+                    break
+                if code == 0:
+                    state, err = "COMPLETED", (
+                        "left-over descendant processes were terminated via the task's job object"
+                        if descendants_killed else None)
+                    if multi and attempt_model:
+                        providers.record_model_success(self.store, route_id, attempt_model)
+                    break
                 state, err = "FAILED", f"exit code {code}"
                 diag = _codex_err(out_path) if route_id == "codex" else _err_tail(out_path)
                 if not diag:
                     diag = _err_tail(out_path)
                 if diag:
                     err += f": {diag}"
+                try:
+                    probe = (Path(out_path).read_text(encoding="utf-8", errors="replace")[-4000:] + " "
+                             + _err_tail(out_path, 2000) + " " + (result or "") + " " + err)
+                except OSError:
+                    probe = err
+                if (multi and attempt_model
+                        and providers.record_model_quota(self.store, route_id, attempt_model, code, probe)):
+                    nxt = models[attempt_i + 1] if attempt_i + 1 < len(models) else None
+                    if nxt:
+                        self.store.event("task_model_fallback", self.get(tid)["project_id"], task_id=tid,
+                                         route=route_id, from_model=attempt_model, to_model=nxt)
+                    continue
+                break
+            else:
+                complete = True
+
             cp = json.loads(self.get(tid)["checkpoint"] or "{}")
-            cp["result"] = result[:MAX_OUTPUT_BYTES]
+            cp["result"] = (result or "")[:MAX_OUTPUT_BYTES]
+            if multi:
+                cp["models_tried"] = [m for m in tried if m]
+                if tried and tried[-1]:
+                    cp["model"] = tried[-1]
+                cp.update(providers._model_state(self.store, route_id))
             if state == "COMPLETED" and route_id in providers.LIVE_VERIFY_ROUTES:
-                # every successful real call keeps the route's live verification fresh
-                at = round(time.time(), 3)  # ms: survives SQLite's 15-digit REAL rendering in json_set exactly
-                self.store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-                             (f"verify:{route_id}", json.dumps({"at": at, "ok": True, "detail": "successful request",
-                                                                 "latency_s": None, "source": "task"})))
-                # keep the cached routes blob in step for this one route (no full re-probe on the task thread)
-                path = '$."' + route_id + '"'
-                self.store.x("UPDATE kv SET v=json_set(v, ?, ?, ?, ?, ?, ?, ?, ?) WHERE k='routes' "
-                             "AND json_extract(v, ?)='READY_INCLUDED'",
-                             (path + ".last_verified_at", at, path + ".verified_at", at,
-                              path + ".verify_expires_at", at + providers.VERIFY_MAX_AGE_S,
-                              path + ".evidence", f"live verification {providers._day_time(at)}: successful request",
-                              path + ".state"))
+                self._record_send_verification(route_id, ok=True, detail="successful request")
+            elif complete and multi:
+                detail = err or "all catalog models have recorded quota exhaustion"
+                self._record_send_verification(route_id, ok=False, detail=detail, complete=True)
+                cp.update(providers._model_state(self.store, route_id))
             try:
                 tail = Path(out_path).read_text(encoding="utf-8", errors="replace")[-4000:] + " " + _err_tail(out_path, 2000)
             except OSError:
