@@ -352,8 +352,9 @@ class Supervisor:
             return None
         if tid in self.cancel_flags or tid + ":timeout" in self.cancel_flags:
             return None
-        # Multi-model routes already tried every eligible model in-task on explicit quota faults.
-        if route_id in providers.MODEL_PREFERENCES and cp.get("models_tried") is not None:
+        # Only skip after a completed in-task quota-fallback pass (every eligible model tried).
+        # A single-model non-quota transient (e.g. 503) must still get the usual one retry.
+        if route_id in providers.MODEL_PREFERENCES and cp.get("quota_pass_complete"):
             return None
         low = output_tail.lower()
         if not any(m in low for m in TRANSIENT_MARKERS):
@@ -393,13 +394,27 @@ class Supervisor:
         self.store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
                      (f"verify:{route_id}", json.dumps(rec)))
         path = '$."' + route_id + '"'
+        evidence = f"live verification {providers._day_time(at)}: {detail[:120]}"
         if ok:
+            # Refresh an already-ready card without touching install/auth parking.
             self.store.x("UPDATE kv SET v=json_set(v, ?, ?, ?, ?, ?, ?, ?, ?) WHERE k='routes' "
                          "AND json_extract(v, ?)='READY_INCLUDED'",
                          (path + ".last_verified_at", at, path + ".verified_at", at,
                           path + ".verify_expires_at", at + providers.VERIFY_MAX_AGE_S,
-                          path + ".evidence", f"live verification {providers._day_time(at)}: {detail[:120]}",
-                          path + ".state"))
+                          path + ".evidence", evidence, path + ".state"))
+            # A concurrent send may have parked UNAVAILABLE after exhausting the catalog; a later
+            # success must restore readiness (never clear install/login blocks).
+            if route_id in providers.MODEL_PREFERENCES:
+                self.store.x(
+                    "UPDATE kv SET v=json_set(v, ?, 'READY_INCLUDED', ?, null, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "WHERE k='routes' AND json_extract(v, ?)='UNAVAILABLE' "
+                    "AND json_extract(v, ?)=1 "
+                    "AND COALESCE(json_extract(v, ?), '') NOT IN ('install', 'login')",
+                    (path + ".state", path + ".next_step",
+                     path + ".last_verified_at", at, path + ".verified_at", at,
+                     path + ".verify_expires_at", at + providers.VERIFY_MAX_AGE_S,
+                     path + ".evidence", evidence,
+                     path + ".state", path + ".installed", path + ".next_step"))
         elif rec.get("state") == "UNAVAILABLE":
             self.store.x("UPDATE kv SET v=json_set(v, ?, ?, ?, ?, ?, ?, ?, ?) WHERE k='routes'",
                          (path + ".state", "UNAVAILABLE", path + ".next_step", "verify",
@@ -630,13 +645,20 @@ class Supervisor:
                 if mode == "chat":
                     _remove_chat_dir(cwd)
                 return self._end(tid, "FAILED", lid, 0, error=str(e))
+            # Stop during cold/expired catalog load must win before any model launch.
+            if tid in self.cancel_flags:
+                if mode == "chat":
+                    _remove_chat_dir(cwd)
+                return self._end(tid, "CANCELLED", lid, 0,
+                                 error="cancelled by owner (local process tree terminated)")
             if multi and not models:
                 detail = "all catalog models have recorded quota exhaustion"
                 self._record_send_verification(route_id, ok=False, detail=detail, complete=True)
                 if mode == "chat":
                     _remove_chat_dir(cwd)
                 cp = json.loads(self.get(tid)["checkpoint"] or "{}")
-                cp.update(providers._model_state(self.store, route_id), models_tried=[])
+                cp.update(providers._model_state(self.store, route_id), models_tried=[],
+                          quota_pass_complete=True)
                 return self._end(tid, "FAILED", lid, 0, error=detail, checkpoint=json.dumps(cp))
 
             state = err = result = changed = None
@@ -693,9 +715,15 @@ class Supervisor:
                         _remove_chat_dir(cwd)
                     return self._end(tid, "FAILED", lid, 0, error=f"launch failed: {e}")
                 job = winjob.contain(proc.pid)  # whole-tree containment, including detached descendants
+                # Register under the same lock we re-check cancel on, so Stop between check and
+                # registration cannot leave a live child unmarked.
                 with self.lock:
                     self.procs[tid] = proc
                     self.jobs[tid] = job
+                    stop_now = tid in self.cancel_flags
+                if stop_now:
+                    winjob.terminate(job)
+                    kill_tree(proc.pid)
                 # watchdog and output drain start BEFORE the prompt is written: a child that never reads stdin or that
                 # fills stdout first can no longer deadlock the supervisor outside the timeout
                 timer = threading.Timer(remaining, lambda: (self.cancel_flags.add(tid + ":timeout"),
@@ -815,6 +843,8 @@ class Supervisor:
                 if tried and tried[-1]:
                     cp["model"] = tried[-1]
                 cp.update(providers._model_state(self.store, route_id))
+                if complete:
+                    cp["quota_pass_complete"] = True
             if state == "COMPLETED" and route_id in providers.LIVE_VERIFY_ROUTES:
                 self._record_send_verification(route_id, ok=True, detail="successful request")
             elif complete and multi:

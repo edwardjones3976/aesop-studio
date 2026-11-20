@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -117,6 +118,7 @@ class SendModelFallback(unittest.TestCase):
         self.assertEqual(self.attempts, [ARGON, FLASH])
         cp = json.loads(t["checkpoint"] or "{}")
         self.assertEqual(cp["models_tried"], [ARGON, FLASH])
+        self.assertTrue(cp.get("quota_pass_complete"))
         self.assertIsNone(cp.get("model_in_use"))
         self.assertEqual({e["model"] for e in cp["models_exhausted"]}, {ARGON, FLASH})
         self.assertIsNone(cp.get("retried_as"))
@@ -215,6 +217,63 @@ class SendModelFallback(unittest.TestCase):
         self.assertEqual(final, end)
         self.assertIn("ok from " + FLASH, rest)
         self.assertNotIn("RESOURCE_EXHAUSTED", rest)
+
+    def test_nonquota_transient_still_retries_once(self):
+        """503 on the first model must not be treated as a finished quota pass."""
+        script = self.tmp / f"fake_agy_503_{time.time_ns()}.py"
+        script.write_text(
+            "import sys\n"
+            "sys.stdout.write('HTTP 503 overloaded\\n')\n"
+            "sys.exit(1)\n",
+            encoding="utf-8",
+        )
+        with self._patch_build(script), patch.object(time, "sleep"):
+            tid = self.sup.create(self.p, "antigravity", "hello", mode="chat", timeout=30)
+            t = _wait_terminal(self.sup, tid, timeout=60)
+        self.assertEqual(t["state"], "FAILED")
+        cp = json.loads(t["checkpoint"] or "{}")
+        self.assertEqual(cp.get("models_tried"), [ARGON])
+        self.assertFalse(cp.get("quota_pass_complete"))
+        self.assertIsNotNone(cp.get("retried_as"))
+        retry = self.sup.get(cp["retried_as"])
+        self.assertIsNotNone(retry)
+        _wait_terminal(self.sup, retry["id"], timeout=60)
+
+    def test_success_restores_unavailable_route(self):
+        """A successful send must clear a concurrent catalog-exhaustion UNAVAILABLE park."""
+        script = self._fake_agy_script(set())
+        with self._patch_build(script):
+            tid = self.sup.create(self.p, "antigravity", "hello", mode="chat", timeout=30)
+            # Concurrent peer parked the route while this send is still in flight.
+            routes = json.loads(self.store.one("SELECT v FROM kv WHERE k='routes'")["v"])
+            routes["antigravity"].update(state="UNAVAILABLE", next_step="verify", installed=True,
+                                         evidence="last live send failed: all catalog models exhausted")
+            self.store.x("UPDATE kv SET v=? WHERE k='routes'", (json.dumps(routes),))
+            t = _wait_terminal(self.sup, tid)
+        self.assertEqual(t["state"], "COMPLETED")
+        route = json.loads(self.store.one("SELECT v FROM kv WHERE k='routes'")["v"])["antigravity"]
+        self.assertEqual(route["state"], "READY_INCLUDED")
+        self.assertIsNone(route.get("next_step"))
+
+    def test_cancel_during_catalog_load_skips_launch(self):
+        """Stop while available_models blocks must cancel before any CLI launch."""
+        real_available = providers.available_models
+        entered, release = threading.Event(), threading.Event()
+
+        def slow_catalog(store, rid, requested=None):
+            entered.set()
+            release.wait(5)
+            return real_available(store, rid, requested)
+
+        with patch.object(providers, "available_models", side_effect=slow_catalog), \
+                self._patch_build(self._fake_agy_script(set())):
+            tid = self.sup.create(self.p, "antigravity", "hello", mode="chat", timeout=30)
+            self.assertTrue(entered.wait(5))
+            self.assertTrue(self.sup.cancel(tid))
+            release.set()
+            t = _wait_terminal(self.sup, tid)
+        self.assertEqual(t["state"], "CANCELLED")
+        self.assertEqual(self.attempts, [])
 
 
 if __name__ == "__main__":
