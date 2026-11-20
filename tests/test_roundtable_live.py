@@ -236,32 +236,54 @@ class TestResearcher(TestBroker):
         self.assertNotIn("researcher", st["speakers"])
 
     def test_research_releases_rinflight_once_when_set_speaker_errors(self):
-        """Codex P2: _event OK then _set_speaker OperationalError must not double-decrement."""
+        """Codex P2 / Copilot: each lookup releases once; sibling still inflight after first errors."""
         import sqlite3
+        import threading
+        from aesop_studio import researcher as researcher_mod
         rec = self.draft()
         clock = {"limit_s": 60, "reserve_s": 5, "turn_timeout": 30}
         self.assertTrue(self.broker.start(rec, self.svc.project(self.p["id"]), clock=clock)["started"])
         s = self.broker.sessions[rec["id"]]
         real_set = self.broker._set_speaker
-        calls = {"n": 0}
+        errors = {"n": 0}
+        gates = [threading.Event(), threading.Event()]
+        order = {"n": 0}
+        order_lock = threading.Lock()
 
         def flaky_set(rt_id, sess, lid, **kw):
-            # Fail only on the post-lookup speaker update (has turns), not the pre-queue "working" mark.
-            if lid == "researcher" and "turns" in kw and calls["n"] == 0:
-                calls["n"] += 1
+            # Fail only on the first post-lookup speaker update (has turns).
+            if lid == "researcher" and "turns" in kw and errors["n"] == 0:
+                errors["n"] += 1
                 raise sqlite3.OperationalError("simulated lock")
             return real_set(rt_id, sess, lid, **kw)
 
-        with mock.patch.object(self.broker, "_set_speaker", side_effect=flaky_set):
-            q1 = self.broker.ask_research(rec["id"], "first public lookup question")
-            q2 = self.broker.ask_research(rec["id"], "second public lookup question")
-            self.assertTrue(q1["queued"] and q2["queued"])
-            end = time.time() + 20
+        def gated_research(store, query, **options):
+            with order_lock:
+                idx = order["n"]
+                order["n"] += 1
+            gates[idx].wait(10)
+            return {"ok": True, "backend": "simulated", "query": query, "results": [
+                {"title": f"Simulated source {idx + 1}", "url": f"https://example.test/{idx}",
+                 "snippet": "snippet"}], "latency_s": 0.01}
+
+        with mock.patch.object(self.broker, "_set_speaker", side_effect=flaky_set), \
+                mock.patch.object(researcher_mod, "research", side_effect=gated_research):
+            self.assertTrue(self.broker.ask_research(rec["id"], "first public lookup question")["queued"])
+            self.assertTrue(self.broker.ask_research(rec["id"], "second public lookup question")["queued"])
+            self.assertEqual(s["rinflight"], 2)  # both queued before either runs
+            gates[0].set()  # first lookup finishes (hits flaky_set)
+            end = time.time() + 10
+            while time.time() < end and (errors["n"] < 1 or s["rinflight"] != 1):
+                time.sleep(0.05)
+            self.assertEqual(errors["n"], 1)
+            self.assertEqual(s["rinflight"], 1)  # sibling still in flight — not double-decremented to 0
+            gates[1].set()
+            end = time.time() + 10
             while time.time() < end and s["rinflight"] > 0:
                 time.sleep(0.05)
-            self.assertEqual(s["rinflight"], 0)  # each lookup released exactly once
+            self.assertEqual(s["rinflight"], 0)
             found = [e for e in self.broker.events(rec["id"]) if e["kind"] == "research"]
-            self.assertGreaterEqual(len(found), 1)
+            self.assertEqual(len(found), 2)
         self.broker.stop(rec["id"])
         end = time.time() + 30
         while time.time() < end and self.broker.status(rec["id"])["live_status"] == "RUNNING":
