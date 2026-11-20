@@ -236,7 +236,8 @@ class Handler(BaseHTTPRequestHandler):
 
     @route("GET", r"/api/arena/demos")
     def arena_demos(self, sess):
-        self.json({"demos": arena.demos(), "live_dual_generation": False, "live_note": arena.LIVE_NOTE})
+        # Feature is available for free routes; per-lane eligibility is on estimate/compare/run.
+        self.json({"demos": arena.demos(), "live_dual_generation": True, "live_note": arena.LIVE_NOTE})
 
     @route("GET", r"/api/arena/estimate")
     def arena_estimate(self, sess):
@@ -265,6 +266,21 @@ class Handler(BaseHTTPRequestHandler):
         if not lane_a:
             raise ValueError("no Studio routes available for Arena")
         self.json(arena.compare_payload(self.app.store, lane_a, lane_b, demo_id))
+
+    @route("POST", r"/api/projects/(\w+)/arena/run")
+    def arena_run(self, sess, pid):
+        """Dispatch dual-lane Run both for included/local/simulated routes only.
+
+        Reuses Services.send (same reserve/settle path as Chat). Metered lanes are refused
+        with 400 before any ledger reserve.
+        """
+        b = self.body()
+        self.json(arena.run_both(
+            self.app.store, self.app.svc, pid,
+            b.get("a") or "", b.get("b") or "",
+            b.get("demo") or "alpine",
+            b.get("prompt") or b.get("text"),
+        ), 202)
 
     @route("POST", r"/api/routes/refresh")
     def routes_refresh(self, sess):

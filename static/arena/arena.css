@@ -29,6 +29,18 @@
 .arena-cost { font-family: var(--mono); font-size: 13px; color: var(--mint); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .arena-stage { position: relative; flex: 1 1 auto; min-height: 360px; background: #0a1018; overflow: auto; }
 .arena-note { color: var(--text-3); font-size: 12px; margin: 0; padding: 0 2px; }
+.arena-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.arena-run-hint { color: var(--text-2); font-size: 12px; margin: 0; padding: 0 2px; }
+.arena-result {
+  border-top: 1px solid var(--border); background: var(--panel); padding: 10px 12px;
+  min-height: 96px; max-height: 220px; overflow: auto; display: flex; flex-direction: column; gap: 8px;
+}
+.arena-result-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.arena-result-body {
+  margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--mono);
+  font-size: 12px; line-height: 1.45; color: var(--text);
+}
+.arena-result-body.err { color: var(--coral-2); }
 
 /* Shared demo chrome */
 .ademo { height: 100%; min-height: 360px; display: flex; flex-direction: column; }
