@@ -421,19 +421,22 @@ class Broker:
             except sqlite3.OperationalError:
                 pass  # store closed/removed while the lookup was in flight
             finally:
+                # Single rinflight release + speaker snapshot must stay under one lock so two
+                # completions cannot both read the same turns/failures or leave state=working
+                # after the last lookup has finished (Codex P2 on #24).
                 with self.lock:
                     s["rinflight"] = max(0, s["rinflight"] - 1)
                     remaining = s["rinflight"]
                     turns = st["turns"] + (1 if res["ok"] else 0)
                     failures = st["failures"] + (0 if res["ok"] else 1)
-                try:
-                    if not getattr(self.store, "closed", False):
-                        self._set_speaker(rt_id, s, "researcher",
-                                          state="working" if remaining else "idle",
-                                          turns=turns, failures=failures,
-                                          last_latency_s=res.get("latency_s"))
-                except sqlite3.OperationalError:
-                    pass
+                    try:
+                        if not getattr(self.store, "closed", False):
+                            self._set_speaker(rt_id, s, "researcher",
+                                              state="working" if remaining else "idle",
+                                              turns=turns, failures=failures,
+                                              last_latency_s=res.get("latency_s"))
+                    except sqlite3.OperationalError:
+                        pass
                 with s["cond"]:
                     s["cond"].notify_all()
 

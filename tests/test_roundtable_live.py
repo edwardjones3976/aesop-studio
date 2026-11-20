@@ -268,6 +268,39 @@ class TestResearcher(TestBroker):
             time.sleep(0.1)
         s["thread"].join(10)
 
+    def test_concurrent_research_completions_keep_turns_and_idle_atomic(self):
+        """Codex P2 #24: two finishing lookups must not clobber turns or leave state=working."""
+        import threading
+        rec = self.draft()
+        clock = {"limit_s": 60, "reserve_s": 5, "turn_timeout": 30}
+        self.assertTrue(self.broker.start(rec, self.svc.project(self.p["id"]), clock=clock)["started"])
+        s = self.broker.sessions[rec["id"]]
+        barrier = threading.Barrier(2)
+        real_event = self.broker._event
+
+        def gated_event(*args, **kwargs):
+            # Align both completions just before the locked release/update path.
+            out = real_event(*args, **kwargs)
+            if kwargs.get("speaker") == "researcher" or (len(args) > 1 and args[1] == "research"):
+                barrier.wait(5)
+            return out
+
+        with mock.patch.object(self.broker, "_event", side_effect=gated_event):
+            self.assertTrue(self.broker.ask_research(rec["id"], "first public lookup question")["queued"])
+            self.assertTrue(self.broker.ask_research(rec["id"], "second public lookup question")["queued"])
+            end = time.time() + 20
+            while time.time() < end and s["rinflight"] > 0:
+                time.sleep(0.05)
+        self.assertEqual(s["rinflight"], 0)
+        st = s["state"]["researcher"]
+        self.assertEqual(st["turns"], 2)
+        self.assertEqual(st["state"], "idle")
+        self.broker.stop(rec["id"])
+        end = time.time() + 30
+        while time.time() < end and self.broker.status(rec["id"])["live_status"] == "RUNNING":
+            time.sleep(0.1)
+        s["thread"].join(10)
+
 
 class TestFollowUp(TestBroker):
     @unittest.skip("exercised in TestBroker (avoid duplicate flaky timing run)")
