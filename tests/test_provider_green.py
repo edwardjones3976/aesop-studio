@@ -40,6 +40,7 @@ class ProviderGreen(unittest.TestCase):
         for name in ("_codex_cmd", "_claude_cmd", "_cursor_cmd", "_grok_cmd", "_zai_cmd"):
             self.enterContext(patch.object(providers, name, return_value=None))
         self.enterContext(patch.object(providers, "_agy_cmd", return_value=["fake-agy"]))
+        self.enterContext(patch.object(providers, "_local_models", return_value=None))
         self.enterContext(patch.dict(os.environ, {"AESOP_PROBE_OFFLINE": "0"}))
         self.enterContext(patch("aesop_studio.openai_api.key_present", return_value=False))
         self.enterContext(patch("aesop_studio.perplexity_api.key_present", return_value=False))
@@ -194,6 +195,42 @@ class ProviderGreen(unittest.TestCase):
     def test_successful_answer_mentioning_quota_is_not_exhaustion(self):
         self.assertFalse(providers.record_model_quota(self.store, "antigravity", ARGON, 0, QUOTA))
         self.assertEqual(providers._model_state(self.store, "antigravity")["models_exhausted"], [])
+
+    def test_overlay_preserves_unavailable_when_cli_missing(self):
+        self.fake_routes()
+        self.exhausted = {ARGON, FLASH}
+        providers.verify_live(self.store, "antigravity")
+        with patch.object(providers.time, "time", return_value=time.time() + 82 * 3600):
+            self.assertEqual(providers.cached(self.store)["antigravity"]["state"], "UNVERIFIED")
+        with patch.object(providers, "_agy_cmd", return_value=None):
+            route = providers.refresh(self.store)["antigravity"]
+        self.assertFalse(route["installed"])
+        self.assertEqual(route["next_step"], "install")
+        self.assertEqual(route["state"], "UNAVAILABLE")
+        self.assertEqual(providers.cached(self.store)["antigravity"]["state"], "UNAVAILABLE")
+
+    def test_complete_pass_unverified_if_earlier_quota_already_reset(self):
+        self.fake_routes()
+        self.exhausted = {ARGON, FLASH}
+        providers.model_catalog(self.store, "antigravity")
+        now = [time.time()]
+
+        def expire_argon_mid_pass(argv, timeout, **kwargs):
+            if argv[-1] == "models" or argv[-1] == "--version":
+                return 0, "1.0.0" if argv[-1] == "--version" else f"{ARGON}\n{FLASH}\n"
+            model = argv[argv.index("--model") + 1]
+            self.attempts.append(model)
+            if model == FLASH:
+                now[0] += 81 * 3600  # Argon's recorded hold expires before we finish the pass
+            return 1, QUOTA
+
+        with patch.object(providers.time, "time", side_effect=lambda: now[0]), \
+                patch.object(providers, "_contained", side_effect=expire_argon_mid_pass):
+            rec = providers.verify_live(self.store, "antigravity")
+        self.assertFalse(rec["ok"])
+        self.assertEqual(self.attempts, [ARGON, FLASH])
+        self.assertEqual(rec["state"], "UNVERIFIED")
+        self.assertEqual(providers.available_models(self.store, "antigravity"), [ARGON])
 
 
 if __name__ == "__main__":

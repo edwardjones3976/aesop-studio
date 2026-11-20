@@ -172,7 +172,10 @@ def _overlay_models(store: Store, routes: dict) -> dict:
             state = _model_state(store, rid)
             routes[rid].update(state)
             ver = _live_verification(store, rid) or {}
-            if routes[rid]["state"] == "UNAVAILABLE" and "models_exhausted" in ver:
+            # Relax verification-related UNAVAILABLE (expired/partial quota) to UNVERIFIED; never mask a missing CLI.
+            if (routes[rid]["state"] == "UNAVAILABLE" and "models_exhausted" in ver
+                    and routes[rid].get("installed") is not False
+                    and routes[rid].get("next_step") != "install"):
                 if ver.get("state") == "UNVERIFIED" or len(state["models_exhausted"]) < len(ver["models_exhausted"]):
                     routes[rid]["state"] = "UNVERIFIED"
     return routes
@@ -276,7 +279,13 @@ def verify_live(store, rid: str, source: str = "owner") -> dict:
            "source": source}
     if rid in MODEL_PREFERENCES:
         rec.update(_model_state(store, rid))
-        rec["state"] = "READY_INCLUDED" if ok else "UNAVAILABLE" if complete else "UNVERIFIED"
+        if ok:
+            rec["state"] = "READY_INCLUDED"
+        elif complete:
+            # A model exhausted earlier in this pass may already be eligible again; do not park UNAVAILABLE.
+            rec["state"] = "UNAVAILABLE" if not available_models(store, rid) else "UNVERIFIED"
+        else:
+            rec["state"] = "UNVERIFIED"
     store.x("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v",
             (f"verify:{rid}", json.dumps(rec)))
     store.event("route_live_verification", None, route=rid, ok=ok, latency_s=rec["latency_s"], source=source)
