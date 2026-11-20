@@ -87,7 +87,7 @@ class TestImages(unittest.TestCase):
             self.svc.build_context(self.p["id"], self.c["id"], "x", ids, "simulated")
         self.svc.build_context(self.p["id"], self.c["id"], "x", ids[:MAX_IMAGES_PER_MESSAGE], "simulated")
         with self.assertRaises(ValueError) as e:
-            self.svc.build_context(self.p["id"], self.c["id"], "x", ids[:1], "grok")
+            self.svc.build_context(self.p["id"], self.c["id"], "x", ids[:1], "antigravity")
         self.assertIn("can't see photos", str(e.exception))
         self.svc.update_project(self.p["id"], {"transfer_policy": {"simulated": False}})
         with self.assertRaises(PermissionError):

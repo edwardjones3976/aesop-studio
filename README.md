@@ -54,8 +54,7 @@ Antigravity **Verify** and **chat send** share the same model catalog and prefer
 | `claude` (Claude Code) | `claude auth status` → `authMethod: claude.ai` | Claude plan quota, $0 incremental |
 | `openai-api` (Codex API) | `OPENAI_API_KEY` present (value never read into logs/UI) | Metered per token, streamed. Off until you set a monthly limit or turn on the mission permit |
 | `cursor` (Cursor) / `antigravity` (Antigravity) | Providers → **Verify** (one tiny live call) | Their own plan quota; read-only ask/plan mode, chat only |
-| `grok` (Grok CLI) | installed | Blocked: billing basis not verifiable |
-| perplexity / firecrawl | not integrated | Handoff/research only |
+| perplexity / firecrawl | research adapters | Research handoff / cited answers as documented |
 
 Studio never reads credential files. `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are removed from child-process environments so the CLIs use subscription sign-in. To sign in: `codex login`, `claude auth login`. After that, choose **Providers → Re-verify** in the app.
 
@@ -104,7 +103,7 @@ Chat → **Roundtable** / **War Room** configures a multi-provider session from 
 - **Side-by-side compare:** one read-only chat turn per selected speaker (2–4), owner-confirmed, separate from the live broker.
 - **Live broker:** concurrent openings and a moderated open floor; read-only chat turns only — nothing said is executed.
 
-Use **Providers → Verify** for Cursor, Antigravity, Grok CLI and Z.ai before they count as roundtable speakers. A verification lasts 7 days. The War Room shows why an administrator lane is not ready (expired, never verified, signed out, last verify failed, CLI not found) and offers **Verify** / **Re-check** in place, then re-runs preflight. Once you have verified Cursor, Z.ai or Grok yourself, Studio re-verifies it in the background about every 6 days (one tiny plan-quota call); a failed Cursor check is not retried automatically.
+Use **Providers → Verify** for Cursor and Antigravity before they count as roundtable speakers. A verification lasts 7 days. The War Room shows why an administrator lane is not ready (expired, never verified, signed out, last verify failed, CLI not found) and offers **Verify** / **Re-check** in place, then re-runs preflight. Once you have verified Cursor yourself, Studio re-verifies it in the background about every 6 days (one tiny plan-quota call); a failed Cursor check is not retried automatically. (Owner 2026-11-19: Z.ai and Grok CLI lanes removed from Studio.)
 
 ## Paid review tool
 

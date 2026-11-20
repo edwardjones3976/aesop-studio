@@ -217,7 +217,7 @@ def start(store: Store, sup, svc, pid: str, ref_id: str, topic: str, route: str 
     requested = route
     route = route or p.get("provider_default")
     # If the caller explicitly asked for a provider that is not study-capable, refuse with a clear reason instead
-    # of silently falling back; Perplexity, Firecrawl, Grok, Z.ai etc. cannot run reverse-engineering tools.
+    # of silently falling back; research-only and non-study CLI routes cannot run reverse-engineering tools.
     if requested and requested not in STUDY_ROUTES:
         raise ValueError(f"{requested} cannot run reference studies; pick Claude Code or Codex")
     if route not in STUDY_ROUTES or not providers.usable(routes.get(route, {"state": "?", "supported_modes": []}), "study"):

@@ -63,17 +63,12 @@ def _agy_cmd() -> list[str] | None:
     return [exe] if exe and Path(exe).is_file() else None
 
 
-def _grok_cmd() -> list[str] | None:
-    exe = shutil.which("grok.exe") or str(Path.home() / ".grok" / "bin" / "grok.exe")
-    return [exe] if exe and Path(exe).is_file() else None
-
-
 # Routes whose CLI only accepts the prompt as an argument (never via a shell; Windows caps a command line at
 # 32,767 characters, so longer prompts are refused rather than truncated).
-ARGV_PROMPT_ROUTES = {"antigravity", "grok"}
+ARGV_PROMPT_ROUTES = {"antigravity"}
 MAX_ARGV_PROMPT = 24_000
 # Live-verified CLI routes: an owner-triggered minimal call is the only proof of usable access + quota.
-LIVE_VERIFY_ROUTES = {"cursor", "antigravity", "grok", "zai"}
+LIVE_VERIFY_ROUTES = {"cursor", "antigravity"}
 VERIFY_MAX_AGE_S = 7 * 24 * 3600
 MODEL_CATALOG_TTL_S = 3600
 MODEL_PREFERENCES = {"antigravity": ["gemini-4-argon-high", "gemini-4-argon-medium",
@@ -190,12 +185,11 @@ def _live_verification(store, rid: str) -> dict | None:
 
 VERIFY_TOKEN = "AESOP_VERIFY_OK"
 # Paid-plan CLI lanes the owner uses day to day: keep their verification fresh in the background so they never drop
-# out of the provider list after a quiet week, and re-check a failed verification instead of leaving it failed.
-# Cursor is a War Room administrator lane (lanes.ADMINS): owner decision 2026-11-11 to keep it fresh too.
-AUTO_REVERIFY_ROUTES = {"zai", "grok", "cursor"}
-# A failed record is retried in the background only for these. A failed Cursor check may be one exhausted model
-# (AGENTS.md: a model's quota is not the provider's), so it parks with its detail until the owner presses Verify.
-AUTO_RECHECK_FAILED_ROUTES = {"zai", "grok"}
+# out of the provider list after a quiet week. Cursor is a War Room administrator lane (lanes.ADMINS): owner
+# decision 2026-11-11 to keep it fresh. A failed Cursor check may be one exhausted model (AGENTS.md: a model's
+# quota is not the provider's), so it parks with its detail until the owner presses Verify — never auto-recheck.
+AUTO_REVERIFY_ROUTES = {"cursor"}
+AUTO_RECHECK_FAILED_ROUTES: frozenset[str] = frozenset()
 REVERIFY_BEFORE_S = VERIFY_MAX_AGE_S - 24 * 3600
 RECHECK_FAILED_S = 15 * 60
 
@@ -290,12 +284,6 @@ def verify_live(store, rid: str, source: str = "owner") -> dict:
             (f"verify:{rid}", json.dumps(rec)))
     store.event("route_live_verification", None, route=rid, ok=ok, latency_s=rec["latency_s"], source=source)
     return rec
-
-
-def _zai_cmd() -> list[str] | None:
-    ps1 = Path.home() / ".claude" / "tools" / "zai" / "claude-zai.ps1"
-    pwsh = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
-    return [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps1)] if ps1.is_file() and pwsh else None
 
 
 def _sim_cmd() -> list[str]:
@@ -641,15 +629,12 @@ def probe(store=None) -> dict[str, dict]:
         routes[rid] = r
 
     # ---- CLI lanes verified by an explicit owner-triggered live call (stored), plus local status where offered
+    # Owner 2026-11-19 AS-24: retired subscription CLI lanes are omitted; leftover verify:* kv rows are ignored.
     for rid, prov, cmdf, auth, billing_note in (
             ("cursor", "cursor", _cursor_cmd, "Cursor sign-in (cursor-agent login)",
              "Cursor plan usage; overage depends on account settings (not observable here)"),
             ("antigravity", "google", _agy_cmd, "Google sign-in (Antigravity)",
-             "Antigravity/Gemini account quota; billing not observable here"),
-            ("grok", "xai", _grok_cmd, "xAI sign-in (SuperGrok, grok CLI)",
-             "SuperGrok subscription quota (owner-confirmed paid plan)"),
-            ("zai", "zai", _zai_cmd, "Z.ai GLM Coding Plan key (claude-zai launcher)",
-             "Z.ai GLM Coding Plan credits (owner-confirmed paid plan); Claude Code client against Z.ai")):
+             "Antigravity/Gemini account quota; billing not observable here")):
         r = _base(prov, "official_cli", None, ["chat"], auth, "subscription_included", billing_note)
         r["filesystem_scope"] = ("chat only, read-only/ask/plan mode in an empty temp dir; not an isolation "
                                  "boundary — the CLI runs as your Windows user")
@@ -751,8 +736,6 @@ def refresh(store: Store) -> dict[str, dict]:
 DISPLAY = {
     "codex": ("Codex", "Codex"), "openai-api": ("Codex API", "Codex"), "claude": ("Claude Code", "Claude Code"),
     "cursor": ("Cursor", "Cursor"), "antigravity": ("Antigravity", "Antigravity"),
-    "grok": ("Grok CLI", "Grok CLI"),
-    "zai": ("Z.ai GLM", "Z.ai GLM"),
     "director-lmstudio": ("Director · LM Studio", "Director"),
     "director-ollama": ("Director · Ollama", "Director"),
     "perplexity": ("Perplexity", "Perplexity"), "firecrawl": ("Firecrawl", "Firecrawl"),
@@ -769,11 +752,6 @@ def _named(routes: dict) -> dict:
     for rid, r in routes.items():
         r["id"] = rid
         r["display_name"], r["family"] = DISPLAY.get(rid, (rid, rid))
-        if rid in ("grok", "zai"):
-            # Capabilities come from the installed adapter, including for cached verification records.
-            r["supported_modes"] = ["chat", "agent"]
-            r["filesystem_scope"] = ("chat: tools disabled in an empty temp dir; agent: file edits and shell "
-                                     "commands in the project root; runs as your Windows user, not an isolation boundary")
     return routes
 
 
@@ -867,27 +845,6 @@ def build_argv(route_id: str, mode: str, cwd: str, out_file: str, model: str | N
                                "characters is refused")
         return cmd + ["--mode", "plan", "--print-timeout", "280s"] + (["--model", model] if model else []) + [
             "-p=" + prompt]
-    if route_id == "grok" and mode in ("chat", "agent"):
-        cmd = _grok_cmd()
-        if not cmd:
-            raise RuntimeError("grok CLI unavailable")
-        if prompt is None or len(prompt) > MAX_ARGV_PROMPT:
-            raise RuntimeError(f"Grok takes the prompt as an argument; context over {MAX_ARGV_PROMPT:,} characters "
-                               "is refused")
-        permissions = (["--permission-mode", "default", "--tools", ""] if mode == "chat" else
-                       ["--permission-mode", "acceptEdits", "--allow", "Bash"])
-        return cmd + ["--cwd", cwd, "--no-plan"] + permissions + ["--output-format", "plain"] + (["-m", model] if model else []) + [
-            "-p", prompt]
-    if route_id == "zai" and mode in ("chat", "agent"):
-        cmd = _zai_cmd()
-        if not cmd:
-            raise RuntimeError("claude-zai launcher unavailable")
-        # Never pass an empty argument here: the launcher is a PowerShell script and Windows PowerShell drops empty
-        # strings, so "--tools ''" arrived as a bare "--tools" and every Z.ai chat failed. Chat uses an explicit deny-list.
-        permissions = (["--disallowedTools", "Bash,Edit,Write,WebFetch,WebSearch,NotebookEdit,Task"] if mode == "chat"
-                       else ["--permission-mode", "acceptEdits", "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep"])
-        return cmd + (["-Model", model] if model else []) + [
-            "-p", "--output-format", "text", "--no-session-persistence", "--strict-mcp-config"] + permissions
     configured_models = director_models()
     if route_id in configured_models and mode == "chat":
         expected = configured_models[route_id]

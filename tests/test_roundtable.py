@@ -107,8 +107,8 @@ class TestPlanning(Base):
         self.assertTrue(checks["admins_only"] and checks["admin_seats"] and checks["admin_ready"])
         self.assertNotIn("speakers", checks)  # no four-provider minimum for the War Room
         rec2 = self.draft(mode="war_room", time_limit_min=8, response_window_s=30,
-                          roster=list(lanes.ADMINS) + ["grok"])
-        pf2 = roundtable.preflight(self.store, rec2, disc(*admins, fake_lane("grok")))
+                          roster=list(lanes.ADMINS) + ["antigravity"])
+        pf2 = roundtable.preflight(self.store, rec2, disc(*admins, fake_lane("antigravity")))
         self.assertFalse({c["id"]: c["pass"] for c in pf2["checks"]}["admins_only"])
 
     def test_rt10_start_needs_owner_switch(self):

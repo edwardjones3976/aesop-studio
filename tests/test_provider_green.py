@@ -37,7 +37,7 @@ class ProviderGreen(unittest.TestCase):
 
     def fake_routes(self):
         # Exercise the real probe's verification-to-readiness mapping without calling any CLI or key source.
-        for name in ("_codex_cmd", "_claude_cmd", "_cursor_cmd", "_grok_cmd", "_zai_cmd"):
+        for name in ("_codex_cmd", "_claude_cmd", "_cursor_cmd"):
             self.enterContext(patch.object(providers, name, return_value=None))
         self.enterContext(patch.object(providers, "_agy_cmd", return_value=["fake-agy"]))
         self.enterContext(patch.object(providers, "_local_models", return_value=None))

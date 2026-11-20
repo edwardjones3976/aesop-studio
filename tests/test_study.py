@@ -84,11 +84,11 @@ class TestArgv(unittest.TestCase):
 
     def test_usable_for_study(self):
         routes = providers._named({"claude": {"state": "READY_INCLUDED", "supported_modes": ["chat", "agent"]},
-                                   "grok": {"state": "READY_INCLUDED", "supported_modes": ["chat"]},
-                                   "zai": {"state": "READY_INCLUDED", "supported_modes": ["chat", "agent"]}})
+                                   "cursor": {"state": "READY_INCLUDED", "supported_modes": ["chat"]},
+                                   "antigravity": {"state": "READY_INCLUDED", "supported_modes": ["chat"]}})
         self.assertTrue(providers.usable(routes["claude"], "study"))
-        self.assertFalse(providers.usable(routes["grok"], "study"))
-        self.assertFalse(providers.usable(routes["zai"], "study"))  # agent-capable but cannot load a per-run MCP server
+        self.assertFalse(providers.usable(routes["cursor"], "study"))
+        self.assertFalse(providers.usable(routes["antigravity"], "study"))
 
 
 class TestParse(unittest.TestCase):
@@ -257,7 +257,7 @@ class TestStressFixes(StudyBase):
         ref = study.add_ref(self.store, str(self.app_root), "Ref App")
         study.set_ack(self.store, True)
         with self.assertRaisesRegex(ValueError, "cannot run reference studies"):
-            study.start(self.store, self.sup, self.svc, self.p["id"], ref["id"], "composer", route="grok")
+            study.start(self.store, self.sup, self.svc, self.p["id"], ref["id"], "composer", route="antigravity")
 
     def test_interrupted_study_does_not_open_a_repair_packet(self):
         """A read-only study has no side effects to review; a restart should not file a repair."""

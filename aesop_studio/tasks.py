@@ -38,7 +38,7 @@ NEW_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subproc
 CHAT_DIR_PREFIX = "aesop-chat-"
 OPEN_REPAIR_STATES = ("OPEN_FOREMAN", "EXPORTED_FOR_FOREMAN")
 # Read-only chat turns on these plan-quota routes are retried once on a transient provider/network error.
-SEPARATE_STDERR_ROUTES = {"zai", "claude"}
+SEPARATE_STDERR_ROUTES = {"claude"}
 
 
 def _err_tail(out_path: str, n: int = 300) -> str:
@@ -171,7 +171,7 @@ def _data_urls(images: list[str]) -> list[str]:
     return out
 
 
-RETRY_ROUTES = {"zai", "grok", "cursor", "antigravity", "claude", "codex"}
+RETRY_ROUTES = {"cursor", "antigravity", "claude", "codex"}
 TRANSIENT_MARKERS = ("429", "rate limit", "rate_limit", "overloaded", "503", "502", "504", "econnreset",
                      "etimedout", "socket hang up", "fetch failed", "network error", "temporarily unavailable",
                      "service unavailable", "bad gateway", "connection reset", "try again")
