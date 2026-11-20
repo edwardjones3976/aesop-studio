@@ -15,19 +15,36 @@ from aesop_studio.server import PortUnavailableError, make_server  # noqa: E402
 # Windows Hyper-V / HTTP.sys excluded ranges return WinError 10013 on exclusive bind.
 # Probe with the same SO_EXCLUSIVEADDRUSE Studio uses, and allow fall-forward past holes.
 _SCAN = 32
+_MAX_PORT = 65535
 
 
 def _exclusive_bind_ok(port: int) -> bool:
     """True if Studio's exclusive loopback claim would succeed on this port right now."""
+    if port < 0 or port > _MAX_PORT:
+        return False
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         probe.bind(("127.0.0.1", port))
         return True
-    except OSError:
+    except (OSError, OverflowError):
         return False
     finally:
         probe.close()
+
+
+def _hold_exclusive(port: int) -> socket.socket:
+    """Bind and keep an exclusive socket so the port stays unusable to Studio."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    sock.bind(("127.0.0.1", port))
+    sock.listen(1)
+    return sock
+
+
+def _scan_stop(start: int, span: int = _SCAN) -> int:
+    """Exclusive end of a probe/claim window that never exceeds TCP port 65535."""
+    return min(start + max(1, span), _MAX_PORT + 1)
 
 
 @unittest.skipUnless(os.name == "nt", "exclusive loopback port bind (SO_EXCLUSIVEADDRUSE) is Windows-only")
@@ -55,16 +72,21 @@ class TestPortClaim(unittest.TestCase):
         # A plain bind() probe is not enough: Windows excluded ports can look free until SO_EXCLUSIVEADDRUSE
         # (CI 2026-11-20 windows-latest: neighbour → "forbidden by its access permissions").
         for _ in range(64):
+            if self.port >= _MAX_PORT:
+                self._respawn_squatter()
+                continue
+            stop = _scan_stop(self.port + 1)
             expected = None
-            for candidate in range(self.port + 1, self.port + _SCAN):
+            for candidate in range(self.port + 1, stop):
                 if _exclusive_bind_ok(candidate):
                     expected = candidate
                     break
             if expected is None:
                 self._respawn_squatter()
                 continue
+            tries = stop - self.port
             try:
-                srv = make_server(str(self.tmp / "b"), self.port, tries=_SCAN)
+                srv = make_server(str(self.tmp / "b"), self.port, tries=tries)
             except PortUnavailableError:
                 self._respawn_squatter()
                 continue
@@ -80,6 +102,50 @@ class TestPortClaim(unittest.TestCase):
                 srv.server_close()
                 srv.app._instance_lock.close()
         self.skipTest("could not claim the next exclusive-free port near a squatter")
+
+    def test_make_server_falls_forward_past_two_held_ports(self):
+        # Deterministic: hold P and P+1 exclusively (busy + excluded stand-in). make_server(P, tries=3)
+        # must land on P+2 — a regression that always raises or picks the wrong port fails this test
+        # instead of being hidden as a skip after live retries.
+        holders = []
+        try:
+            base = expected = None
+            for _ in range(64):
+                probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                try:
+                    probe.bind(("127.0.0.1", 0))
+                    start = probe.getsockname()[1]
+                finally:
+                    probe.close()
+                if start > _MAX_PORT - 2:
+                    continue
+                if not all(_exclusive_bind_ok(start + i) for i in (0, 1, 2)):
+                    continue
+                holders = []
+                try:
+                    holders.append(_hold_exclusive(start))
+                    holders.append(_hold_exclusive(start + 1))
+                except OSError:
+                    for h in holders:
+                        h.close()
+                    holders = []
+                    continue
+                base, expected = start, start + 2
+                break
+            else:
+                self.skipTest("could not reserve three consecutive exclusive-free ports")
+
+            srv = make_server(str(self.tmp / "d"), base, tries=3)
+            try:
+                self.assertEqual(srv.server_address[1], expected)
+                self.assertEqual(srv.app.port, expected)
+                self.assertIn(f"127.0.0.1:{expected}", srv.app.allowed_hosts())
+            finally:
+                srv.server_close()
+                srv.app._instance_lock.close()
+        finally:
+            for h in holders:
+                h.close()
 
     def test_refused_bind_releases_the_data_dir_lock(self):
         with self.assertRaises(PortUnavailableError):
