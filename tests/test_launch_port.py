@@ -104,13 +104,15 @@ class TestPortClaim(unittest.TestCase):
         self.skipTest("could not claim the next exclusive-free port near a squatter")
 
     def test_make_server_falls_forward_past_two_held_ports(self):
-        # Deterministic: hold P and P+1 exclusively (busy + excluded stand-in). make_server(P, tries=3)
-        # must land on P+2 — a regression that always raises or picks the wrong port fails this test
-        # instead of being hidden as a skip after live retries.
+        # Hold P and P+1 exclusively; make_server(P, tries=3) must land on P+2.
+        # Windows Hyper-V / HTTP.sys can flip P+2 to WinError 10013 between the probe and the
+        # claim (CI push run 44655379005 on tip 82f304b); retry a fresh trio instead of failing.
         holders = []
         try:
-            base = expected = None
             for _ in range(64):
+                for h in holders:
+                    h.close()
+                holders = []
                 probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 try:
                     probe.bind(("127.0.0.1", 0))
@@ -121,7 +123,6 @@ class TestPortClaim(unittest.TestCase):
                     continue
                 if not all(_exclusive_bind_ok(start + i) for i in (0, 1, 2)):
                     continue
-                holders = []
                 try:
                     holders.append(_hold_exclusive(start))
                     holders.append(_hold_exclusive(start + 1))
@@ -130,19 +131,23 @@ class TestPortClaim(unittest.TestCase):
                         h.close()
                     holders = []
                     continue
-                base, expected = start, start + 2
-                break
-            else:
-                self.skipTest("could not reserve three consecutive exclusive-free ports")
-
-            srv = make_server(str(self.tmp / "d"), base, tries=3)
-            try:
-                self.assertEqual(srv.server_address[1], expected)
-                self.assertEqual(srv.app.port, expected)
-                self.assertIn(f"127.0.0.1:{expected}", srv.app.allowed_hosts())
-            finally:
-                srv.server_close()
-                srv.app._instance_lock.close()
+                # Re-check after holding: exclusion can appear once neighbours are claimed.
+                if not _exclusive_bind_ok(start + 2):
+                    continue
+                try:
+                    srv = make_server(str(self.tmp / "d"), start, tries=3)
+                except PortUnavailableError:
+                    continue
+                try:
+                    if srv.server_address[1] != start + 2:
+                        continue
+                    self.assertEqual(srv.app.port, start + 2)
+                    self.assertIn(f"127.0.0.1:{start + 2}", srv.app.allowed_hosts())
+                    return
+                finally:
+                    srv.server_close()
+                    srv.app._instance_lock.close()
+            self.skipTest("could not reserve three consecutive exclusive-free ports")
         finally:
             for h in holders:
                 h.close()
