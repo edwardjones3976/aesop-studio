@@ -411,26 +411,34 @@ class Broker:
             except Exception as e:  # noqa: BLE001 - a lookup failure is a gap, never a crash
                 res = {"ok": False, "query": query, "results": [], "error": type(e).__name__, "latency_s": None}
             text = res.pop("text", None) or researcher.render(res, asked_by)
+            # Record the result when the store is still open; always release rinflight exactly once
+            # afterward (never decrement in both the success path and an OperationalError handler).
             try:
                 if not getattr(self.store, "closed", False):
                     self._event(rt_id, "research" if res["ok"] else "gap", text,
                                 speaker="researcher", phase="research", latency=res.get("latency_s"),
                                 reply_to=reply)
-                    with self.lock:
-                        s["rinflight"] -= 1
-                        self._set_speaker(rt_id, s, "researcher",
-                                          state="working" if s["rinflight"] else "idle",
-                                          turns=st["turns"] + (1 if res["ok"] else 0),
-                                          failures=st["failures"] + (0 if res["ok"] else 1),
-                                          last_latency_s=res.get("latency_s"))
-                else:
-                    with self.lock:
-                        s["rinflight"] -= 1
             except sqlite3.OperationalError:
-                with self.lock:  # store closed/removed while the lookup was in flight
+                pass  # store closed/removed while the lookup was in flight
+            finally:
+                # Single rinflight release + speaker snapshot must stay under one lock so two
+                # completions cannot both read the same turns/failures or leave state=working
+                # after the last lookup has finished (Codex P2 on #24).
+                with self.lock:
                     s["rinflight"] = max(0, s["rinflight"] - 1)
-            with s["cond"]:
-                s["cond"].notify_all()
+                    remaining = s["rinflight"]
+                    turns = st["turns"] + (1 if res["ok"] else 0)
+                    failures = st["failures"] + (0 if res["ok"] else 1)
+                    try:
+                        if not getattr(self.store, "closed", False):
+                            self._set_speaker(rt_id, s, "researcher",
+                                              state="working" if remaining else "idle",
+                                              turns=turns, failures=failures,
+                                              last_latency_s=res.get("latency_s"))
+                    except sqlite3.OperationalError:
+                        pass
+                with s["cond"]:
+                    s["cond"].notify_all()
 
         threading.Thread(target=go, daemon=True).start()
         return {"queued": True, "query": query, "lookups_left": st["cap"] - st["lookups"]}
