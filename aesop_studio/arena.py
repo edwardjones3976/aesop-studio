@@ -235,16 +235,34 @@ def run_both(store: Store, svc, project_id: str, lane_a: str, lane_b: str,
             raise ValueError(f"{rid}: route not usable for chat (state={state})")
 
     prompt = demo_prompt(demo_id, text)
-    lanes_out: dict[str, dict] = {}
+    # Create both conversations and preflight contexts before any provider dispatch so a
+    # director-prompt (or similar) refusal cannot leave the other lane orphaned mid-send.
+    convs: dict[str, dict] = {}
     for side, rid, _route in checks:
-        conv = svc.new_conversation(project_id, title=f"Arena {side.upper()} · {demo_id}")
-        sent = svc.send(project_id, conv["id"], prompt, [], rid)
-        lanes_out[side] = {
-            "route_id": rid,
-            "conversation_id": conv["id"],
-            "message_id": sent["message_id"],
-            "task_id": sent["task_id"],
-        }
+        convs[side] = svc.new_conversation(project_id, title=f"Arena {side.upper()} · {demo_id}")
+    for side, rid, _route in checks:
+        svc.build_context(project_id, convs[side]["id"], prompt, [], rid)
+
+    lanes_out: dict[str, dict] = {}
+    try:
+        for side, rid, _route in checks:
+            sent = svc.send(project_id, convs[side]["id"], prompt, [], rid)
+            lanes_out[side] = {
+                "route_id": rid,
+                "conversation_id": convs[side]["id"],
+                "message_id": sent["message_id"],
+                "task_id": sent["task_id"],
+            }
+    except Exception:
+        # A later-lane failure must not leave an earlier task running with no handle returned.
+        for started in lanes_out.values():
+            tid = started.get("task_id")
+            if tid:
+                try:
+                    svc.sup.cancel(tid)
+                except Exception:  # noqa: BLE001 — best-effort; the original error still propagates
+                    pass
+        raise
     return {
         "demo_id": demo_id,
         "prompt_chars": len(prompt),

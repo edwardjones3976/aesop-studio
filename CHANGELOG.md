@@ -13,7 +13,7 @@ All notable changes to this repository are documented here. The server uses cale
 
 ## Unreleased
 
-- **Arena Run both (free routes):** Dual-lane dispatch for included/local/simulated lanes via existing chat APIs (`POST /api/projects/{pid}/arena/run`). Metered lanes refused with no ledger reserve; UI enables the button only when both lanes are eligible; Stop cancels both tasks; stale replies guarded by `runGen`. See `docs/arena-compare.md`.
+- **Arena Run both (free routes):** Dual-lane dispatch for included/local/simulated lanes via existing chat APIs (`POST /api/projects/{pid}/arena/run`). Metered lanes refused with no ledger reserve; UI enables the button only when both lanes are eligible; Stop cancels both tasks (pending dispatch via `cancelPending`, honors `cancel_signalled`, keeps Run both off until cancels finish); tab remount preserves/resumes an in-flight run per project; poll follows `retried_as`, serializes ticks (`pollBusy`), and does not treat HTTP poll errors as task failure; partial second-lane send failure cancels the first task. See `docs/arena-compare.md`.
 - **Arena Copilot fixes:** Metered/`READY_METERED_DISABLED` routes are not reported as free; they are selectable for estimate comparison; cost and demo fetches ignore stale responses (`costGen` / `viewGen`).
 - **Arena compare tab:** Left-rail **Arena** workspace with dual lanes, per-lane provider pickers, cost estimates (`/api/arena/*`), and four interactive demo fixtures (Alpine, Lost Valley, Deep Time, Optical). See `docs/arena-compare.md`.
 

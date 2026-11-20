@@ -3221,7 +3221,8 @@ function saveAsFinding(pid, text) {
 const ARENA_PICKABLE = USABLE.concat(["READY_METERED_DISABLED"]);
 const ARENA = {
   demo: "alpine", a: "", b: "", mounts: { a: null, b: null }, demos: [], note: "",
-  costGen: 0, runGen: 0, running: false, lanes: { a: null, b: null }, poll: null, eligible: false,
+  costGen: 0, runGen: 0, running: false, cancelPending: false, runPid: null,
+  lanes: { a: null, b: null }, poll: null, pollBusy: false, eligible: false,
 };
 function arenaLaneEligible(routeId) {
   const r = S.routes[routeId];
@@ -3292,15 +3293,30 @@ function arenaUpdateRunControls() {
   const demoSel = $("arenaDemoSel");
   ARENA.eligible = arenaBothEligible();
   const title = arenaRefuseHint();
+  const busy = arenaRunActive();
   if (runBtn) {
-    runBtn.disabled = ARENA.running || !ARENA.eligible;
-    runBtn.title = ARENA.running ? "Dual run in progress" : title;
-    runBtn.textContent = ARENA.running ? "Running…" : "Run both";
+    runBtn.disabled = busy || !ARENA.eligible;
+    if (ARENA.cancelPending) {
+      runBtn.title = "Stop requested — Run both stays off until cancels finish";
+      runBtn.textContent = "Stopping…";
+    } else if (ARENA.running) {
+      runBtn.title = "Dual run in progress";
+      runBtn.textContent = "Running…";
+    } else {
+      runBtn.title = title;
+      runBtn.textContent = "Run both";
+    }
   }
-  if (stopBtn) stopBtn.hidden = !ARENA.running;
-  if (hint) hint.textContent = ARENA.running ? "Stop cancels both local process trees (remote stop is not provable)." : title;
-  if (demoSel) demoSel.disabled = ARENA.running;
-  for (const sel of document.querySelectorAll(".arena-lane-pick select")) sel.disabled = ARENA.running;
+  if (stopBtn) stopBtn.hidden = !ARENA.running || ARENA.cancelPending;
+  if (hint) {
+    hint.textContent = ARENA.cancelPending
+      ? "Stop requested. Late-returned task IDs are cancelled; polling continues until each lane is terminal."
+      : ARENA.running
+        ? "Stop cancels both local process trees (remote stop is not provable)."
+        : title;
+  }
+  if (demoSel) demoSel.disabled = busy;
+  for (const sel of document.querySelectorAll(".arena-lane-pick select")) sel.disabled = busy;
 }
 function arenaPaintResult(side, lane) {
   const el = $(side === "a" ? "arenaResultA" : "arenaResultB");
@@ -3312,6 +3328,59 @@ function arenaPaintResult(side, lane) {
     h("div", { class: "arena-result-head" },
       h("strong", {}, name), statePill(st)),
     h("pre", { class: "arena-result-body" + (lane.error ? " err" : "") }, body));
+}
+function arenaParseCheckpoint(task) {
+  if (!task) return {};
+  const raw = task.checkpoint;
+  if (!raw) return {};
+  if (typeof raw === "object") return raw;
+  try { return JSON.parse(raw); } catch { return {}; }
+}
+async function arenaCancelOneLane(lane, runGen) {
+  if (!lane || !lane.task_id || lane.done) return true;
+  try {
+    const r = await api("POST", `/api/tasks/${lane.task_id}/cancel`);
+    if (runGen != null && runGen !== ARENA.runGen) return false;
+    lane.cancelRequested = true;
+    if (r && r.cancel_signalled) {
+      lane.cancelSignalled = true;
+      lane.error = lane.error || "Cancel signalled locally; remote work stop is not provable.";
+      arenaPaintResult(lane.side || (lane === ARENA.lanes.a ? "a" : "b"), lane);
+      return true;
+    }
+    // Not yet signalled (e.g. subprocess not registered): keep the handle and keep polling/retrying.
+    lane.error = "Cancel not yet signalled — still waiting for the supervisor.";
+    arenaPaintResult(lane.side || (lane === ARENA.lanes.a ? "a" : "b"), lane);
+    return false;
+  } catch (e) {
+    if (runGen != null && runGen !== ARENA.runGen) return false;
+    lane.cancelRequested = true;
+    banner(`Could not cancel lane ${(lane.side || "").toUpperCase() || "?"}: ${e.message}`, "bad");
+    return false;
+  }
+}
+async function arenaCancelTasksFromLanes(lanes, runGen) {
+  if (!lanes) return true;
+  let allSignalled = true;
+  for (const side of ["a", "b"]) {
+    const lane = lanes[side];
+    if (!lane) continue;
+    lane.side = side;
+    if (!(await arenaCancelOneLane(lane, runGen))) allSignalled = false;
+    if (runGen != null && runGen !== ARENA.runGen) return false;
+  }
+  return allSignalled;
+}
+function arenaClearRunState() {
+  ARENA.running = false;
+  ARENA.cancelPending = false;
+  ARENA.runPid = null;
+  ARENA.lanes = { a: null, b: null };
+  ARENA.pollBusy = false;
+  arenaStopPoll();
+}
+function arenaRunActive() {
+  return !!(ARENA.running || ARENA.cancelPending);
 }
 async function arenaRefreshCosts() {
   if (!ARENA.a || !ARENA.b) return;
@@ -3345,52 +3414,77 @@ async function arenaFetchLaneText(lane) {
     const m = (msgs || []).find((x) => x.id === lane.message_id) || (msgs || []).filter((x) => x.role === "assistant").pop();
     if (m) {
       if (m.content) lane.text = m.content;
-      if (m.status === "failed") lane.error = m.content || lane.error || "failed";
+      if (m.status === "failed" && !lane.cancelRequested) lane.error = m.content || lane.error || "failed";
     }
   } catch { /* task poll still advances state */ }
 }
 async function arenaPollTick(runGen, viewGen) {
-  const stale = () => runGen !== ARENA.runGen || viewGen !== S.viewGen || S.tab !== "arena" || S.global || !ARENA.running;
-  if (stale()) return;
-  let pending = 0;
-  for (const side of ["a", "b"]) {
-    const lane = ARENA.lanes[side];
-    if (!lane || !lane.task_id) continue;
-    if (lane.done) continue;
-    pending++;
-    try {
-      const r = await api("GET", `/api/tasks/${lane.task_id}?offset=${lane.offset || 0}`);
-      if (stale()) return;
-      lane.offset = r.offset;
-      if (r.output && r.stream_is_answer) lane.text = (lane.text || "") + r.output;
-      if (r.task) {
-        lane.state = r.task.state;
-        if (DONE.includes(r.task.state)) {
-          lane.done = true;
-          if (r.task.error) lane.error = r.task.error;
-          await arenaFetchLaneText(lane);
+  const stale = () => runGen !== ARENA.runGen || viewGen !== S.viewGen || S.tab !== "arena" || S.global || !arenaRunActive();
+  if (stale() || ARENA.pollBusy) return;
+  ARENA.pollBusy = true;
+  try {
+    let pending = 0;
+    for (const side of ["a", "b"]) {
+      const lane = ARENA.lanes[side];
+      if (!lane || !lane.task_id) continue;
+      if (lane.done) continue;
+      pending++;
+      lane.side = side;
+      try {
+        const r = await api("GET", `/api/tasks/${lane.task_id}?offset=${lane.offset || 0}`);
+        if (stale()) return;
+        const cp = arenaParseCheckpoint(r.task);
+        // CLI chat can auto-retry: follow retried_as and reset offset; do not treat the original FAILED as final.
+        if (cp.retried_as && cp.retried_as !== lane.task_id) {
+          lane.task_id = cp.retried_as;
+          lane.offset = 0;
+          lane.state = "RUNNING";
+          lane.done = false;
+          lane.cancelSignalled = false;
+          lane.error = lane.cancelRequested ? "Following automatic retry after cancel request…" : "Following automatic retry…";
+          arenaPaintResult(side, lane);
+          continue;
+        }
+        lane.offset = r.offset;
+        if (r.output && r.stream_is_answer) lane.text = (lane.text || "") + r.output;
+        if (r.task) {
+          lane.state = r.task.state;
+          if (DONE.includes(r.task.state) && !cp.retried_as) {
+            lane.done = true;
+            if (r.task.error) lane.error = r.task.error;
+            await arenaFetchLaneText(lane);
+            if (stale()) return;
+          }
+        }
+        if (ARENA.cancelPending && !lane.done && !lane.cancelSignalled) {
+          await arenaCancelOneLane(lane, runGen);
           if (stale()) return;
         }
+      } catch (e) {
+        if (stale()) return;
+        // Polling HTTP errors are not task failures — keep the handle and retry next tick.
+        lane.pollError = e.message;
+        lane.error = `Poll error (retrying): ${e.message}`;
       }
-    } catch (e) {
-      if (stale()) return;
-      lane.error = e.message;
-      lane.state = "FAILED";
-      lane.done = true;
+      arenaPaintResult(side, lane);
     }
-    arenaPaintResult(side, lane);
-  }
-  if (!pending) {
-    ARENA.running = false;
-    arenaStopPoll();
-    arenaUpdateRunControls();
-    banner("Arena dual run finished.", "ok");
+    if (!pending) {
+      const wasStop = ARENA.cancelPending;
+      ARENA.running = false;
+      ARENA.cancelPending = false;
+      arenaStopPoll();
+      arenaUpdateRunControls();
+      banner(wasStop ? "Arena dual run stopped." : "Arena dual run finished.", wasStop ? "" : "ok");
+    }
+  } finally {
+    ARENA.pollBusy = false;
   }
 }
 function arenaStartPoll(runGen, viewGen) {
   arenaStopPoll();
+  ARENA.pollBusy = false;
   const timer = setInterval(() => {
-    if (runGen !== ARENA.runGen || viewGen !== S.viewGen || S.tab !== "arena" || S.global) {
+    if (runGen !== ARENA.runGen || viewGen !== S.viewGen || S.tab !== "arena" || S.global || !arenaRunActive()) {
       clearInterval(timer);
       if (ARENA.poll === timer) ARENA.poll = null;
       return;
@@ -3398,68 +3492,89 @@ function arenaStartPoll(runGen, viewGen) {
     arenaPollTick(runGen, viewGen);
   }, 1000);
   ARENA.poll = timer;
-  arenaPollTick(runGen, viewGen);
+  arenaPollTick(runGen, viewGen); // serialized via pollBusy; interval skips while a tick is in flight
+}
+async function arenaAcceptReturnedLanes(returned, runGen, pid) {
+  for (const side of ["a", "b"]) if (returned[side]) returned[side].side = side;
+  ARENA.lanes = returned;
+  if (ARENA.cancelPending) {
+    await arenaCancelTasksFromLanes(returned, runGen);
+    if (runGen !== ARENA.runGen) return;
+    ARENA.running = true; // keep polling until terminal; Run both stays disabled via cancelPending
+    arenaPaintResult("a", ARENA.lanes.a);
+    arenaPaintResult("b", ARENA.lanes.b);
+    banner("Arena stop requested; cancelling returned tasks.", "");
+    if (S.tab === "arena" && !S.global && S.project && S.project.id === pid) arenaStartPoll(runGen, S.viewGen);
+    else arenaUpdateRunControls();
+    return;
+  }
+  if (!S.project || S.project.id !== pid) {
+    ARENA.cancelPending = true;
+    await arenaCancelTasksFromLanes(returned, runGen);
+    if (runGen !== ARENA.runGen) return;
+    arenaClearRunState();
+    arenaUpdateRunControls();
+    return;
+  }
+  ARENA.running = true;
+  arenaPaintResult("a", ARENA.lanes.a);
+  arenaPaintResult("b", ARENA.lanes.b);
+  banner("Arena dual run submitted on free routes.", "ok");
+  if (S.tab === "arena" && !S.global) arenaStartPoll(runGen, S.viewGen);
+  else arenaUpdateRunControls(); // keep task IDs; renderArena resumes polling on return
 }
 async function arenaRunBoth() {
-  if (!S.project || ARENA.running) return;
+  if (!S.project || arenaRunActive()) return;
   if (!arenaBothEligible()) {
     banner(arenaRefuseHint(), "bad");
     arenaUpdateRunControls();
     return;
   }
   const runGen = ++ARENA.runGen;
-  const viewGen = S.viewGen;
   const demo = ARENA.demo, laneA = ARENA.a, laneB = ARENA.b, pid = S.project.id;
-  const stale = () => runGen !== ARENA.runGen || viewGen !== S.viewGen || S.tab !== "arena" || S.global
-    || ARENA.demo !== demo || ARENA.a !== laneA || ARENA.b !== laneB || !S.project || S.project.id !== pid;
   ARENA.running = true;
+  ARENA.cancelPending = false;
+  ARENA.runPid = pid;
   ARENA.lanes = { a: null, b: null };
   arenaUpdateRunControls();
-  arenaPaintResult("a", { route_id: laneA, state: "STARTING", text: "" });
-  arenaPaintResult("b", { route_id: laneB, state: "STARTING", text: "" });
+  arenaPaintResult("a", { route_id: laneA, state: "STARTING", text: "", side: "a" });
+  arenaPaintResult("b", { route_id: laneB, state: "STARTING", text: "", side: "b" });
   try {
     const data = await api("POST", `/api/projects/${pid}/arena/run`, { a: laneA, b: laneB, demo });
-    if (stale()) return;
-    ARENA.lanes = {
-      a: { ...data.lanes.a, offset: 0, text: "", state: "RUNNING" },
-      b: { ...data.lanes.b, offset: 0, text: "", state: "RUNNING" },
+    if (runGen !== ARENA.runGen) return; // superseded by a newer Run both
+    const returned = {
+      a: { ...data.lanes.a, offset: 0, text: "", state: "RUNNING", side: "a" },
+      b: { ...data.lanes.b, offset: 0, text: "", state: "RUNNING", side: "b" },
     };
-    arenaPaintResult("a", ARENA.lanes.a);
-    arenaPaintResult("b", ARENA.lanes.b);
-    banner("Arena dual run submitted on free routes.", "ok");
-    arenaStartPoll(runGen, viewGen);
+    await arenaAcceptReturnedLanes(returned, runGen, pid);
   } catch (e) {
-    if (stale()) return;
+    if (runGen !== ARENA.runGen) return;
     ARENA.running = false;
+    ARENA.cancelPending = false;
     arenaStopPoll();
     arenaUpdateRunControls();
     banner(e.message || "Arena Run both refused.", "bad");
-    arenaPaintResult("a", { route_id: laneA, state: "FAILED", error: e.message });
-    arenaPaintResult("b", { route_id: laneB, state: "FAILED", error: e.message });
+    arenaPaintResult("a", { route_id: laneA, state: "FAILED", error: e.message, side: "a" });
+    arenaPaintResult("b", { route_id: laneB, state: "FAILED", error: e.message, side: "b" });
   }
 }
 async function arenaStopBoth() {
+  if (!arenaRunActive()) return;
   const runGen = ARENA.runGen;
-  const lanes = ARENA.lanes;
-  ARENA.running = false;
-  arenaStopPoll();
+  ARENA.cancelPending = true; // honor Stop even while /arena/run is still pending
+  ARENA.running = true; // keep Run both disabled and keep polling until lanes are terminal
   arenaUpdateRunControls();
-  for (const side of ["a", "b"]) {
-    const lane = lanes[side];
-    if (!lane || !lane.task_id || lane.done) continue;
-    try {
-      await api("POST", `/api/tasks/${lane.task_id}/cancel`);
-      if (runGen !== ARENA.runGen) return;
-      lane.state = "CANCELLED";
-      lane.done = true;
-      lane.error = lane.error || "Cancelled locally; remote work stop is not provable.";
-      arenaPaintResult(side, lane);
-    } catch (e) {
-      if (runGen !== ARENA.runGen) return;
-      banner(`Could not cancel lane ${side.toUpperCase()}: ${e.message}`, "bad");
-    }
+  const hadTasks = !!(ARENA.lanes.a && ARENA.lanes.a.task_id) || !!(ARENA.lanes.b && ARENA.lanes.b.task_id);
+  if (!hadTasks) {
+    banner("Arena stop requested; will cancel tasks when dispatch returns.", "");
+    return;
   }
-  banner("Arena stop signalled for both lanes.", "");
+  await arenaCancelTasksFromLanes(ARENA.lanes, runGen);
+  if (runGen !== ARENA.runGen) return;
+  // Keep cancelPending until poll sees terminal states (cancel_signalled may be false initially).
+  if (S.tab === "arena" && !S.global) arenaStartPoll(runGen, S.viewGen);
+  else arenaUpdateRunControls();
+  banner("Arena stop requested; waiting for both lanes to finish cancelling.", "");
 }
 function arenaLane(side, routeId) {
   const label = side === "a" ? "Lane A" : "Lane B";
@@ -3483,9 +3598,17 @@ function arenaLane(side, routeId) {
 async function renderArena() {
   if (!S.project || S.global || S.tab !== "arena") return;
   const gen = ++S.viewGen;
-  arenaDestroyMounts();
-  ARENA.running = false;
-  ARENA.lanes = { a: null, b: null };
+  const pid = S.project.id;
+  // Preserve in-flight dual runs for this project; cancel + clear when the project changes.
+  if (ARENA.runPid && ARENA.runPid !== pid) {
+    const orphan = ARENA.lanes;
+    const orphanGen = ARENA.runGen;
+    arenaClearRunState();
+    arenaCancelTasksFromLanes(orphan, orphanGen); // fire-and-forget; do not block paint
+  }
+  const resume = !!(ARENA.runPid === pid && arenaRunActive()
+    && ARENA.lanes.a && ARENA.lanes.a.task_id && ARENA.lanes.b && ARENA.lanes.b.task_id);
+  arenaDestroyMounts(); // stops poll; resume restarts it below when the run is still active
   const savedDemo = localStorageGet("aesop.arena.demo");
   const savedA = localStorageGet("aesop.arena.a");
   const savedB = localStorageGet("aesop.arena.b");
@@ -3511,6 +3634,7 @@ async function renderArena() {
     try { localStorageSet("aesop.arena.demo", ARENA.demo); } catch { /* ignore */ }
     setActivity(catalog.find((x) => x.id === ARENA.demo)?.title || "");
     arenaMountDemo(ARENA.demo);
+    if (resume) arenaStartPoll(ARENA.runGen, gen);
     arenaRefreshCosts();
   } }, ...catalog.map((d) => h("option", { value: d.id, selected: d.id === ARENA.demo }, `${d.title} — ${d.subtitle}`)));
   const cur = catalog.find((x) => x.id === ARENA.demo) || catalog[0];
@@ -3533,6 +3657,12 @@ async function renderArena() {
       h("p", { class: "arena-note", id: "arenaCostNote", role: "note" }, ARENA.note || "")));
   if (gen !== S.viewGen) return;
   arenaMountDemo(ARENA.demo);
+  if (resume) {
+    arenaPaintResult("a", ARENA.lanes.a);
+    arenaPaintResult("b", ARENA.lanes.b);
+    arenaStartPoll(ARENA.runGen, gen);
+  }
+  arenaUpdateRunControls();
   await arenaRefreshCosts();
 }
 

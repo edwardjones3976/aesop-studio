@@ -162,6 +162,40 @@ class TestArenaUnit(unittest.TestCase):
         after = self.store.one("SELECT count(*) n FROM ledger")["n"]
         self.assertEqual(before, after)
 
+    def test_run_both_cancels_first_lane_if_second_send_fails(self):
+        """Partial dual-dispatch must not orphan the first task (Copilot medium)."""
+        root = self.tmp / "proj-partial"
+        root.mkdir()
+        sup = Supervisor(self.store)
+        svc = Services(self.store, sup)
+        p = svc.create_project("ArenaPartial", str(root), "simulated")
+        calls = {"n": 0}
+        real_send = svc.send
+        first_tid = {"id": None}
+
+        def flaky_send(pid, cid, text, attachment_ids, provider, confirm_switch=False):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise ValueError("second lane refused after first dispatch")
+            out = real_send(pid, cid, text, attachment_ids, provider, confirm_switch)
+            first_tid["id"] = out["task_id"]
+            return out
+
+        cancelled = []
+        real_cancel = sup.cancel
+
+        def track_cancel(tid):
+            cancelled.append(tid)
+            return real_cancel(tid)
+
+        svc.send = flaky_send
+        sup.cancel = track_cancel
+        with self.assertRaises(ValueError) as ctx:
+            arena.run_both(self.store, svc, p["id"], "simulated", "simulated", "alpine")
+        self.assertIn("second lane refused", str(ctx.exception))
+        self.assertEqual(cancelled, [first_tid["id"]])
+        self.assertTrue(first_tid["id"])
+
 
 class TestArenaHttp(unittest.TestCase):
     @classmethod
@@ -323,8 +357,61 @@ class TestArenaHttp(unittest.TestCase):
         # cost refresh must ignore stale success and error paths
         self.assertRegex(text, r"async function arenaRefreshCosts\(\)[\s\S]*?stale\(\)")
         self.assertRegex(text, r"catch \(e\) \{\s*if \(stale\(\)\) return;")
-        # run path also guards stale replies
-        self.assertRegex(text, r"async function arenaRunBoth\(\)[\s\S]*?stale\(\)")
+        # run path uses runGen (not viewGen) so tab remounts do not abandon a live dispatch
+        self.assertRegex(text, r"async function arenaRunBoth\(\)[\s\S]*?runGen !== ARENA\.runGen")
+
+    def test_app_js_honors_stop_while_run_pending(self):
+        """Stop before /arena/run returns must cancel returned task IDs (Codex/Copilot)."""
+        st, _, body = self.req("GET", "/app.js")
+        self.assertEqual(st, 200)
+        text = body.decode("utf-8")
+        self.assertIn("cancelPending", text)
+        self.assertIn("arenaCancelTasksFromLanes", text)
+        self.assertIn("cancel_signalled", text)
+        self.assertRegex(
+            text,
+            r"async function arenaStopBoth\(\)[\s\S]*?cancelPending\s*=\s*true[\s\S]*?"
+            r"will cancel tasks when dispatch returns",
+        )
+        self.assertRegex(
+            text,
+            r"async function arenaAcceptReturnedLanes\([\s\S]*?if \(ARENA\.cancelPending\)[\s\S]*?"
+            r"arenaCancelTasksFromLanes\(returned",
+        )
+        # Run both stays disabled while stopping; cancel_signalled false keeps the handle.
+        self.assertRegex(text, r"function arenaRunActive\(\)[\s\S]*?cancelPending")
+        self.assertRegex(text, r"cancel_signalled[\s\S]*?cancelSignalled\s*=\s*true")
+
+    def test_app_js_preserves_active_run_across_render(self):
+        """Tab switch/return must resume polling, not clear task IDs (Codex/Copilot)."""
+        st, _, body = self.req("GET", "/app.js")
+        self.assertEqual(st, 200)
+        text = body.decode("utf-8")
+        self.assertIn("runPid", text)
+        self.assertRegex(
+            text,
+            r"async function renderArena\(\)[\s\S]*?const resume = !!\(ARENA\.runPid === pid && arenaRunActive\(\)[\s\S]*?"
+            r"arenaStartPoll\(ARENA\.runGen, gen\)",
+        )
+        self.assertRegex(
+            text,
+            r"async function renderArena\(\)[\s\S]*?ARENA\.runPid !== pid[\s\S]*?arenaClearRunState\(\)",
+        )
+
+    def test_app_js_poll_follows_retry_and_serializes(self):
+        """retried_as follow + pollBusy serialization + HTTP errors ≠ task failed."""
+        st, _, body = self.req("GET", "/app.js")
+        self.assertEqual(st, 200)
+        text = body.decode("utf-8")
+        self.assertIn("pollBusy", text)
+        self.assertIn("retried_as", text)
+        self.assertRegex(text, r"async function arenaPollTick\([\s\S]*?pollBusy")
+        self.assertRegex(text, r"cp\.retried_as[\s\S]*?lane\.offset = 0")
+        self.assertRegex(text, r"Poll error \(retrying\)")
+        self.assertNotRegex(
+            text,
+            r"async function arenaPollTick\([\s\S]*?catch \(e\) \{[\s\S]*?lane\.state = \"FAILED\";\s*lane\.done = true;",
+        )
 
 
 if __name__ == "__main__":
